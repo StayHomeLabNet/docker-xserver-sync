@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docker-xserver-sync"
+version = "0.1.0"
+description = "Safe one-way deployment from local Docker projects to XServer"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Docker XServer Sync contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.8,<7"]
+ssh = ["paramiko>=3.5,<5"]
+dev = ["pytest>=8.3", "pytest-cov>=6"]
+
+[project.scripts]
+dxsync = "dxsync.cli:main"
+dxsync-gui = "dxsync.gui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dxsync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["dxsync"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
