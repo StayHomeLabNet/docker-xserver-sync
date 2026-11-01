@@ -45,4 +45,5 @@ uv run dxsync plan \
 ```
 
 製品全体の方針は[製品仕様](docs/product-spec.md)を参照してください。
+初回の入力項目は[初回設定ガイド](docs/setup-guide.md)を参照してください。
 

@@ -28,10 +28,17 @@ from .validation import ValidationIssue, validate_project
 
 
 SITE_LABELS = {
-    SiteType.WORDPRESS: "WordPress",
-    SiteType.LARAVEL: "Laravel",
-    SiteType.CUSTOM_PHP: "独自 PHP",
+    SiteType.WORDPRESS: "WordPress（wp-contentがある）",
+    SiteType.LARAVEL: "Laravel（artisanがある）",
+    SiteType.CUSTOM_PHP: "独自 PHP（上記以外）",
 }
+
+
+def _hint(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: #57606a; font-size: 11px;")
+    return label
 
 
 class ProjectDialog(QDialog):
@@ -52,40 +59,63 @@ class ProjectDialog(QDialog):
         self.resize(860, 560)
 
         layout = QVBoxLayout(self)
+        intro_row = QHBoxLayout()
+        intro = QLabel("分からない値は、右の「入力項目の確認方法」で場所と例を確認できます。")
+        intro.setWordWrap(True)
+        intro_row.addWidget(intro, 1)
+        help_button = QPushButton("入力項目の確認方法")
+        help_button.clicked.connect(self._show_setup_help)
+        intro_row.addWidget(help_button)
+        layout.addLayout(intro_row)
+
         form = QFormLayout()
         self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("例: example.com テスト")
         self.site_combo = QComboBox()
         for site_type, label in SITE_LABELS.items():
             self.site_combo.addItem(label, site_type.value)
+        self.site_help = _hint("")
+        self.site_combo.currentIndexChanged.connect(self._site_changed)
         self.domain_edit = QLineEdit()
+        self.domain_edit.setPlaceholderText("例: example.com")
         self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("例: SERVER_ID.xsrv.jp")
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(10022)
         self.user_edit = QLineEdit()
+        self.user_edit.setPlaceholderText("通常はXServerのサーバーID")
         self.fingerprint_edit = QLineEdit()
-        self.fingerprint_edit.setPlaceholderText("SHA256:...")
+        self.fingerprint_edit.setPlaceholderText("サーバーパネルからSHA256:...をコピー")
         self.key_edit = QLineEdit()
+        self.key_edit.setPlaceholderText(".pubではない秘密鍵ファイル")
         key_row = QHBoxLayout()
         key_row.addWidget(self.key_edit, 1)
         key_button = QPushButton("選択…")
         key_button.clicked.connect(self._browse_key)
         key_row.addWidget(key_button)
 
-        form.addRow("表示名", self.name_edit)
-        form.addRow("サイト種別", self.site_combo)
-        form.addRow("対象ドメイン", self.domain_edit)
+        form.addRow("プロジェクト名", self.name_edit)
+        form.addRow("", _hint("自分が見分けるための名前です。XServerの設定には影響しません。"))
+        form.addRow("サイトの種類", self.site_combo)
+        form.addRow("", self.site_help)
+        form.addRow("公開ドメイン", self.domain_edit)
+        form.addRow("", _hint("テスト先があるドメイン名。https://は付けません。"))
         form.addRow("SSHホスト", self.host_edit)
+        form.addRow("", _hint("XServer サーバーパネル → SSH設定 → SSHソフト設定で確認します。"))
         form.addRow("SSHポート", self.port_spin)
         form.addRow("SSHユーザー", self.user_edit)
-        form.addRow("ホスト鍵", self.fingerprint_edit)
+        form.addRow("", _hint("通常はサーバーIDです。独自ドメイン名ではありません。"))
+        form.addRow("接続先の確認コード", self.fingerprint_edit)
+        form.addRow("", _hint("SSHソフト設定に表示されるSHA256:から始まるホスト鍵フィンガープリントです。"))
         form.addRow("秘密鍵ファイル", key_row)
+        form.addRow("", _hint("XServerへ公開鍵を登録したときにPCへ保存した秘密鍵。.pubファイルではありません。"))
         layout.addLayout(form)
 
         mapping_header = QHBoxLayout()
-        mapping_header.addWidget(QLabel("パスマッピング"))
+        mapping_header.addWidget(QLabel("同期するフォルダの組み合わせ"))
         mapping_header.addStretch(1)
-        add_mapping = QPushButton("追加")
+        add_mapping = QPushButton("PC側フォルダを追加…")
         add_mapping.clicked.connect(self._add_mapping)
         remove_mapping = QPushButton("選択行を削除")
         remove_mapping.clicked.connect(self._remove_mapping)
@@ -94,12 +124,21 @@ class ProjectDialog(QDialog):
         layout.addLayout(mapping_header)
 
         self.mapping_table = QTableWidget(0, 3)
-        self.mapping_table.setHorizontalHeaderLabels(("名前", "ローカルルート", "リモートルート"))
+        self.mapping_table.setHorizontalHeaderLabels(
+            ("用途", "PC側の同期元フォルダ", "XServer側のテストフォルダ（絶対パス）")
+        )
         header = self.mapping_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         layout.addWidget(self.mapping_table, 1)
+
+        mapping_help = _hint(
+            "PC側はcompose.ymlのvolumesでコロンより左のフォルダを選びます。"
+            "XServer側は例: /home/SERVER_ID/example.com/public_html/sync-test。"
+            "テストフォルダは事前に作成してください。"
+        )
+        layout.addWidget(mapping_help)
 
         note = QLabel(
             "パスフレーズは保存しません。Laravelはアプリ本体とpublicを別マッピングにできます。"
@@ -115,8 +154,36 @@ class ProjectDialog(QDialog):
 
         if project:
             self._load(project)
-        else:
-            self._append_mapping("public", "", "")
+        self._site_changed(self.site_combo.currentIndex())
+
+    def _site_changed(self, index: int) -> None:
+        site_type = SiteType(self.site_combo.itemData(index))
+        messages = {
+            SiteType.WORDPRESS: "フォルダ内にwp-content、wp-admin、wp-includesがあるサイト向けです。",
+            SiteType.LARAVEL: "フォルダ内にartisan、app、routes、publicがあるサイト向けです。",
+            SiteType.CUSTOM_PHP: "WordPressでもLaravelでもないPHPサイト向けです。",
+        }
+        self.site_help.setText(messages[site_type])
+
+    def _show_setup_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "入力項目の確認方法",
+            "1. サイトの種類\n"
+            "   wp-contentがあればWordPress、artisanがあればLaravel、それ以外は独自PHP。\n\n"
+            "2. PC側フォルダ\n"
+            "   compose.ymlの volumes: ./src:/var/www/html なら ./src を選択。\n\n"
+            "3. SSHホスト・ユーザー\n"
+            "   XServer サーバーパネル → SSH設定 → SSHソフト設定で確認。\n"
+            "   一般にホストはSERVER_ID.xsrv.jp、ユーザーはSERVER_ID、ポートは10022。\n\n"
+            "4. 接続先の確認コード\n"
+            "   同じ画面にあるSHA256:から始まるホスト鍵をコピー。\n\n"
+            "5. 秘密鍵\n"
+            "   公開鍵登録時に保存した秘密鍵。.pubは選ばない。\n\n"
+            "6. XServer側テストフォルダ\n"
+            "   例: /home/SERVER_ID/example.com/public_html/sync-test\n"
+            "   SSHで対象フォルダへ移動し、pwdを実行すると絶対パスを確認できます。",
+        )
 
     def _load(self, project: Project) -> None:
         self.name_edit.setText(project.name)
@@ -153,7 +220,17 @@ class ProjectDialog(QDialog):
 
     def _add_mapping(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "ローカルルートを選択")
-        self._append_mapping(f"mapping-{self.mapping_table.rowCount() + 1}", directory, "")
+        if not directory:
+            return
+        default_name = Path(directory).name or f"mapping-{self.mapping_table.rowCount() + 1}"
+        self._append_mapping(default_name, directory, "")
+        row = self.mapping_table.rowCount() - 1
+        remote_item = self.mapping_table.item(row, 2)
+        if remote_item:
+            remote_item.setToolTip(
+                "例: /home/SERVER_ID/example.com/public_html/sync-test"
+            )
+        self.mapping_table.editItem(remote_item)
 
     def _remove_mapping(self) -> None:
         rows = sorted({index.row() for index in self.mapping_table.selectedIndexes()}, reverse=True)

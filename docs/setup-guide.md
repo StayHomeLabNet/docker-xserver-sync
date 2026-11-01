@@ -1,0 +1,91 @@
+# 初回設定ガイド
+
+## 1. サイトの種類
+
+ローカルフォルダの中身で選ぶ。
+
+| 選択肢 | 見分け方 |
+|---|---|
+| WordPress | `wp-content`、`wp-admin`、`wp-includes`がある |
+| Laravel | `artisan`、`app`、`routes`、`public`がある |
+| 独自PHP | 上記以外のPHPサイト |
+
+この選択により、`uploads`や`storage`などXServer側で更新されるフォルダの保護ルールが変わる。
+
+## 2. PC側の同期元フォルダ
+
+Dockerコンテナ内のパスではなく、PC上の実際のフォルダを選ぶ。
+
+`compose.yml`または`docker-compose.yml`に次の記述がある場合:
+
+```yaml
+volumes:
+  - ./src:/var/www/html
+```
+
+選択するのは左側の`./src`。右側の`/var/www/html`ではない。
+
+WordPressなら通常は`wp-content`が見えるフォルダ、Laravelなら`artisan`が見えるフォルダを選ぶ。
+
+## 3. SSHホストとSSHユーザー
+
+XServerのサーバーパネルで「SSH設定」→「SSHソフト設定」を開いて確認する。
+
+一般的な例:
+
+```text
+SSHホスト: SERVER_ID.xsrv.jp
+SSHユーザー: SERVER_ID
+SSHポート: 10022
+```
+
+独自ドメインではなく、SSH設定画面に表示されたホスト名を入力する。
+
+## 4. ホスト鍵フィンガープリント
+
+接続先が正しいXServerであることを確認する値。サーバーパネルの「SSH設定」→「SSHソフト設定」にある`SHA256:`から始まる文字列を、そのままコピーする。
+
+例:
+
+```text
+SHA256:abcdefghijklmnopqrstuvwxyz1234567890ABCDE
+```
+
+アプリはこの値が一致しないサーバーへの接続を拒否する。
+
+## 5. SSH秘密鍵
+
+XServerへ公開鍵を登録した際にPCへ保存した秘密鍵ファイルを選ぶ。
+
+- `SERVER_ID.key`、`id_ed25519`などのファイル
+- `.pub`で終わる公開鍵は選ばない
+- 秘密鍵の内容はSQLiteへ保存しない
+- パスフレーズは実行時だけ入力し、保存しない
+
+## 6. XServer側のテストフォルダ
+
+本番の`public_html`直下ではなく、先にテスト専用フォルダを用意する。
+
+例:
+
+```text
+/home/SERVER_ID/example.com/public_html/sync-test
+```
+
+正確な絶対パスはSSH接続後、対象フォルダへ移動して`pwd`を実行すると確認できる。
+
+```bash
+cd example.com/public_html/sync-test
+pwd
+```
+
+読み取り専用ドライランはフォルダを作成しない。テストフォルダはXServerのファイルマネージャーまたはSSHで事前に作成する。
+
+## 最初の接続試験
+
+1. XServer側に空の`sync-test`フォルダを作る。
+2. PC側は小さなテスト用フォルダを選ぶ。
+3. プロジェクトを保存する。
+4. 「読み取り専用ドライラン」を実行する。
+5. XServer側に新しいファイルが作られていないことを確認する。
+

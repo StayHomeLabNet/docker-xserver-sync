@@ -335,10 +335,10 @@ class MainWindow(QMainWindow):
         self.site_combo = QComboBox()
         for site_type, label in SITE_LABELS.items():
             self.site_combo.addItem(label, site_type.value)
-        controls_layout.addWidget(QLabel("サイト種別"))
+        controls_layout.addWidget(QLabel("サイトの種類"))
         controls_layout.addWidget(self.site_combo)
 
-        controls_layout.addWidget(QLabel("マッピング"))
+        controls_layout.addWidget(QLabel("同期対象"))
         self.mapping_combo = QComboBox()
         self.mapping_combo.currentIndexChanged.connect(self._mapping_selected)
         controls_layout.addWidget(self.mapping_combo)
@@ -357,7 +357,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.scan_button)
         layout.addWidget(controls)
 
-        connection = QGroupBox("XServer接続（読み取り専用ドライラン）")
+        connection = QGroupBox("XServer接続（読み取り専用・書き込みなし）")
         connection_layout = QGridLayout(connection)
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("SERVER_ID.xsrv.jp")
@@ -391,9 +391,9 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.user_edit, 0, 5)
         connection_layout.addWidget(QLabel("リモートルート"), 1, 0)
         connection_layout.addWidget(self.remote_root_edit, 1, 1, 1, 5)
-        connection_layout.addWidget(QLabel("ホスト鍵"), 2, 0)
+        connection_layout.addWidget(QLabel("接続先の確認コード"), 2, 0)
         connection_layout.addWidget(self.fingerprint_edit, 2, 1, 1, 5)
-        connection_layout.addWidget(QLabel("秘密鍵"), 3, 0)
+        connection_layout.addWidget(QLabel("秘密鍵ファイル"), 3, 0)
         connection_layout.addWidget(self.key_edit, 3, 1, 1, 3)
         connection_layout.addWidget(key_browse, 3, 4)
         connection_layout.addWidget(self.passphrase_edit, 3, 5)
