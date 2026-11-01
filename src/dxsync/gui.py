@@ -45,6 +45,13 @@ from .models import ChangeType, FileRecord, Project, ScanResult, SiteType, SyncM
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
 from .history_dialog import HistoryDialog
+from .approval_dialog import BackupConfirmationDialog, DeploymentApprovalDialog
+from .backup import BackupResult, RemoteBackupEngine
+from .deployment import (
+    DeploymentAuthorization,
+    DeploymentResult,
+    RemoteDeploymentEngine,
+)
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
@@ -52,7 +59,7 @@ from .revalidation import PlanRevalidator, RevalidationResult
 from .rules import PathRules
 from .scanner import LocalScanner
 from .service import DryRunResult, DryRunService
-from .storage import ProjectStore, StoredPlan
+from .storage import BackupRecord, ProjectStore, StoredPlan
 
 
 SITE_LABELS = {
@@ -273,6 +280,130 @@ class RevalidationWorker(QObject):
                 client.close()
 
 
+class BackupWorker(QObject):
+    completed = Signal(object)
+    blocked = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        stored: StoredPlan,
+        project: Project,
+        mapping: SyncMapping,
+        passphrase: str | None,
+        backup_root: str,
+    ) -> None:
+        super().__init__()
+        self.stored = stored
+        self.project = project
+        self.mapping = mapping
+        self.passphrase = passphrase
+        self.backup_root = backup_root
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            revalidation = PlanRevalidator().revalidate(
+                stored=self.stored,
+                project=self.project,
+                mapping=self.mapping,
+                sftp=sftp,
+            )
+            if not revalidation.valid:
+                self.blocked.emit(revalidation)
+                return
+            result = RemoteBackupEngine().create_backup(
+                sftp=sftp,
+                plan=self.stored.plan,
+                project_id=self.project.project_id,
+                remote_root=self.mapping.remote_root,
+                backup_root=self.backup_root,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if sftp is not None:
+                sftp.close()
+            if client is not None:
+                client.close()
+
+
+class DeployWorker(QObject):
+    completed = Signal(object)
+    blocked = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        stored: StoredPlan,
+        project: Project,
+        mapping: SyncMapping,
+        passphrase: str | None,
+        authorization: DeploymentAuthorization,
+    ) -> None:
+        super().__init__()
+        self.stored = stored
+        self.project = project
+        self.mapping = mapping
+        self.passphrase = passphrase
+        self.authorization = authorization
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            if not self.stored.staging_path:
+                raise RuntimeError("同期計画にステージングファイルがありません")
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            revalidation = PlanRevalidator().revalidate(
+                stored=self.stored,
+                project=self.project,
+                mapping=self.mapping,
+                sftp=sftp,
+            )
+            if not revalidation.valid:
+                self.blocked.emit(revalidation)
+                return
+            result = RemoteDeploymentEngine().deploy(
+                sftp=sftp,
+                plan=self.stored.plan,
+                staging_root=Path(self.stored.staging_path),
+                remote_root=self.mapping.remote_root,
+                authorization=self.authorization,
+                file_mode=self.mapping.file_mode,
+                directory_mode=self.mapping.directory_mode,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if sftp is not None:
+                sftp.close()
+            if client is not None:
+                client.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: ProjectStore | None = None) -> None:
         super().__init__()
@@ -294,6 +425,8 @@ class MainWindow(QMainWindow):
         self._projects: dict[str, Project] = {}
         self._current_project: Project | None = None
         self._current_plan_id: str | None = None
+        self._validated_plan_id: str | None = None
+        self._current_backup_id: str | None = None
         self._current_operation_id: str | None = None
 
         root = QWidget()
@@ -387,6 +520,12 @@ class MainWindow(QMainWindow):
         self.revalidate_button = QPushButton("計画を再検証")
         self.revalidate_button.clicked.connect(self._start_revalidation)
         self.revalidate_button.setEnabled(False)
+        self.backup_button = QPushButton("バックアップを作成")
+        self.backup_button.clicked.connect(self._start_backup)
+        self.backup_button.setEnabled(False)
+        self.deploy_button = QPushButton("承認付き同期")
+        self.deploy_button.clicked.connect(self._start_deployment)
+        self.deploy_button.setEnabled(False)
 
         connection_layout.addWidget(QLabel("ホスト"), 0, 0)
         connection_layout.addWidget(self.host_edit, 0, 1)
@@ -402,8 +541,10 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.key_edit, 3, 1, 1, 3)
         connection_layout.addWidget(key_browse, 3, 4)
         connection_layout.addWidget(self.passphrase_edit, 3, 5)
-        connection_layout.addWidget(self.revalidate_button, 4, 3)
-        connection_layout.addWidget(self.dry_run_button, 4, 4, 1, 2)
+        connection_layout.addWidget(self.revalidate_button, 4, 2)
+        connection_layout.addWidget(self.backup_button, 4, 3)
+        connection_layout.addWidget(self.deploy_button, 4, 4)
+        connection_layout.addWidget(self.dry_run_button, 4, 5)
         layout.addWidget(connection)
 
         self.summary = QLabel("フォルダを選択して検査してください。")
@@ -445,6 +586,7 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _project_selected(self, index: int) -> None:
+        self._reset_write_state()
         project_id = self.project_combo.itemData(index) if index >= 0 else None
         self._current_project = self._projects.get(project_id)
         has_project = self._current_project is not None
@@ -452,7 +594,7 @@ class MainWindow(QMainWindow):
         self.delete_project_button.setEnabled(has_project)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
-        if self._current_project is not None and not result.has_blocking_issues:
+        if self._current_project is not None:
             project = self._current_project
             site_index = self.site_combo.findData(project.site_type.value)
             self.site_combo.setCurrentIndex(max(site_index, 0))
@@ -469,6 +611,7 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _mapping_selected(self, index: int) -> None:
+        self._reset_write_state()
         mapping = self._selected_mapping()
         if mapping is not None:
             self.path_edit.setText(mapping.local_root)
@@ -489,9 +632,35 @@ class MainWindow(QMainWindow):
             ]
             if matching:
                 self._current_plan_id = matching[-1].plan.plan_id
+        if self._validated_plan_id != self._current_plan_id:
+            self._validated_plan_id = None
+            self._current_backup_id = None
         self.revalidate_button.setEnabled(
             self._current_plan_id is not None and self._thread is None
         )
+        self._update_action_buttons()
+
+    def _reset_write_state(self) -> None:
+        self._validated_plan_id = None
+        self._current_backup_id = None
+        if hasattr(self, "backup_button"):
+            self.backup_button.setEnabled(False)
+        if hasattr(self, "deploy_button"):
+            self.deploy_button.setEnabled(False)
+
+    def _update_action_buttons(self) -> None:
+        idle = self._thread is None
+        validated = (
+            self._current_plan_id is not None
+            and self._validated_plan_id == self._current_plan_id
+        )
+        self.backup_button.setEnabled(idle and validated and self._current_backup_id is None)
+        self.deploy_button.setEnabled(idle and validated and self._current_backup_id is not None)
+
+    def _backup_root(self) -> str:
+        if self._current_project is None:
+            raise RuntimeError("プロジェクトが選択されていません")
+        return f"/home/{self._current_project.ssh_username}/.dxsync/backups"
 
     def _selected_mapping(self) -> SyncMapping | None:
         if self._current_project is None:
@@ -545,7 +714,9 @@ class MainWindow(QMainWindow):
             project_id=self._current_project.project_id,
             mapping_id=mapping.mapping_id,
             kind=kind,
-            details={"mode": "read_only"},
+            details={
+                "mode": "write" if kind in {"backup", "deployment"} else "read_only"
+            },
         )
         self._current_operation_id = operation.operation_id
 
@@ -607,6 +778,7 @@ class MainWindow(QMainWindow):
     def _start_dry_run(self) -> None:
         if self._thread is not None:
             return
+        self._reset_write_state()
         root = Path(self.path_edit.text().strip()).expanduser()
         key_path = Path(self.key_edit.text().strip()).expanduser()
         required = {
@@ -692,6 +864,128 @@ class MainWindow(QMainWindow):
         self._worker = worker
         thread.start()
 
+    @Slot()
+    def _start_backup(self) -> None:
+        if self._thread is not None or self._validated_plan_id != self._current_plan_id:
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        stored = self.store.get_plan(self._current_plan_id or "")
+        if project is None or mapping is None or stored is None:
+            return
+        update_count = stored.plan.counts()[ChangeType.UPDATE]
+        confirmation = BackupConfirmationDialog(
+            update_count=update_count,
+            backup_root=self._backup_root(),
+            parent=self,
+        )
+        if confirmation.exec() != QDialog.Accepted:
+            return
+
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.revalidate_button.setEnabled(False)
+        self.backup_button.setEnabled(False)
+        self.deploy_button.setEnabled(False)
+        self.summary.setText("バックアップ作成中… 公開ファイルは変更しません。")
+        self._begin_operation("backup")
+        thread = QThread(self)
+        worker = BackupWorker(
+            stored=stored,
+            project=project,
+            mapping=mapping,
+            passphrase=self.passphrase_edit.text() or None,
+            backup_root=self._backup_root(),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._backup_completed)
+        worker.blocked.connect(self._backup_blocked)
+        worker.failed.connect(self._backup_failed)
+        worker.completed.connect(thread.quit)
+        worker.blocked.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    @Slot()
+    def _start_deployment(self) -> None:
+        if (
+            self._thread is not None
+            or self._validated_plan_id != self._current_plan_id
+            or self._current_backup_id is None
+        ):
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        stored = self.store.get_plan(self._current_plan_id or "")
+        backups = {
+            backup.backup_id: backup for backup in self.store.list_backups(project.project_id)
+        } if project else {}
+        backup = backups.get(self._current_backup_id)
+        if (
+            project is None
+            or mapping is None
+            or stored is None
+            or backup is None
+            or backup.plan_id != stored.plan.plan_id
+        ):
+            QMessageBox.warning(self, "同期できません", "この計画に対応するバックアップがありません。")
+            return
+        counts = stored.plan.counts()
+        upload_bytes = sum(
+            change.local.size or 0
+            for change in stored.plan.changes
+            if change.change_type in {ChangeType.ADD, ChangeType.UPDATE}
+            and change.local is not None
+        )
+        approval = DeploymentApprovalDialog(
+            domain=project.domain,
+            remote_root=mapping.remote_root,
+            add_count=counts[ChangeType.ADD],
+            update_count=counts[ChangeType.UPDATE],
+            upload_bytes=upload_bytes,
+            backup_id=backup.backup_id,
+            parent=self,
+        )
+        if approval.exec() != QDialog.Accepted:
+            return
+
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.revalidate_button.setEnabled(False)
+        self.backup_button.setEnabled(False)
+        self.deploy_button.setEnabled(False)
+        self.summary.setText("承認済み同期を実行中… 一時転送と検証を行っています。")
+        self._begin_operation("deployment")
+        thread = QThread(self)
+        worker = DeployWorker(
+            stored=stored,
+            project=project,
+            mapping=mapping,
+            passphrase=self.passphrase_edit.text() or None,
+            authorization=DeploymentAuthorization(
+                plan_id=stored.plan.plan_id,
+                backup_plan_id=backup.plan_id,
+                remote_root=mapping.remote_root,
+                approved=True,
+            ),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._deployment_completed)
+        worker.blocked.connect(self._deployment_blocked)
+        worker.failed.connect(self._deployment_failed)
+        worker.completed.connect(thread.quit)
+        worker.blocked.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
     @Slot(object)
     def _scan_completed(self, result: ScanResult) -> None:
         site_type = SiteType(self.site_combo.currentData())
@@ -715,7 +1009,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _dry_run_completed(self, result: DryRunResult) -> None:
         self.table_model.set_plan(result)
-        if self._current_project is not None:
+        if self._current_project is not None and not result.has_blocking_issues:
             staging_path = str(result.staging.root) if result.staging else None
             self.store.save_plan(
                 self._current_project.project_id,
@@ -730,7 +1024,7 @@ class MainWindow(QMainWindow):
             set(result.local.skipped_protected_paths) | set(result.remote.skipped_protected_paths)
         )
         status = "実行不可" if result.has_blocking_issues else "確認可能"
-        persisted = " / 計画保存済み（5分間有効）" if self._current_project else ""
+        persisted = " / 計画保存済み（5分間有効）" if self._current_plan_id else ""
         self._finish_operation(
             "blocked" if result.has_blocking_issues else "succeeded",
             details={
@@ -757,6 +1051,9 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _revalidation_completed(self, result: RevalidationResult) -> None:
         if result.valid:
+            self._validated_plan_id = self._current_plan_id
+            self._current_backup_id = None
+            self._update_action_buttons()
             self._finish_operation("succeeded", details={"valid": True})
             self.summary.setText(
                 "計画の再検証に成功しました。設定、ローカル、XServer、ステージングは一致しています。"
@@ -766,6 +1063,7 @@ class MainWindow(QMainWindow):
             self.store.set_plan_status(self._current_plan_id, "invalid")
         cleanup_stale_staging(self.store, self.staging_parent)
         self._current_plan_id = None
+        self._reset_write_state()
         self.revalidate_button.setEnabled(False)
         details = "\n".join(f"• {reason}" for reason in result.reasons)
         self._finish_operation(
@@ -780,6 +1078,102 @@ class MainWindow(QMainWindow):
         self._finish_operation("failed", error=message)
         self.summary.setText("再検証を完了できませんでした。計画は実行されていません。")
         QMessageBox.critical(self, "再検証エラー", message)
+
+    @Slot(object)
+    def _backup_completed(self, result: BackupResult) -> None:
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None or self._current_plan_id is None:
+            self._finish_operation("failed", error="Project selection changed during backup")
+            return
+        backup = BackupRecord(
+            backup_id=result.backup_id,
+            project_id=project.project_id,
+            mapping_id=mapping.mapping_id,
+            plan_id=self._current_plan_id,
+            backup_directory=result.backup_directory,
+            manifest_path=result.manifest_path,
+            created_at=result.created_at,
+            file_count=len(result.files),
+            total_bytes=result.total_bytes,
+        )
+        self.store.save_backup(backup)
+        self._current_backup_id = backup.backup_id
+        self._finish_operation(
+            "succeeded",
+            details={
+                "backup_id": backup.backup_id,
+                "file_count": backup.file_count,
+                "total_bytes": backup.total_bytes,
+            },
+        )
+        self.summary.setText(
+            f"バックアップ完了 / {backup.file_count}ファイル / {backup.total_bytes:,} bytes。"
+            "承認付き同期へ進めます。"
+        )
+
+    @Slot(object)
+    def _backup_blocked(self, result: RevalidationResult) -> None:
+        if self._current_plan_id:
+            self.store.set_plan_status(self._current_plan_id, "invalid")
+        self._finish_operation(
+            "blocked", details={"reasons": list(result.reasons)}
+        )
+        self._reset_write_state()
+        self.summary.setText("再検証に失敗したためバックアップを作成しませんでした。")
+        QMessageBox.warning(self, "バックアップを中止", "\n".join(result.reasons))
+
+    @Slot(str)
+    def _backup_failed(self, message: str) -> None:
+        self._finish_operation("failed", error=message)
+        self._reset_write_state()
+        self.summary.setText("バックアップに失敗しました。公開ファイルは変更されていません。")
+        QMessageBox.critical(self, "バックアップエラー", message)
+
+    @Slot(object)
+    def _deployment_completed(self, result: DeploymentResult) -> None:
+        if self._current_plan_id:
+            self.store.set_plan_status(self._current_plan_id, "used")
+        self._finish_operation(
+            "succeeded",
+            details={
+                "plan_id": result.plan_id,
+                "file_count": len(result.files),
+                "total_bytes": result.total_bytes,
+                "backup_id": self._current_backup_id,
+            },
+        )
+        self.summary.setText(
+            f"同期完了 / {len(result.files)}ファイル / {result.total_bytes:,} bytes。"
+            "転送後ハッシュを確認済みです。"
+        )
+        self._current_plan_id = None
+        self._reset_write_state()
+        cleanup_stale_staging(self.store, self.staging_parent)
+
+    @Slot(object)
+    def _deployment_blocked(self, result: RevalidationResult) -> None:
+        if self._current_plan_id:
+            self.store.set_plan_status(self._current_plan_id, "invalid")
+        self._finish_operation(
+            "blocked", details={"reasons": list(result.reasons)}
+        )
+        self._current_plan_id = None
+        self._reset_write_state()
+        cleanup_stale_staging(self.store, self.staging_parent)
+        self.summary.setText("再検証に失敗したため同期を実行しませんでした。")
+        QMessageBox.warning(self, "同期を中止", "\n".join(result.reasons))
+
+    @Slot(str)
+    def _deployment_failed(self, message: str) -> None:
+        if self._current_plan_id:
+            self.store.set_plan_status(self._current_plan_id, "invalid")
+        self._finish_operation("failed", error=message)
+        self._current_plan_id = None
+        self._reset_write_state()
+        cleanup_stale_staging(self.store, self.staging_parent)
+        self.summary.setText("同期に失敗しました。適用済みファイルは可能な限り復元されました。")
+        QMessageBox.critical(self, "同期エラー", message)
 
     @Slot()
     def _scan_finished(self) -> None:
