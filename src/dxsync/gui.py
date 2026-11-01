@@ -59,7 +59,12 @@ from .deployment import (
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
-from .recovery import RecoveryScanResult, scan_recovery_artifacts
+from .recovery import (
+    RecoveryAnalysisResult,
+    analyze_recovery_artifacts,
+    scan_recovery_artifacts,
+)
+from .recovery_dialog import RecoveryAnalysisDialog
 from .revalidation import PlanRevalidator, RevalidationResult
 from .restore import RestoreAuthorization, RestoreResult, RemoteRestoreEngine
 from .rules import PathRules
@@ -443,7 +448,7 @@ class RecoveryScanWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
-            self.completed.emit(scan_recovery_artifacts(sftp, self.mapping.remote_root))
+            self.completed.emit(analyze_recovery_artifacts(sftp, self.mapping.remote_root))
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -1406,28 +1411,20 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "同期エラー", message)
 
     @Slot(object)
-    def _recovery_scan_completed(self, result: RecoveryScanResult) -> None:
+    def _recovery_scan_completed(self, result: RecoveryAnalysisResult) -> None:
         self._finish_operation(
-            "blocked" if result.temporary_files or result.issues else "succeeded",
+            "blocked" if result.artifacts or result.issues else "succeeded",
             details={
-                "temporary_files": list(result.temporary_files),
+                "temporary_files": [item.temporary_path for item in result.artifacts],
                 "issues": list(result.issues),
             },
         )
-        if result.temporary_files:
-            preview = "\n".join(result.temporary_files[:20])
-            suffix = "\n…" if len(result.temporary_files) > 20 else ""
+        if result.artifacts:
             self.summary.setText(
-                f"残存一時ファイルを{len(result.temporary_files)}件検出しました。"
+                f"残存一時ファイルを{len(result.artifacts)}件検出しました。"
                 "自動削除は行っていません。"
             )
-            QMessageBox.warning(
-                self,
-                "復旧確認が必要です",
-                "次の一時ファイルが残っています。同期・復元を続ける前に内容を確認してください。\n\n"
-                + preview
-                + suffix,
-            )
+            RecoveryAnalysisDialog(result, self).exec()
         elif result.issues:
             self.summary.setText("安全性確認で読み取れない場所がありました。")
             QMessageBox.warning(self, "確認未完了", "\n".join(result.issues))

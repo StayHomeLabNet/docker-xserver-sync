@@ -1,7 +1,12 @@
 import stat
+import io
 from dataclasses import dataclass
 
-from dxsync.recovery import is_dxsync_temporary_name, scan_recovery_artifacts
+from dxsync.recovery import (
+    analyze_recovery_artifacts,
+    is_dxsync_temporary_name,
+    scan_recovery_artifacts,
+)
 
 
 @dataclass
@@ -12,6 +17,11 @@ class Entry:
 
 class MemorySftp:
     def __init__(self) -> None:
+        self.files = {
+            "/home/user/site/index.php": b"published",
+            "/home/user/site/index.php.dxsync-plan-abc.new": b"published",
+            "/home/user/site/nested/old.php.dxsync-restore-plan.old": b"old",
+        }
         self.entries = {
             "/home/user/site": [
                 Entry("nested", stat.S_IFDIR | 0o755),
@@ -25,6 +35,14 @@ class MemorySftp:
 
     def listdir_attr(self, path: str):
         return self.entries[path]
+
+    def open(self, path: str, mode: str = "r"):
+        return io.BytesIO(self.files[path])
+
+    def stat(self, path: str):
+        if path in self.files:
+            return type("RemoteStat", (), {"st_mode": stat.S_IFREG | 0o600})()
+        raise FileNotFoundError(path)
 
 
 def test_temporary_name_detection_is_narrow() -> None:
@@ -41,3 +59,11 @@ def test_recovery_scan_lists_only_dxsync_temporary_files() -> None:
         "nested/old.php.dxsync-restore-plan.old",
     )
     assert result.issues == ()
+
+
+def test_recovery_analysis_compares_temporary_and_destination_hashes() -> None:
+    result = analyze_recovery_artifacts(MemorySftp(), "/home/user/site")
+    by_path = {item.temporary_path: item for item in result.artifacts}
+    assert by_path["index.php.dxsync-plan-abc.new"].assessment == "公開済みコピーと一致"
+    assert by_path["index.php.dxsync-plan-abc.new"].destination_sha256 is not None
+    assert by_path["nested/old.php.dxsync-restore-plan.old"].assessment == "公開ファイルがなく旧退避だけ存在"

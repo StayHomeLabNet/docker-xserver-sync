@@ -13,9 +13,10 @@ authors = [{ name = "Docker XServer Sync contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
-gui = ["PySide6-Essentials>=6.8,<7"]
+gui = ["PySide6>=6.8,<6.9"]
 ssh = ["paramiko>=3.5,<5"]
 dev = ["pytest>=8.3", "pytest-cov>=6"]
+build = ["nuitka>=2.6,<3", "ordered-set>=4.1", "zstandard>=0.23"]
 
 [project.scripts]
 dxsync = "dxsync.cli:main"

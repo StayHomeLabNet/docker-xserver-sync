@@ -49,3 +49,13 @@ uv run dxsync plan \
 製品全体の方針は[製品仕様](docs/product-spec.md)を参照してください。
 初回の入力項目は[初回設定ガイド](docs/setup-guide.md)を参照してください。
 
+## macOSアプリのビルド
+
+Apple Silicon搭載Macでは次のコマンドで、テスト・コンパイル・起動確認・ZIP作成まで実行できます。
+
+```bash
+zsh scripts/build-app.sh
+```
+
+ビルド環境はOneDriveのプレースホルダー化を避けるため`/private/tmp`へ作成され、完成物だけが`dist/Docker XServer Sync-macOS-arm64.zip`へ保存されます。現在のビルドは自己署名・公証前の開発版です。
+
