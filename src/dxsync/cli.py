@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import sys
 from pathlib import Path
 from typing import Sequence
 
 from .models import FileRecord, SiteType
 from .planner import PlanBuilder
 from .presets import get_preset
-from .remote import connect_sftp
+from .remote import HostKeyMismatchError, RemoteDependencyError, RemoteScanError, connect_sftp
 from .scanner import LocalScanner
 from .service import DryRunService
 
@@ -162,7 +163,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.handler(args)
+    try:
+        return args.handler(args)
+    except (
+        HostKeyMismatchError,
+        RemoteDependencyError,
+        RemoteScanError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
