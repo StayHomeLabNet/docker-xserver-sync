@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from dxsync.restore import RemoteRestoreEngine, RestoreError
+from dxsync.restore import RemoteRestoreEngine, RestoreAuthorization, RestoreError
 
 
 @dataclass
@@ -28,10 +28,12 @@ class MemoryWriter(io.BytesIO):
 class MemorySftp:
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
+        self.modes: dict[str, int] = {}
+        self.fail_rename_to: str | None = None
 
     def stat(self, path: str):
         if path in self.files:
-            return RemoteStat(stat.S_IFREG | 0o600)
+            return RemoteStat(stat.S_IFREG | self.modes.get(path, 0o600))
         raise FileNotFoundError(path)
 
     def open(self, path: str, mode: str = "r"):
@@ -43,9 +45,18 @@ class MemorySftp:
 
     def remove(self, path: str) -> None:
         del self.files[path]
+        self.modes.pop(path, None)
 
     def rename(self, oldpath: str, newpath: str) -> None:
+        if newpath == self.fail_rename_to:
+            self.fail_rename_to = None
+            raise OSError("injected rename failure")
         self.files[newpath] = self.files.pop(oldpath)
+        if oldpath in self.modes:
+            self.modes[newpath] = self.modes.pop(oldpath)
+
+    def chmod(self, path: str, mode: int) -> None:
+        self.modes[path] = mode
 
 
 def digest(content: bytes) -> str:
@@ -79,6 +90,10 @@ def setup_files(current: bytes = b"new", backup: bytes = b"old"):
     return sftp, root, destination, backup_path, manifest_path
 
 
+def authorize(root: str, backup_id: str = "plan") -> RestoreAuthorization:
+    return RestoreAuthorization(backup_id, root, True)
+
+
 def test_restore_replaces_expected_current_file_with_verified_backup() -> None:
     sftp, root, destination, _, manifest_path = setup_files()
     result = RemoteRestoreEngine().restore(
@@ -86,6 +101,7 @@ def test_restore_replaces_expected_current_file_with_verified_backup() -> None:
         manifest_path=manifest_path,
         destination_root=root,
         expected_current_hashes={"index.php": digest(b"new")},
+        authorization=authorize(root),
     )
 
     assert sftp.files[destination] == b"old"
@@ -102,6 +118,7 @@ def test_restore_refuses_externally_modified_current_file() -> None:
             manifest_path=manifest_path,
             destination_root=root,
             expected_current_hashes={"index.php": digest(b"new")},
+            authorization=authorize(root),
         )
     assert sftp.files[destination] == b"external"
 
@@ -115,5 +132,78 @@ def test_restore_refuses_corrupt_backup() -> None:
             manifest_path=manifest_path,
             destination_root=root,
             expected_current_hashes={"index.php": digest(b"new")},
+            authorization=authorize(root),
         )
     assert sftp.files[destination] == b"new"
+
+
+def test_restore_requires_matching_one_time_authorization() -> None:
+    sftp, root, _, _, manifest_path = setup_files()
+    approval = RestoreAuthorization("wrong", root, True)
+    with pytest.raises(RestoreError, match="does not match the backup"):
+        RemoteRestoreEngine().restore(
+            sftp=sftp,
+            manifest_path=manifest_path,
+            destination_root=root,
+            expected_current_hashes={"index.php": digest(b"new")},
+            authorization=approval,
+        )
+
+    approval = authorize(root)
+    RemoteRestoreEngine().restore(
+        sftp=sftp,
+        manifest_path=manifest_path,
+        destination_root=root,
+        expected_current_hashes={"index.php": digest(b"new")},
+        authorization=approval,
+    )
+    with pytest.raises(RestoreError, match="already been used"):
+        RemoteRestoreEngine().restore(
+            sftp=sftp,
+            manifest_path=manifest_path,
+            destination_root=root,
+            expected_current_hashes={"index.php": digest(b"old")},
+            authorization=approval,
+        )
+
+
+def test_restore_rolls_back_all_files_when_later_publish_fails() -> None:
+    sftp = MemorySftp()
+    root = "/home/user/site"
+    backup_directory = "/home/user/.dxsync/backups/project/plan"
+    records = []
+    expected = {}
+    for name, current, backup in (
+        ("one.php", b"new-one", b"old-one"),
+        ("two.php", b"new-two", b"old-two"),
+    ):
+        destination = f"{root}/{name}"
+        backup_path = f"{backup_directory}/{name}"
+        sftp.files[destination] = current
+        sftp.files[backup_path] = backup
+        expected[name] = digest(current)
+        records.append({
+            "relative_path": name,
+            "sha256": digest(backup),
+            "size": len(backup),
+            "backup_path": backup_path,
+        })
+    manifest_path = backup_directory + "/.dxsync-backup-manifest.json"
+    sftp.files[manifest_path] = json.dumps({
+        "backup_id": "plan",
+        "source_root": root,
+        "files": records,
+    }).encode()
+    sftp.fail_rename_to = f"{root}/two.php"
+
+    with pytest.raises(OSError, match="injected rename failure"):
+        RemoteRestoreEngine().restore(
+            sftp=sftp,
+            manifest_path=manifest_path,
+            destination_root=root,
+            expected_current_hashes=expected,
+            authorization=authorize(root),
+        )
+    assert sftp.files[f"{root}/one.php"] == b"new-one"
+    assert sftp.files[f"{root}/two.php"] == b"new-two"
+    assert not any(".dxsync-restore" in path for path in sftp.files)

@@ -4,7 +4,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
 
-from dxsync.approval_dialog import BackupConfirmationDialog, DeploymentApprovalDialog
+from dxsync.approval_dialog import (
+    BackupConfirmationDialog,
+    DeploymentApprovalDialog,
+    RestoreApprovalDialog,
+)
 
 
 def app() -> QApplication:
@@ -40,9 +44,23 @@ def test_deployment_approval_requires_all_checks_and_exact_domain() -> None:
     dialog.backup_check.setChecked(True)
     dialog.domain_edit.setText("wrong.example.com")
     assert not dialog.apply_button.isEnabled()
-
     dialog.domain_edit.setText("example.com")
     assert dialog.apply_button.isEnabled()
-
     dialog.backup_check.setChecked(False)
     assert not dialog.apply_button.isEnabled()
+
+
+def test_restore_approval_requires_confirmation_and_exact_domain() -> None:
+    app()
+    dialog = RestoreApprovalDialog(
+        domain="example.com",
+        remote_root="/home/user/site",
+        backup_id="backup-1",
+        file_count=2,
+        total_bytes=123,
+    )
+    dialog.confirm.setChecked(True)
+    dialog.domain_edit.setText("wrong.example.com")
+    assert not dialog.restore_button.isEnabled()
+    dialog.domain_edit.setText("example.com")
+    assert dialog.restore_button.isEnabled()

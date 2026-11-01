@@ -37,12 +37,14 @@ class HistoryDialog(QDialog):
         super().__init__(parent)
         self.store = store
         self.project_id = project_id
+        self.selected_backup_id: str | None = None
+        self._backup_ids: list[str] = []
         self.setWindowTitle("操作履歴とバックアップ")
         self.resize(1050, 620)
 
         layout = QVBoxLayout(self)
         note = QLabel(
-            "操作履歴はローカルSQLiteに保存されます。復元は同期完了時のハッシュが記録されるまで無効です。"
+            "操作履歴はローカルSQLiteに保存されます。復元前に現在ファイルとバックアップを再検証します。"
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -76,10 +78,12 @@ class HistoryDialog(QDialog):
             backups_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         backups_header.setSectionResizeMode(5, QHeaderView.Stretch)
         self.backups_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.backups_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.backups_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.backups_table.itemSelectionChanged.connect(self._update_restore_enabled)
+        self.backups_table.itemDoubleClicked.connect(lambda _item: self._choose_restore())
         backups_layout.addWidget(self.backups_table)
-        restore_note = QLabel(
-            "復元操作は現在無効です。承認付き同期が完成すると、外部変更チェック後に有効になります。"
-        )
+        restore_note = QLabel("復元できるのは既存ファイルを退避した利用可能なバックアップだけです。")
         restore_note.setStyleSheet("color: #57606a;")
         backups_layout.addWidget(restore_note)
         self.tabs.addTab(backups_page, "バックアップ")
@@ -87,8 +91,12 @@ class HistoryDialog(QDialog):
 
         refresh = QPushButton("更新")
         refresh.clicked.connect(self.refresh)
+        self.restore_button = QPushButton("選択したバックアップを復元…")
+        self.restore_button.setEnabled(False)
+        self.restore_button.clicked.connect(self._choose_restore)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.addButton(refresh, QDialogButtonBox.ActionRole)
+        buttons.addButton(self.restore_button, QDialogButtonBox.ActionRole)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.refresh()
@@ -109,6 +117,7 @@ class HistoryDialog(QDialog):
                 self.operations_table.setItem(row, column, QTableWidgetItem(str(value)))
 
         backups = self.store.list_backups(self.project_id)
+        self._backup_ids = [backup.backup_id for backup in backups]
         self.backups_table.setRowCount(len(backups))
         for row, backup in enumerate(backups):
             values = (
@@ -121,3 +130,24 @@ class HistoryDialog(QDialog):
             )
             for column, value in enumerate(values):
                 self.backups_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self._update_restore_enabled()
+
+    def _update_restore_enabled(self) -> None:
+        row = self.backups_table.currentRow()
+        enabled = False
+        if 0 <= row < len(self._backup_ids):
+            backup = self.store.get_backup(self._backup_ids[row])
+            enabled = bool(
+                backup
+                and backup.status == "available"
+                and backup.file_count > 0
+                and self.store.get_plan(backup.plan_id) is not None
+            )
+        self.restore_button.setEnabled(enabled)
+
+    def _choose_restore(self) -> None:
+        if not self.restore_button.isEnabled():
+            return
+        row = self.backups_table.currentRow()
+        self.selected_backup_id = self._backup_ids[row]
+        self.accept()

@@ -45,7 +45,11 @@ from .models import ChangeType, FileRecord, Project, ScanResult, SiteType, SyncM
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
 from .history_dialog import HistoryDialog
-from .approval_dialog import BackupConfirmationDialog, DeploymentApprovalDialog
+from .approval_dialog import (
+    BackupConfirmationDialog,
+    DeploymentApprovalDialog,
+    RestoreApprovalDialog,
+)
 from .backup import BackupResult, RemoteBackupEngine
 from .deployment import (
     DeploymentAuthorization,
@@ -55,7 +59,9 @@ from .deployment import (
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
+from .recovery import RecoveryScanResult, scan_recovery_artifacts
 from .revalidation import PlanRevalidator, RevalidationResult
+from .restore import RestoreAuthorization, RestoreResult, RemoteRestoreEngine
 from .rules import PathRules
 from .scanner import LocalScanner
 from .service import DryRunResult, DryRunService
@@ -314,6 +320,11 @@ class BackupWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
+            recovery = scan_recovery_artifacts(sftp, self.mapping.remote_root)
+            if recovery.temporary_files or recovery.issues:
+                raise RuntimeError(
+                    "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
+                )
             revalidation = PlanRevalidator().revalidate(
                 stored=self.stored,
                 project=self.project,
@@ -376,6 +387,11 @@ class DeployWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
+            recovery = scan_recovery_artifacts(sftp, self.mapping.remote_root)
+            if recovery.temporary_files or recovery.issues:
+                raise RuntimeError(
+                    "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
+                )
             revalidation = PlanRevalidator().revalidate(
                 stored=self.stored,
                 project=self.project,
@@ -404,6 +420,96 @@ class DeployWorker(QObject):
                 client.close()
 
 
+class RecoveryScanWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project: Project, mapping: SyncMapping, passphrase: str | None) -> None:
+        super().__init__()
+        self.project = project
+        self.mapping = mapping
+        self.passphrase = passphrase
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            self.completed.emit(scan_recovery_artifacts(sftp, self.mapping.remote_root))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if sftp is not None:
+                sftp.close()
+            if client is not None:
+                client.close()
+
+
+class RestoreWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        project: Project,
+        mapping: SyncMapping,
+        manifest_path: str,
+        expected_current_hashes: dict[str, str],
+        authorization: RestoreAuthorization,
+        passphrase: str | None,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.mapping = mapping
+        self.manifest_path = manifest_path
+        self.expected_current_hashes = expected_current_hashes
+        self.authorization = authorization
+        self.passphrase = passphrase
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            recovery = scan_recovery_artifacts(sftp, self.mapping.remote_root)
+            if recovery.temporary_files or recovery.issues:
+                raise RuntimeError(
+                    "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
+                )
+            result = RemoteRestoreEngine().restore(
+                sftp=sftp,
+                manifest_path=self.manifest_path,
+                destination_root=self.mapping.remote_root,
+                expected_current_hashes=self.expected_current_hashes,
+                authorization=self.authorization,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if sftp is not None:
+                sftp.close()
+            if client is not None:
+                client.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: ProjectStore | None = None) -> None:
         super().__init__()
@@ -420,6 +526,7 @@ class MainWindow(QMainWindow):
             store = ProjectStore(state_directory / "state.db")
         self.store = store
         self.staging_parent = self.store.database_path.parent / "staging"
+        self._interrupted_operations = self.store.recover_interrupted_operations()
         self.store.expire_plans()
         self._cleanup_result = cleanup_stale_staging(self.store, self.staging_parent)
         self._projects: dict[str, Project] = {}
@@ -427,6 +534,7 @@ class MainWindow(QMainWindow):
         self._current_plan_id: str | None = None
         self._validated_plan_id: str | None = None
         self._current_backup_id: str | None = None
+        self._restore_backup_id: str | None = None
         self._current_operation_id: str | None = None
 
         root = QWidget()
@@ -442,7 +550,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "安全確認モード — XServerへの書き込み機能は無効です"
+            "安全同期モード — 再検証・バックアップ・明示承認を必須にしています"
         )
         subtitle.setStyleSheet("color: #57606a;")
         layout.addWidget(subtitle)
@@ -460,9 +568,13 @@ class MainWindow(QMainWindow):
         self.delete_project_button.clicked.connect(self._delete_project)
         history_button = QPushButton("履歴…")
         history_button.clicked.connect(self._show_history)
+        self.recovery_button = QPushButton("安全性確認")
+        self.recovery_button.clicked.connect(self._start_recovery_scan)
+        self.recovery_button.setEnabled(False)
         project_bar.addWidget(new_project)
         project_bar.addWidget(self.edit_project_button)
         project_bar.addWidget(self.delete_project_button)
+        project_bar.addWidget(self.recovery_button)
         project_bar.addWidget(history_button)
         layout.addLayout(project_bar)
 
@@ -495,7 +607,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.scan_button)
         layout.addWidget(controls)
 
-        connection = QGroupBox("XServer接続（読み取り専用・書き込みなし）")
+        connection = QGroupBox("XServer接続と安全同期")
         connection_layout = QGridLayout(connection)
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("SERVER_ID.xsrv.jp")
@@ -568,6 +680,11 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
         self._reload_projects()
+        if self._interrupted_operations:
+            self.summary.setText(
+                f"前回終了時に未完了だった操作を{len(self._interrupted_operations)}件検出しました。"
+                "対象プロジェクトで「安全性確認」を実行してください。"
+            )
 
     def _reload_projects(self, select_id: str | None = None) -> None:
         if select_id is None and self._current_project is not None:
@@ -592,6 +709,7 @@ class MainWindow(QMainWindow):
         has_project = self._current_project is not None
         self.edit_project_button.setEnabled(has_project)
         self.delete_project_button.setEnabled(has_project)
+        self.recovery_button.setEnabled(has_project and self._thread is None)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
         if self._current_project is not None:
@@ -656,6 +774,7 @@ class MainWindow(QMainWindow):
         )
         self.backup_button.setEnabled(idle and validated and self._current_backup_id is None)
         self.deploy_button.setEnabled(idle and validated and self._current_backup_id is not None)
+        self.recovery_button.setEnabled(idle and self._current_project is not None)
 
     def _backup_root(self) -> str:
         if self._current_project is None:
@@ -703,7 +822,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def _show_history(self) -> None:
         project_id = self._current_project.project_id if self._current_project else None
-        HistoryDialog(self.store, project_id, self).exec()
+        dialog = HistoryDialog(self.store, project_id, self)
+        dialog.exec()
+        if dialog.selected_backup_id:
+            self._start_restore(dialog.selected_backup_id)
 
     def _begin_operation(self, kind: str) -> None:
         mapping = self._selected_mapping()
@@ -715,7 +837,9 @@ class MainWindow(QMainWindow):
             mapping_id=mapping.mapping_id,
             kind=kind,
             details={
-                "mode": "write" if kind in {"backup", "deployment"} else "read_only"
+                "mode": "write"
+                if kind in {"backup", "deployment", "restore"}
+                else "read_only"
             },
         )
         self._current_operation_id = operation.operation_id
@@ -986,6 +1110,112 @@ class MainWindow(QMainWindow):
         self._worker = worker
         thread.start()
 
+    @Slot()
+    def _start_recovery_scan(self) -> None:
+        if self._thread is not None:
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            return
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self._update_action_buttons()
+        self.summary.setText("残存一時ファイルを読み取り専用で確認しています…")
+        self._begin_operation("recovery_scan")
+        thread = QThread(self)
+        worker = RecoveryScanWorker(
+            project, mapping, self.passphrase_edit.text() or None
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._recovery_scan_completed)
+        worker.failed.connect(self._recovery_scan_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _start_restore(self, backup_id: str) -> None:
+        if self._thread is not None:
+            return
+        backup = self.store.get_backup(backup_id)
+        project = self._current_project
+        if backup is None or project is None or backup.project_id != project.project_id:
+            QMessageBox.warning(self, "復元できません", "バックアップとプロジェクトが一致しません。")
+            return
+        mapping = next(
+            (item for item in project.mappings if item.mapping_id == backup.mapping_id),
+            None,
+        )
+        stored = self.store.get_plan(backup.plan_id)
+        if (
+            mapping is None
+            or stored is None
+            or backup.status != "available"
+            or backup.file_count <= 0
+        ):
+            QMessageBox.warning(self, "復元できません", "復元に必要な計画またはバックアップがありません。")
+            return
+        mapping_index = self.mapping_combo.findData(mapping.mapping_id)
+        if mapping_index >= 0:
+            self.mapping_combo.setCurrentIndex(mapping_index)
+        expected_hashes = {
+            change.relative_path: change.local.sha256
+            for change in stored.plan.changes
+            if change.change_type is ChangeType.UPDATE
+            and change.local is not None
+            and change.local.sha256 is not None
+        }
+        if len(expected_hashes) < backup.file_count:
+            QMessageBox.warning(self, "復元できません", "同期完了時のハッシュ記録が不足しています。")
+            return
+        approval = RestoreApprovalDialog(
+            domain=project.domain,
+            remote_root=mapping.remote_root,
+            backup_id=backup.backup_id,
+            file_count=backup.file_count,
+            total_bytes=backup.total_bytes,
+            parent=self,
+        )
+        if approval.exec() != QDialog.Accepted:
+            return
+        self._restore_backup_id = backup.backup_id
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.revalidate_button.setEnabled(False)
+        self.backup_button.setEnabled(False)
+        self.deploy_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.summary.setText("現在ファイルとバックアップを検証して復元しています…")
+        self._begin_operation("restore")
+        thread = QThread(self)
+        worker = RestoreWorker(
+            project=project,
+            mapping=mapping,
+            manifest_path=backup.manifest_path,
+            expected_current_hashes=expected_hashes,
+            authorization=RestoreAuthorization(
+                backup_id=backup.backup_id,
+                destination_root=mapping.remote_root,
+                approved=True,
+            ),
+            passphrase=self.passphrase_edit.text() or None,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._restore_completed)
+        worker.failed.connect(self._restore_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
     @Slot(object)
     def _scan_completed(self, result: ScanResult) -> None:
         site_type = SiteType(self.site_combo.currentData())
@@ -1174,6 +1404,68 @@ class MainWindow(QMainWindow):
         cleanup_stale_staging(self.store, self.staging_parent)
         self.summary.setText("同期に失敗しました。適用済みファイルは可能な限り復元されました。")
         QMessageBox.critical(self, "同期エラー", message)
+
+    @Slot(object)
+    def _recovery_scan_completed(self, result: RecoveryScanResult) -> None:
+        self._finish_operation(
+            "blocked" if result.temporary_files or result.issues else "succeeded",
+            details={
+                "temporary_files": list(result.temporary_files),
+                "issues": list(result.issues),
+            },
+        )
+        if result.temporary_files:
+            preview = "\n".join(result.temporary_files[:20])
+            suffix = "\n…" if len(result.temporary_files) > 20 else ""
+            self.summary.setText(
+                f"残存一時ファイルを{len(result.temporary_files)}件検出しました。"
+                "自動削除は行っていません。"
+            )
+            QMessageBox.warning(
+                self,
+                "復旧確認が必要です",
+                "次の一時ファイルが残っています。同期・復元を続ける前に内容を確認してください。\n\n"
+                + preview
+                + suffix,
+            )
+        elif result.issues:
+            self.summary.setText("安全性確認で読み取れない場所がありました。")
+            QMessageBox.warning(self, "確認未完了", "\n".join(result.issues))
+        else:
+            self.summary.setText("安全性確認完了。残存一時ファイルはありません。")
+
+    @Slot(str)
+    def _recovery_scan_failed(self, message: str) -> None:
+        self._finish_operation("failed", error=message)
+        self.summary.setText("安全性確認を完了できませんでした。")
+        QMessageBox.critical(self, "安全性確認エラー", message)
+
+    @Slot(object)
+    def _restore_completed(self, result: RestoreResult) -> None:
+        if self._restore_backup_id:
+            self.store.set_backup_status(self._restore_backup_id, "restored")
+        self._finish_operation(
+            "succeeded",
+            details={
+                "backup_id": result.backup_id,
+                "file_count": len(result.files),
+                "total_bytes": result.total_bytes,
+            },
+        )
+        self.summary.setText(
+            f"復元完了 / {len(result.files)}ファイル / {result.total_bytes:,} bytes。"
+            "復元後のSHA-256を確認済みです。"
+        )
+        self._restore_backup_id = None
+        self._reset_write_state()
+
+    @Slot(str)
+    def _restore_failed(self, message: str) -> None:
+        self._finish_operation("failed", error=message)
+        self._restore_backup_id = None
+        self._reset_write_state()
+        self.summary.setText("復元を中止しました。外部変更または検証エラーを確認してください。")
+        QMessageBox.critical(self, "復元エラー", message)
 
     @Slot()
     def _scan_finished(self) -> None:

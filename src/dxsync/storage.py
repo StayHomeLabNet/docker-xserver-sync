@@ -420,7 +420,7 @@ class ProjectStore:
         details: dict | None = None,
         error: str | None = None,
     ) -> bool:
-        allowed = {"succeeded", "failed", "cancelled", "blocked"}
+        allowed = {"succeeded", "failed", "cancelled", "blocked", "interrupted"}
         if status not in allowed:
             raise ValueError(f"Unsupported operation status: {status}")
         self.initialize()
@@ -441,6 +441,23 @@ class ProjectStore:
                 ),
             )
         return cursor.rowcount > 0
+
+    def recover_interrupted_operations(self) -> tuple[OperationRecord, ...]:
+        """Mark operations left running by a previous process as interrupted."""
+        running = tuple(
+            operation for operation in self.list_operations(limit=10_000)
+            if operation.status == "running"
+        )
+        for operation in running:
+            details = dict(operation.details)
+            details["detected_on_startup"] = True
+            self.finish_operation(
+                operation.operation_id,
+                status="interrupted",
+                details=details,
+                error="Application exited before this operation completed",
+            )
+        return running
 
     def list_operations(
         self,
@@ -510,6 +527,24 @@ class ProjectStore:
                     backup.status,
                 ),
             )
+
+    def get_backup(self, backup_id: str) -> BackupRecord | None:
+        return next(
+            (backup for backup in self.list_backups() if backup.backup_id == backup_id),
+            None,
+        )
+
+    def set_backup_status(self, backup_id: str, status: str) -> bool:
+        allowed = {"available", "restored", "invalid", "deleted"}
+        if status not in allowed:
+            raise ValueError(f"Unsupported backup status: {status}")
+        self.initialize()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE backups SET status = ? WHERE backup_id = ?",
+                (status, backup_id),
+            )
+        return cursor.rowcount > 0
 
     def list_backups(self, project_id: str | None = None) -> tuple[BackupRecord, ...]:
         self.initialize()

@@ -109,3 +109,54 @@ class DeploymentApprovalDialog(QDialog):
             and self.backup_check.isChecked()
             and self.domain_edit.text().strip() == self.domain
         )
+
+
+class RestoreApprovalDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        domain: str,
+        remote_root: str,
+        backup_id: str,
+        file_count: int,
+        total_bytes: int,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.domain = domain
+        self.setWindowTitle("バックアップから復元")
+        layout = QVBoxLayout(self)
+        warning = QLabel(
+            "復元すると、対象ファイルを検証済みバックアップの内容へ戻します。"
+            "現在ファイルが同期完了時から変更されている場合は実行しません。"
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("font-weight: bold;")
+        layout.addWidget(warning)
+        summary = QFormLayout()
+        summary.addRow("対象ドメイン", QLabel(domain))
+        summary.addRow("復元先", QLabel(remote_root))
+        summary.addRow("バックアップID", QLabel(backup_id))
+        summary.addRow("ファイル数", QLabel(str(file_count)))
+        summary.addRow("サイズ", QLabel(f"{total_bytes:,} bytes"))
+        layout.addLayout(summary)
+        self.confirm = QCheckBox("現在ファイルをバックアップ内容へ戻すことを確認しました")
+        layout.addWidget(self.confirm)
+        layout.addWidget(QLabel(f"確認のため「{domain}」と入力してください。"))
+        self.domain_edit = QLineEdit()
+        self.domain_edit.setPlaceholderText(domain)
+        layout.addWidget(self.domain_edit)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.restore_button = self.buttons.button(QDialogButtonBox.Ok)
+        self.restore_button.setText("承認して復元")
+        self.restore_button.setEnabled(False)
+        self.confirm.toggled.connect(self._update_enabled)
+        self.domain_edit.textChanged.connect(self._update_enabled)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def _update_enabled(self) -> None:
+        self.restore_button.setEnabled(
+            self.confirm.isChecked() and self.domain_edit.text().strip() == self.domain
+        )

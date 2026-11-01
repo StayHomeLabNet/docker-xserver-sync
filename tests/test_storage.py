@@ -94,7 +94,23 @@ def test_operation_journal_and_backup_history(tmp_path: Path) -> None:
         status="succeeded",
         details={"add": 1},
     )
-    loaded_operation = store.list_operations(project.project_id)[0]
+    interrupted = store.start_operation(
+        project_id=project.project_id,
+        mapping_id=mapping.mapping_id,
+        kind="deployment",
+        details={"mode": "write"},
+    )
+    assert store.recover_interrupted_operations() == (interrupted,)
+    recovered = next(
+        item for item in store.list_operations(project.project_id)
+        if item.operation_id == interrupted.operation_id
+    )
+    assert recovered.status == "interrupted"
+    assert recovered.details["detected_on_startup"] is True
+    loaded_operation = next(
+        item for item in store.list_operations(project.project_id)
+        if item.operation_id == operation.operation_id
+    )
     assert loaded_operation.status == "succeeded"
     assert loaded_operation.details == {"add": 1}
     assert loaded_operation.completed_at is not None
@@ -112,3 +128,6 @@ def test_operation_journal_and_backup_history(tmp_path: Path) -> None:
     )
     store.save_backup(backup)
     assert store.list_backups(project.project_id) == (backup,)
+    assert store.get_backup(backup.backup_id) == backup
+    assert store.set_backup_status(backup.backup_id, "restored")
+    assert store.get_backup(backup.backup_id).status == "restored"

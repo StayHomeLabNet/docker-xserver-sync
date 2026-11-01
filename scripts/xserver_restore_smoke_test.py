@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from uuid import uuid4
 
 from dxsync.remote import connect_sftp
-from dxsync.restore import RemoteRestoreEngine
+from dxsync.restore import RemoteRestoreEngine, RestoreAuthorization
 
 
 def sha256(content: bytes) -> str:
@@ -71,11 +71,17 @@ def main() -> int:
         sftp.rename(new_temporary, fixture_path)
         changed_fixture = True
 
+        backup_id = str(json.loads(read_file(sftp, args.manifest))["backup_id"])
         result = RemoteRestoreEngine().restore(
             sftp=sftp,
             manifest_path=args.manifest,
             destination_root=args.fixture_root,
             expected_current_hashes={"fixture.txt": sha256(deployed_content)},
+            authorization=RestoreAuthorization(
+                backup_id=backup_id,
+                destination_root=args.fixture_root,
+                approved=True,
+            ),
         )
         restored = read_file(sftp, fixture_path)
         if restored != expected_original:
