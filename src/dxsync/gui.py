@@ -44,6 +44,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the GUI 
 from .models import ChangeType, FileRecord, Project, ScanResult, SiteType, SyncMapping
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
+from .history_dialog import HistoryDialog
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
@@ -293,6 +294,7 @@ class MainWindow(QMainWindow):
         self._projects: dict[str, Project] = {}
         self._current_project: Project | None = None
         self._current_plan_id: str | None = None
+        self._current_operation_id: str | None = None
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -323,9 +325,12 @@ class MainWindow(QMainWindow):
         self.edit_project_button.clicked.connect(self._edit_project)
         self.delete_project_button = QPushButton("削除")
         self.delete_project_button.clicked.connect(self._delete_project)
+        history_button = QPushButton("履歴…")
+        history_button.clicked.connect(self._show_history)
         project_bar.addWidget(new_project)
         project_bar.addWidget(self.edit_project_button)
         project_bar.addWidget(self.delete_project_button)
+        project_bar.addWidget(history_button)
         layout.addLayout(project_bar)
 
         controls = QFrame()
@@ -447,7 +452,7 @@ class MainWindow(QMainWindow):
         self.delete_project_button.setEnabled(has_project)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
-        if self._current_project is not None:
+        if self._current_project is not None and not result.has_blocking_issues:
             project = self._current_project
             site_index = self.site_combo.findData(project.site_type.value)
             self.site_combo.setCurrentIndex(max(site_index, 0))
@@ -527,6 +532,41 @@ class MainWindow(QMainWindow):
             self._reload_projects()
 
     @Slot()
+    def _show_history(self) -> None:
+        project_id = self._current_project.project_id if self._current_project else None
+        HistoryDialog(self.store, project_id, self).exec()
+
+    def _begin_operation(self, kind: str) -> None:
+        mapping = self._selected_mapping()
+        if self._current_project is None or mapping is None:
+            self._current_operation_id = None
+            return
+        operation = self.store.start_operation(
+            project_id=self._current_project.project_id,
+            mapping_id=mapping.mapping_id,
+            kind=kind,
+            details={"mode": "read_only"},
+        )
+        self._current_operation_id = operation.operation_id
+
+    def _finish_operation(
+        self,
+        status: str,
+        *,
+        details: dict | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._current_operation_id is None:
+            return
+        self.store.finish_operation(
+            self._current_operation_id,
+            status=status,
+            details=details,
+            error=error,
+        )
+        self._current_operation_id = None
+
+    @Slot()
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "同期元フォルダを選択")
         if selected:
@@ -585,6 +625,7 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
         self.summary.setText("読み取り専用ドライラン中… ローカルとXServerを比較しています。")
+        self._begin_operation("dry_run")
         thread = QThread(self)
         mapping = self._selected_mapping()
         worker = DryRunWorker(
@@ -632,6 +673,7 @@ class MainWindow(QMainWindow):
         self.dry_run_button.setEnabled(False)
         self.revalidate_button.setEnabled(False)
         self.summary.setText("計画を再検証中… ローカル、XServer、ステージングを確認しています。")
+        self._begin_operation("revalidation")
         thread = QThread(self)
         worker = RevalidationWorker(
             stored=stored,
@@ -689,6 +731,16 @@ class MainWindow(QMainWindow):
         )
         status = "実行不可" if result.has_blocking_issues else "確認可能"
         persisted = " / 計画保存済み（5分間有効）" if self._current_project else ""
+        self._finish_operation(
+            "blocked" if result.has_blocking_issues else "succeeded",
+            details={
+                "plan_id": result.plan.plan_id,
+                "add": counts[ChangeType.ADD],
+                "update": counts[ChangeType.UPDATE],
+                "remote_only": counts[ChangeType.REMOTE_ONLY],
+                "blocking": result.has_blocking_issues,
+            },
+        )
         self.summary.setText(
             f"ドライラン完了（{status}） / ADD {counts[ChangeType.ADD]:,} / "
             f"UPDATE {counts[ChangeType.UPDATE]:,} / "
@@ -698,12 +750,14 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _dry_run_failed(self, message: str) -> None:
+        self._finish_operation("failed", error=message)
         self.summary.setText("ドライランに失敗しました。リモートは変更されていません。")
         QMessageBox.critical(self, "ドライランエラー", message)
 
     @Slot(object)
     def _revalidation_completed(self, result: RevalidationResult) -> None:
         if result.valid:
+            self._finish_operation("succeeded", details={"valid": True})
             self.summary.setText(
                 "計画の再検証に成功しました。設定、ローカル、XServer、ステージングは一致しています。"
             )
@@ -714,11 +768,16 @@ class MainWindow(QMainWindow):
         self._current_plan_id = None
         self.revalidate_button.setEnabled(False)
         details = "\n".join(f"• {reason}" for reason in result.reasons)
+        self._finish_operation(
+            "blocked",
+            details={"valid": False, "reasons": list(result.reasons)},
+        )
         self.summary.setText("計画は無効になりました。再度ドライランを実行してください。")
         QMessageBox.warning(self, "再検証に失敗", details)
 
     @Slot(str)
     def _revalidation_failed(self, message: str) -> None:
+        self._finish_operation("failed", error=message)
         self.summary.setText("再検証を完了できませんでした。計画は実行されていません。")
         QMessageBox.critical(self, "再検証エラー", message)
 
@@ -726,13 +785,13 @@ class MainWindow(QMainWindow):
     def _scan_finished(self) -> None:
         self.scan_button.setEnabled(True)
         self.dry_run_button.setEnabled(True)
-        self._refresh_ready_plan()
         if self._worker is not None:
             self._worker.deleteLater()
         if self._thread is not None:
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self._refresh_ready_plan()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -7,11 +7,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from uuid import uuid4
 
 from .models import ChangeType, FileChange, FileRecord, Project, SiteType, SyncMapping, SyncPlan
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,33 @@ class StoredPlan:
     plan: SyncPlan
     status: str
     staging_path: str | None
+
+
+@dataclass(frozen=True)
+class OperationRecord:
+    operation_id: str
+    project_id: str
+    mapping_id: str
+    kind: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    details: dict
+    error: str | None
+
+
+@dataclass(frozen=True)
+class BackupRecord:
+    backup_id: str
+    project_id: str
+    mapping_id: str
+    plan_id: str
+    backup_directory: str
+    manifest_path: str
+    created_at: datetime
+    file_count: int
+    total_bytes: int
+    status: str = "available"
 
 
 class ProjectStore:
@@ -74,6 +102,33 @@ class ProjectStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_plans_project_status
                     ON plans(project_id, status);
+                CREATE TABLE IF NOT EXISTS operations (
+                    operation_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    mapping_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_operations_project_started
+                    ON operations(project_id, started_at DESC);
+                CREATE TABLE IF NOT EXISTS backups (
+                    backup_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    mapping_id TEXT NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    backup_directory TEXT NOT NULL,
+                    manifest_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    file_count INTEGER NOT NULL,
+                    total_bytes INTEGER NOT NULL,
+                    status TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_backups_project_created
+                    ON backups(project_id, created_at DESC);
                 """
             )
             plan_columns = {
@@ -315,5 +370,172 @@ class ProjectStore:
             stored
             for row in rows
             if (stored := self.get_plan(row["plan_id"])) is not None
+        )
+
+    def start_operation(
+        self,
+        *,
+        project_id: str,
+        mapping_id: str,
+        kind: str,
+        details: dict | None = None,
+    ) -> OperationRecord:
+        self.initialize()
+        operation = OperationRecord(
+            operation_id=str(uuid4()),
+            project_id=project_id,
+            mapping_id=mapping_id,
+            kind=kind,
+            status="running",
+            started_at=datetime.now(timezone.utc),
+            completed_at=None,
+            details=details or {},
+            error=None,
+        )
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO operations (
+                    operation_id, project_id, mapping_id, kind, status,
+                    started_at, completed_at, details_json, error
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)
+                """,
+                (
+                    operation.operation_id,
+                    operation.project_id,
+                    operation.mapping_id,
+                    operation.kind,
+                    operation.status,
+                    operation.started_at.isoformat(),
+                    json.dumps(operation.details, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+        return operation
+
+    def finish_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        details: dict | None = None,
+        error: str | None = None,
+    ) -> bool:
+        allowed = {"succeeded", "failed", "cancelled", "blocked"}
+        if status not in allowed:
+            raise ValueError(f"Unsupported operation status: {status}")
+        self.initialize()
+        completed_at = datetime.now(timezone.utc).isoformat()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE operations
+                SET status = ?, completed_at = ?, details_json = ?, error = ?
+                WHERE operation_id = ? AND status = 'running'
+                """,
+                (
+                    status,
+                    completed_at,
+                    json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
+                    error,
+                    operation_id,
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def list_operations(
+        self,
+        project_id: str | None = None,
+        *,
+        limit: int = 200,
+    ) -> tuple[OperationRecord, ...]:
+        self.initialize()
+        with self._connection() as connection:
+            if project_id:
+                rows = connection.execute(
+                    "SELECT * FROM operations WHERE project_id = ? "
+                    "ORDER BY started_at DESC LIMIT ?",
+                    (project_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM operations ORDER BY started_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return tuple(
+            OperationRecord(
+                operation_id=row["operation_id"],
+                project_id=row["project_id"],
+                mapping_id=row["mapping_id"],
+                kind=row["kind"],
+                status=row["status"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                completed_at=(
+                    datetime.fromisoformat(row["completed_at"])
+                    if row["completed_at"]
+                    else None
+                ),
+                details=json.loads(row["details_json"]),
+                error=row["error"],
+            )
+            for row in rows
+        )
+
+    def save_backup(self, backup: BackupRecord) -> None:
+        self.initialize()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO backups (
+                    backup_id, project_id, mapping_id, plan_id,
+                    backup_directory, manifest_path, created_at,
+                    file_count, total_bytes, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(backup_id) DO UPDATE SET
+                    backup_directory=excluded.backup_directory,
+                    manifest_path=excluded.manifest_path,
+                    file_count=excluded.file_count,
+                    total_bytes=excluded.total_bytes,
+                    status=excluded.status
+                """,
+                (
+                    backup.backup_id,
+                    backup.project_id,
+                    backup.mapping_id,
+                    backup.plan_id,
+                    backup.backup_directory,
+                    backup.manifest_path,
+                    backup.created_at.isoformat(),
+                    backup.file_count,
+                    backup.total_bytes,
+                    backup.status,
+                ),
+            )
+
+    def list_backups(self, project_id: str | None = None) -> tuple[BackupRecord, ...]:
+        self.initialize()
+        with self._connection() as connection:
+            if project_id:
+                rows = connection.execute(
+                    "SELECT * FROM backups WHERE project_id = ? ORDER BY created_at DESC",
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM backups ORDER BY created_at DESC"
+                ).fetchall()
+        return tuple(
+            BackupRecord(
+                backup_id=row["backup_id"],
+                project_id=row["project_id"],
+                mapping_id=row["mapping_id"],
+                plan_id=row["plan_id"],
+                backup_directory=row["backup_directory"],
+                manifest_path=row["manifest_path"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                file_count=row["file_count"],
+                total_bytes=row["total_bytes"],
+                status=row["status"],
+            )
+            for row in rows
         )
 
