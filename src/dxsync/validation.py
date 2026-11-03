@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .models import Project, SyncMapping
+from .models import Project, SiteType, SyncMapping
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,38 @@ def normalize_remote_root(value: str) -> str:
     if normalized in {"/", "/home"}:
         raise ValueError("Remote path is too broad")
     return normalized.rstrip("/")
+
+
+def normalize_runtime_directory(value: str) -> str:
+    """Normalize an exact project-relative writable directory for protection rules."""
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("空のパスは登録できません。")
+    if any(character in candidate for character in ("\x00", "\n", "\r")):
+        raise ValueError("パスに改行やNUL文字は使えません。")
+    if "\\" in candidate:
+        raise ValueError("区切り文字は / を使ってください。")
+    if candidate.startswith("/"):
+        raise ValueError("同期元ルートからの相対パスを入力してください。")
+    without_slash = candidate.rstrip("/")
+    parts = PurePosixPath(without_slash).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(". や .. を含むパスは使えません。")
+    if any(character in without_slash for character in "*?[]"):
+        raise ValueError("ワイルドカードではなくディレクトリ名を入力してください。")
+    return f"{PurePosixPath(without_slash).as_posix()}/"
+
+
+def custom_runtime_paths_issue(
+    project: Project, mapping: SyncMapping
+) -> ValidationIssue | None:
+    if project.site_type is SiteType.CUSTOM_PHP and not mapping.runtime_paths_confirmed:
+        return ValidationIssue(
+            "runtime_paths_unconfirmed",
+            f"「{mapping.name}」の本番で書き込まれるディレクトリを確認してください。",
+            "runtime_paths_confirmed",
+        )
+    return None
 
 
 def _is_path_parent(parent: str, child: str) -> bool:
@@ -83,6 +115,14 @@ def validate_project(project: Project) -> tuple[ValidationIssue, ...]:
         for issue in validate_mapping(mapping):
             issues.append(
                 ValidationIssue(issue.code, issue.message, f"mappings[{index}].{issue.field}")
+            )
+        if runtime_issue := custom_runtime_paths_issue(project, mapping):
+            issues.append(
+                ValidationIssue(
+                    runtime_issue.code,
+                    runtime_issue.message,
+                    f"mappings[{index}].runtime_paths_confirmed",
+                )
             )
 
     mapping_ids = [mapping.mapping_id for mapping in project.mappings]

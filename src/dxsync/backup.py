@@ -34,6 +34,8 @@ class BackupFile:
     sha256: str
     size: int
     backup_path: str
+    change_type: ChangeType = ChangeType.UPDATE
+    mode: int = 0o644
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ class RemoteBackupEngine:
         project_id: str,
         remote_root: str,
         backup_root: str,
+        delete_paths: tuple[str, ...] = (),
     ) -> BackupResult:
         project_id = _safe_identifier(project_id, "project identifier")
         backup_id = _safe_identifier(plan.plan_id, "backup identifier")
@@ -113,10 +116,23 @@ class RemoteBackupEngine:
             raise BackupError(f"Backup directory already exists: {backup_directory}")
         _mkdir_parents(sftp, backup_directory, mode=0o700)
 
+        remote_only = {
+            change.relative_path: change
+            for change in plan.changes
+            if change.change_type is ChangeType.REMOTE_ONLY
+        }
+        requested_deletions = set(delete_paths)
+        unknown_deletions = requested_deletions - set(remote_only)
+        if unknown_deletions:
+            raise BackupError("Deletion approval contains files outside the plan")
+
         backed_up: list[BackupFile] = []
         total_bytes = 0
         for change in plan.changes:
-            if change.change_type is not ChangeType.UPDATE:
+            if change.change_type is not ChangeType.UPDATE and not (
+                change.change_type is ChangeType.REMOTE_ONLY
+                and change.relative_path in requested_deletions
+            ):
                 continue
             if change.remote is None or not change.remote.sha256:
                 raise BackupError(f"Missing approved remote hash: {change.relative_path}")
@@ -146,7 +162,17 @@ class RemoteBackupEngine:
             verified_hash, verified_size = _hash_remote(sftp, destination)
             if verified_hash != change.remote.sha256 or verified_size != size:
                 raise BackupError(f"Backup verification failed: {relative}")
-            backed_up.append(BackupFile(relative, verified_hash, size, destination))
+            mode = stat.S_IMODE(sftp.stat(source).st_mode)
+            backed_up.append(
+                BackupFile(
+                    relative,
+                    verified_hash,
+                    size,
+                    destination,
+                    change.change_type,
+                    mode,
+                )
+            )
             total_bytes += size
 
         created_at = datetime.now(timezone.utc)
@@ -164,6 +190,8 @@ class RemoteBackupEngine:
                     "sha256": item.sha256,
                     "size": item.size,
                     "backup_path": item.backup_path,
+                    "change_type": item.change_type.value,
+                    "mode": item.mode,
                 }
                 for item in backed_up
             ],

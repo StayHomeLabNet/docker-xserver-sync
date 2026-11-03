@@ -207,3 +207,37 @@ def test_restore_rolls_back_all_files_when_later_publish_fails() -> None:
     assert sftp.files[f"{root}/one.php"] == b"new-one"
     assert sftp.files[f"{root}/two.php"] == b"new-two"
     assert not any(".dxsync-restore" in path for path in sftp.files)
+
+
+def test_restore_recreates_approved_deleted_file() -> None:
+    sftp = MemorySftp()
+    root = "/home/user/site"
+    backup_directory = "/home/user/.dxsync/backups/project/plan"
+    destination = root + "/removed.php"
+    backup_path = backup_directory + "/removed.php"
+    manifest_path = backup_directory + "/.dxsync-backup-manifest.json"
+    sftp.files[backup_path] = b"original"
+    sftp.files[manifest_path] = json.dumps({
+        "backup_id": "plan",
+        "source_root": root,
+        "files": [{
+            "relative_path": "removed.php",
+            "sha256": digest(b"original"),
+            "size": len(b"original"),
+            "backup_path": backup_path,
+            "change_type": "remote_only",
+            "mode": 0o640,
+        }],
+    }).encode()
+
+    result = RemoteRestoreEngine().restore(
+        sftp=sftp,
+        manifest_path=manifest_path,
+        destination_root=root,
+        expected_current_hashes={"removed.php": None},
+        authorization=authorize(root),
+    )
+
+    assert sftp.files[destination] == b"original"
+    assert sftp.modes[destination] == 0o640
+    assert result.files[0].relative_path == "removed.php"

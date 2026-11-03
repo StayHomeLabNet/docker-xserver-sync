@@ -10,6 +10,7 @@ from .remote import RemoteFileSystem
 from .service import DryRunResult, DryRunService
 from .staging import StagingArea
 from .storage import StoredPlan
+from .validation import custom_runtime_paths_issue
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,8 @@ class PlanRevalidator:
     ) -> RevalidationResult:
         current_time = now or datetime.now(timezone.utc)
         reasons: list[str] = []
+        if runtime_issue := custom_runtime_paths_issue(project, mapping):
+            reasons.append(runtime_issue.message)
         if stored.status != "ready":
             reasons.append(f"Plan status is {stored.status}, not ready")
         if stored.plan.expires_at <= current_time:

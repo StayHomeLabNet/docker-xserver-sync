@@ -35,7 +35,10 @@ def make_project(tmp_path: Path) -> tuple[Project, SyncMapping]:
     source = tmp_path / "site"
     source.mkdir()
     (source / "index.php").write_bytes(b"new")
-    mapping = SyncMapping.create("public", str(source), "/home/user/public_html")
+    mapping = replace(
+        SyncMapping.create("public", str(source), "/home/user/public_html"),
+        runtime_paths_confirmed=True,
+    )
     project = Project.create(
         name="Example",
         site_type=SiteType.CUSTOM_PHP,
@@ -98,6 +101,39 @@ def test_revalidation_accepts_unchanged_plan_and_rejects_source_change(tmp_path:
     )
     assert not invalid.valid
     assert "Local source changed after the plan was created" in invalid.reasons
+
+
+def test_revalidation_blocks_custom_php_when_runtime_paths_become_unconfirmed(
+    tmp_path: Path,
+) -> None:
+    project, mapping = make_project(tmp_path)
+    config_hash = project_config_sha256(project, mapping)
+    initial = DryRunService().execute(
+        site_type=project.site_type,
+        mapping_id=mapping.mapping_id,
+        local_root=Path(mapping.local_root),
+        remote_root=mapping.remote_root,
+        sftp=FakeSftp(),
+        staging_parent=tmp_path / "staging",
+        config_sha256=config_hash,
+    )
+    store = ProjectStore(tmp_path / "state.db")
+    store.save(project)
+    store.save_plan(project.project_id, initial.plan, str(initial.staging.root))
+    stored = store.get_plan(initial.plan.plan_id)
+    assert stored is not None
+
+    unconfirmed_mapping = replace(mapping, runtime_paths_confirmed=False)
+    unconfirmed_project = replace(project, mappings=(unconfirmed_mapping,))
+    result = PlanRevalidator().revalidate(
+        stored=stored,
+        project=unconfirmed_project,
+        mapping=unconfirmed_mapping,
+        sftp=FakeSftp(),
+    )
+
+    assert not result.valid
+    assert any("本番で書き込まれる" in reason for reason in result.reasons)
 
 
 def test_cleanup_removes_only_stale_referenced_staging(tmp_path: Path) -> None:

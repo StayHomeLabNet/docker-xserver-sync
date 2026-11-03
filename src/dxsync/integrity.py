@@ -25,6 +25,7 @@ def project_config_sha256(project: Project, mapping: SyncMapping) -> str:
             "remote_root": mapping.remote_root,
             "exclude_patterns": list(mapping.exclude_patterns),
             "protect_patterns": list(mapping.protect_patterns),
+            "runtime_paths_confirmed": mapping.runtime_paths_confirmed,
             "file_mode": mapping.file_mode,
             "directory_mode": mapping.directory_mode,
         },

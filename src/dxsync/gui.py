@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -45,6 +46,7 @@ from .models import ChangeType, FileRecord, Project, ScanResult, SiteType, SyncM
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
 from .history_dialog import HistoryDialog
+from .health import perform_https_health_check
 from .approval_dialog import (
     BackupConfirmationDialog,
     DeploymentApprovalDialog,
@@ -71,6 +73,7 @@ from .rules import PathRules
 from .scanner import LocalScanner
 from .service import DryRunResult, DryRunService
 from .storage import BackupRecord, ProjectStore, StoredPlan
+from .validation import custom_runtime_paths_issue
 
 
 SITE_LABELS = {
@@ -304,6 +307,7 @@ class BackupWorker(QObject):
         mapping: SyncMapping,
         passphrase: str | None,
         backup_root: str,
+        delete_paths: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.stored = stored
@@ -311,6 +315,7 @@ class BackupWorker(QObject):
         self.mapping = mapping
         self.passphrase = passphrase
         self.backup_root = backup_root
+        self.delete_paths = delete_paths
 
     @Slot()
     def run(self) -> None:
@@ -345,6 +350,7 @@ class BackupWorker(QObject):
                 project_id=self.project.project_id,
                 remote_root=self.mapping.remote_root,
                 backup_root=self.backup_root,
+                delete_paths=self.delete_paths,
             )
             self.completed.emit(result)
         except Exception as exc:
@@ -369,6 +375,7 @@ class DeployWorker(QObject):
         mapping: SyncMapping,
         passphrase: str | None,
         authorization: DeploymentAuthorization,
+        health_check_path: str | None = None,
     ) -> None:
         super().__init__()
         self.stored = stored
@@ -376,6 +383,7 @@ class DeployWorker(QObject):
         self.mapping = mapping
         self.passphrase = passphrase
         self.authorization = authorization
+        self.health_check_path = health_check_path
 
     @Slot()
     def run(self) -> None:
@@ -415,6 +423,14 @@ class DeployWorker(QObject):
                 file_mode=self.mapping.file_mode,
                 directory_mode=self.mapping.directory_mode,
             )
+            if self.health_check_path is not None:
+                result = replace(
+                    result,
+                    health_check=perform_https_health_check(
+                        domain=self.project.domain,
+                        path=self.health_check_path,
+                    ),
+                )
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -539,6 +555,7 @@ class MainWindow(QMainWindow):
         self._current_plan_id: str | None = None
         self._validated_plan_id: str | None = None
         self._current_backup_id: str | None = None
+        self._approved_delete_paths: tuple[str, ...] = ()
         self._restore_backup_id: str | None = None
         self._current_operation_id: str | None = None
 
@@ -766,6 +783,7 @@ class MainWindow(QMainWindow):
     def _reset_write_state(self) -> None:
         self._validated_plan_id = None
         self._current_backup_id = None
+        self._approved_delete_paths = ()
         if hasattr(self, "backup_button"):
             self.backup_button.setEnabled(False)
         if hasattr(self, "deploy_button"):
@@ -794,6 +812,23 @@ class MainWindow(QMainWindow):
             (mapping for mapping in self._current_project.mappings if mapping.mapping_id == mapping_id),
             None,
         )
+
+    def _require_runtime_paths_confirmation(self) -> bool:
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            return True
+        issue = custom_runtime_paths_issue(project, mapping)
+        if issue is None:
+            return True
+        QMessageBox.warning(
+            self,
+            "本番書き込み先が未確認です",
+            issue.message
+            + "\n\n「プロジェクトを編集」→「本番書き込み先を設定」から確認するまで、"
+            "ドライラン計画と書き込み操作は実行できません。",
+        )
+        return False
 
     @Slot()
     def _new_project(self) -> None:
@@ -907,6 +942,8 @@ class MainWindow(QMainWindow):
     def _start_dry_run(self) -> None:
         if self._thread is not None:
             return
+        if not self._require_runtime_paths_confirmation():
+            return
         self._reset_write_state()
         root = Path(self.path_edit.text().strip()).expanduser()
         key_path = Path(self.key_edit.text().strip()).expanduser()
@@ -964,6 +1001,8 @@ class MainWindow(QMainWindow):
     def _start_revalidation(self) -> None:
         if self._thread is not None or self._current_plan_id is None:
             return
+        if not self._require_runtime_paths_confirmation():
+            return
         project = self._current_project
         mapping = self._selected_mapping()
         stored = self.store.get_plan(self._current_plan_id)
@@ -997,6 +1036,8 @@ class MainWindow(QMainWindow):
     def _start_backup(self) -> None:
         if self._thread is not None or self._validated_plan_id != self._current_plan_id:
             return
+        if not self._require_runtime_paths_confirmation():
+            return
         project = self._current_project
         mapping = self._selected_mapping()
         stored = self.store.get_plan(self._current_plan_id or "")
@@ -1006,10 +1047,16 @@ class MainWindow(QMainWindow):
         confirmation = BackupConfirmationDialog(
             update_count=update_count,
             backup_root=self._backup_root(),
+            remote_only_paths=tuple(
+                change.relative_path
+                for change in stored.plan.changes
+                if change.change_type is ChangeType.REMOTE_ONLY
+            ),
             parent=self,
         )
         if confirmation.exec() != QDialog.Accepted:
             return
+        self._approved_delete_paths = confirmation.selected_delete_paths()
 
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
@@ -1025,6 +1072,7 @@ class MainWindow(QMainWindow):
             mapping=mapping,
             passphrase=self.passphrase_edit.text() or None,
             backup_root=self._backup_root(),
+            delete_paths=self._approved_delete_paths,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1046,6 +1094,8 @@ class MainWindow(QMainWindow):
             or self._validated_plan_id != self._current_plan_id
             or self._current_backup_id is None
         ):
+            return
+        if not self._require_runtime_paths_confirmation():
             return
         project = self._current_project
         mapping = self._selected_mapping()
@@ -1077,6 +1127,7 @@ class MainWindow(QMainWindow):
             update_count=counts[ChangeType.UPDATE],
             upload_bytes=upload_bytes,
             backup_id=backup.backup_id,
+            delete_count=len(self._approved_delete_paths),
             parent=self,
         )
         if approval.exec() != QDialog.Accepted:
@@ -1100,7 +1151,9 @@ class MainWindow(QMainWindow):
                 backup_plan_id=backup.plan_id,
                 remote_root=mapping.remote_root,
                 approved=True,
+                delete_paths=self._approved_delete_paths,
             ),
+            health_check_path=approval.selected_health_check_path(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1156,6 +1209,14 @@ class MainWindow(QMainWindow):
             (item for item in project.mappings if item.mapping_id == backup.mapping_id),
             None,
         )
+        if mapping is not None and (issue := custom_runtime_paths_issue(project, mapping)):
+            QMessageBox.warning(
+                self,
+                "復元できません",
+                issue.message
+                + "\n\n「プロジェクトを編集」から確認してください。",
+            )
+            return
         stored = self.store.get_plan(backup.plan_id)
         if (
             mapping is None
@@ -1169,11 +1230,16 @@ class MainWindow(QMainWindow):
         if mapping_index >= 0:
             self.mapping_combo.setCurrentIndex(mapping_index)
         expected_hashes = {
-            change.relative_path: change.local.sha256
+            change.relative_path: (
+                change.local.sha256 if change.change_type is ChangeType.UPDATE else None
+            )
             for change in stored.plan.changes
-            if change.change_type is ChangeType.UPDATE
-            and change.local is not None
-            and change.local.sha256 is not None
+            if (
+                change.change_type is ChangeType.UPDATE
+                and change.local is not None
+                and change.local.sha256 is not None
+            )
+            or change.change_type is ChangeType.REMOTE_ONLY
         }
         if len(expected_hashes) < backup.file_count:
             QMessageBox.warning(self, "復元できません", "同期完了時のハッシュ記録が不足しています。")
@@ -1369,19 +1435,47 @@ class MainWindow(QMainWindow):
     def _deployment_completed(self, result: DeploymentResult) -> None:
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "used")
+        details = {
+            "plan_id": result.plan_id,
+            "file_count": len(result.files),
+            "total_bytes": result.total_bytes,
+            "backup_id": self._current_backup_id,
+            "deleted_files": list(result.deleted_files),
+        }
+        if result.health_check is not None:
+            details["health_check"] = {
+                "url": result.health_check.url,
+                "ok": result.health_check.ok,
+                "status_code": result.health_check.status_code,
+                "error": result.health_check.error,
+            }
         self._finish_operation(
             "succeeded",
-            details={
-                "plan_id": result.plan_id,
-                "file_count": len(result.files),
-                "total_bytes": result.total_bytes,
-                "backup_id": self._current_backup_id,
-            },
+            details=details,
         )
-        self.summary.setText(
-            f"同期完了 / {len(result.files)}ファイル / {result.total_bytes:,} bytes。"
-            "転送後ハッシュを確認済みです。"
-        )
+        if result.health_check is not None and not result.health_check.ok:
+            health_detail = result.health_check.error or "不明なエラー"
+            self.summary.setText(
+                f"同期は完了しましたが、HTTPS動作確認に失敗しました: {health_detail}"
+            )
+            QMessageBox.warning(
+                self,
+                "同期完了・動作確認失敗",
+                "ファイルの同期と転送後ハッシュ検証は完了しています。\n\n"
+                f"確認先: {result.health_check.url}\n"
+                f"結果: {health_detail}\n\n"
+                "ブラウザとサーバーログを確認し、必要な場合は履歴から復元してください。",
+            )
+        else:
+            health_text = ""
+            if result.health_check is not None:
+                health_text = f" HTTPS {result.health_check.status_code}を確認済みです。"
+            self.summary.setText(
+                f"同期完了 / {len(result.files)}ファイル / {result.total_bytes:,} bytes。"
+                "転送後ハッシュを確認済みです。"
+                f" 承認済み削除 {len(result.deleted_files)}件。"
+                + health_text
+            )
         self._current_plan_id = None
         self._reset_write_state()
         cleanup_stale_staging(self.store, self.staging_parent)

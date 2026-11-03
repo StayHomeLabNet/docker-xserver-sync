@@ -203,6 +203,7 @@ class ProjectStore:
                 remote_root=item["remote_root"],
                 exclude_patterns=tuple(item.get("exclude_patterns", ())),
                 protect_patterns=tuple(item.get("protect_patterns", ())),
+                runtime_paths_confirmed=item.get("runtime_paths_confirmed", False),
                 file_mode=item.get("file_mode", 0o644),
                 directory_mode=item.get("directory_mode", 0o755),
             )

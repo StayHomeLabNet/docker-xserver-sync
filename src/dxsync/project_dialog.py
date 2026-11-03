@@ -4,7 +4,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -23,8 +26,9 @@ from PySide6.QtWidgets import (
 )
 
 from .models import Project, SiteType, SyncMapping, utc_now
+from .presets import get_preset
 from .storage import ProjectStore
-from .validation import ValidationIssue, validate_project
+from .validation import ValidationIssue, normalize_runtime_directory, validate_project
 
 
 SITE_LABELS = {
@@ -39,6 +43,70 @@ def _hint(text: str) -> QLabel:
     label.setWordWrap(True)
     label.setStyleSheet("color: #57606a; font-size: 11px;")
     return label
+
+
+class RuntimePathsDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        patterns: tuple[str, ...] = (),
+        confirmed: bool = False,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.patterns = patterns
+        self.setWindowTitle("本番で書き込まれるディレクトリ")
+        self.resize(620, 500)
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            "XServer上でアップロード、ログ、キャッシュなどが保存される"
+            "ディレクトリを、同期元ルートからの相対パスで1行ずつ入力してください。"
+            "ここに登録した場所は走査・アップロード・削除の対象にしません。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        defaults = "\n".join(f"• {path}" for path in get_preset(SiteType.CUSTOM_PHP).protect_patterns)
+        default_label = QLabel("次の場所は常に自動保護されます。\n" + defaults)
+        default_label.setWordWrap(True)
+        default_label.setStyleSheet("background: #f6f8fa; padding: 8px;")
+        layout.addWidget(default_label)
+
+        layout.addWidget(QLabel("その他の本番書き込みディレクトリ（1行に1つ）"))
+        self.paths_edit = QPlainTextEdit()
+        self.paths_edit.setPlaceholderText("userfiles/\ndata/sessions/")
+        self.paths_edit.setPlainText("\n".join(patterns))
+        layout.addWidget(self.paths_edit, 1)
+
+        self.confirm = QCheckBox(
+            "本番で書き込まれる場所を確認し、上記の自動保護と追加一覧に漏れがないことを確認しました"
+        )
+        self.confirm.setChecked(confirmed)
+        layout.addWidget(self.confirm)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("確認済みとして保存")
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(confirmed)
+        self.confirm.toggled.connect(self.buttons.button(QDialogButtonBox.Ok).setEnabled)
+        self.buttons.accepted.connect(self._accept_paths)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def _accept_paths(self) -> None:
+        normalized: list[str] = []
+        for line_number, value in enumerate(self.paths_edit.toPlainText().splitlines(), start=1):
+            if not value.strip():
+                continue
+            try:
+                path = normalize_runtime_directory(value)
+            except ValueError as exc:
+                QMessageBox.warning(self, "パスを確認", f"{line_number}行目: {exc}")
+                return
+            if path not in normalized:
+                normalized.append(path)
+        self.patterns = tuple(normalized)
+        self.accept()
 
 
 class ProjectDialog(QDialog):
@@ -115,6 +183,9 @@ class ProjectDialog(QDialog):
         mapping_header = QHBoxLayout()
         mapping_header.addWidget(QLabel("同期するフォルダの組み合わせ"))
         mapping_header.addStretch(1)
+        self.runtime_paths_button = QPushButton("本番書き込み先を設定…")
+        self.runtime_paths_button.clicked.connect(self._edit_runtime_paths)
+        mapping_header.addWidget(self.runtime_paths_button)
         add_mapping = QPushButton("PC側フォルダを追加…")
         add_mapping.clicked.connect(self._add_mapping)
         remove_mapping = QPushButton("選択行を削除")
@@ -123,14 +194,20 @@ class ProjectDialog(QDialog):
         mapping_header.addWidget(remove_mapping)
         layout.addLayout(mapping_header)
 
-        self.mapping_table = QTableWidget(0, 3)
+        self.mapping_table = QTableWidget(0, 4)
         self.mapping_table.setHorizontalHeaderLabels(
-            ("用途", "PC側の同期元フォルダ", "XServer側のテストフォルダ（絶対パス）")
+            (
+                "用途",
+                "PC側の同期元フォルダ",
+                "XServer側のテストフォルダ（絶対パス）",
+                "本番書き込み先",
+            )
         )
         header = self.mapping_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         layout.addWidget(self.mapping_table, 1)
 
         mapping_help = _hint(
@@ -164,6 +241,7 @@ class ProjectDialog(QDialog):
             SiteType.CUSTOM_PHP: "WordPressでもLaravelでもないPHPサイト向けです。",
         }
         self.site_help.setText(messages[site_type])
+        self.runtime_paths_button.setEnabled(site_type is SiteType.CUSTOM_PHP)
 
     def _show_setup_help(self) -> None:
         QMessageBox.information(
@@ -201,6 +279,8 @@ class ProjectDialog(QDialog):
                 mapping.local_root,
                 mapping.remote_root,
                 mapping.mapping_id,
+                mapping.protect_patterns,
+                mapping.runtime_paths_confirmed,
             )
 
     def _append_mapping(
@@ -209,6 +289,8 @@ class ProjectDialog(QDialog):
         local_root: str,
         remote_root: str,
         mapping_id: str | None = None,
+        protect_patterns: tuple[str, ...] = (),
+        runtime_paths_confirmed: bool = False,
     ) -> None:
         row = self.mapping_table.rowCount()
         self.mapping_table.insertRow(row)
@@ -217,6 +299,12 @@ class ProjectDialog(QDialog):
         self.mapping_table.setItem(row, 0, name_item)
         self.mapping_table.setItem(row, 1, QTableWidgetItem(local_root))
         self.mapping_table.setItem(row, 2, QTableWidgetItem(remote_root))
+        status_item = QTableWidgetItem()
+        status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+        status_item.setData(Qt.UserRole, protect_patterns)
+        status_item.setData(Qt.UserRole + 1, runtime_paths_confirmed)
+        self.mapping_table.setItem(row, 3, status_item)
+        self._update_runtime_status(row)
 
     def _add_mapping(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "ローカルルートを選択")
@@ -237,6 +325,42 @@ class ProjectDialog(QDialog):
         for row in rows:
             self.mapping_table.removeRow(row)
 
+    def _update_runtime_status(self, row: int) -> None:
+        item = self.mapping_table.item(row, 3)
+        if item is None:
+            return
+        patterns = tuple(item.data(Qt.UserRole) or ())
+        confirmed = bool(item.data(Qt.UserRole + 1))
+        if not confirmed:
+            item.setText("未確認（同期不可）")
+            item.setForeground(QColor("#cf222e"))
+        elif patterns:
+            item.setText(f"確認済み（追加 {len(patterns)}件）")
+            item.setToolTip("\n".join(patterns))
+            item.setForeground(QColor("#1a7f37"))
+        else:
+            item.setText("確認済み（自動保護のみ）")
+            item.setForeground(QColor("#1a7f37"))
+
+    def _edit_runtime_paths(self) -> None:
+        row = self.mapping_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "同期先を選択", "設定する同期フォルダの行を選択してください。")
+            return
+        item = self.mapping_table.item(row, 3)
+        if item is None:
+            return
+        dialog = RuntimePathsDialog(
+            patterns=tuple(item.data(Qt.UserRole) or ()),
+            confirmed=bool(item.data(Qt.UserRole + 1)),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        item.setData(Qt.UserRole, dialog.patterns)
+        item.setData(Qt.UserRole + 1, True)
+        self._update_runtime_status(row)
+
     def _browse_key(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "SSH秘密鍵を選択")
         if selected:
@@ -245,9 +369,11 @@ class ProjectDialog(QDialog):
     def _read_mappings(self) -> tuple[SyncMapping, ...]:
         mappings: list[SyncMapping] = []
         for row in range(self.mapping_table.rowCount()):
-            cells = [self.mapping_table.item(row, column) for column in range(3)]
-            values = [cell.text().strip() if cell else "" for cell in cells]
+            cells = [self.mapping_table.item(row, column) for column in range(4)]
+            values = [cell.text().strip() if cell else "" for cell in cells[:3]]
             mapping_id = cells[0].data(Qt.UserRole) if cells[0] else None
+            protect_patterns = tuple(cells[3].data(Qt.UserRole) or ()) if cells[3] else ()
+            runtime_paths_confirmed = bool(cells[3].data(Qt.UserRole + 1)) if cells[3] else False
             original = self._original_mappings.get(mapping_id)
             if original:
                 mappings.append(
@@ -256,10 +382,18 @@ class ProjectDialog(QDialog):
                         name=values[0],
                         local_root=values[1],
                         remote_root=values[2],
+                        protect_patterns=protect_patterns,
+                        runtime_paths_confirmed=runtime_paths_confirmed,
                     )
                 )
             else:
-                mappings.append(SyncMapping.create(values[0], values[1], values[2]))
+                mappings.append(
+                    replace(
+                        SyncMapping.create(values[0], values[1], values[2]),
+                        protect_patterns=protect_patterns,
+                        runtime_paths_confirmed=runtime_paths_confirmed,
+                    )
+                )
         return tuple(mappings)
 
     def _save(self) -> None:

@@ -155,6 +155,75 @@ def test_deploy_add_and_update_after_full_temporary_upload(tmp_path: Path) -> No
     assert not any(".dxsync-" in path for path in sftp.files)
 
 
+def test_deploy_deletes_only_explicitly_approved_remote_only_file(tmp_path: Path) -> None:
+    sftp = MemorySftp()
+    sftp.files["/home/user/site/remove.php"] = b"remove"
+    sftp.files["/home/user/site/keep.php"] = b"keep"
+    plan = make_plan(
+        tuple(
+            FileChange(name, ChangeType.REMOTE_ONLY, None, record(name, content))
+            for name, content in (("remove.php", b"remove"), ("keep.php", b"keep"))
+        )
+    )
+    approval = authorize(plan)
+    approval.delete_paths = ("remove.php",)
+
+    result = RemoteDeploymentEngine().deploy(
+        sftp=sftp,
+        plan=plan,
+        staging_root=tmp_path,
+        remote_root="/home/user/site",
+        authorization=approval,
+    )
+
+    assert result.deleted_files == ("remove.php",)
+    assert "/home/user/site/remove.php" not in sftp.files
+    assert sftp.files["/home/user/site/keep.php"] == b"keep"
+    assert not any(".dxsync-" in path for path in sftp.files)
+
+
+def test_deletion_failure_rolls_back_already_published_update(tmp_path: Path) -> None:
+    class DeletionFailSftp(MemorySftp):
+        def rename(self, oldpath: str, newpath: str) -> None:
+            if oldpath.endswith("/remove.php") and ".old" in newpath:
+                raise OSError("injected deletion failure")
+            super().rename(oldpath, newpath)
+
+    sftp = DeletionFailSftp()
+    sftp.files["/home/user/site/update.php"] = b"old"
+    sftp.files["/home/user/site/remove.php"] = b"remove"
+    stage(tmp_path, "update.php", b"new")
+    plan = make_plan((
+        FileChange(
+            "update.php",
+            ChangeType.UPDATE,
+            record("update.php", b"new"),
+            record("update.php", b"old"),
+        ),
+        FileChange(
+            "remove.php",
+            ChangeType.REMOTE_ONLY,
+            None,
+            record("remove.php", b"remove"),
+        ),
+    ))
+    approval = authorize(plan)
+    approval.delete_paths = ("remove.php",)
+
+    with pytest.raises(OSError, match="injected deletion failure"):
+        RemoteDeploymentEngine().deploy(
+            sftp=sftp,
+            plan=plan,
+            staging_root=tmp_path,
+            remote_root="/home/user/site",
+            authorization=approval,
+        )
+
+    assert sftp.files["/home/user/site/update.php"] == b"old"
+    assert sftp.files["/home/user/site/remove.php"] == b"remove"
+    assert not any(".dxsync-" in path for path in sftp.files)
+
+
 def test_deploy_rolls_back_all_applied_files_on_later_failure(tmp_path: Path) -> None:
     sftp = MemorySftp()
     sftp.files["/home/user/site/one.php"] = b"old-one"

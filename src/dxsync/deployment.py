@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Protocol
 
+from .health import HealthCheckResult
 from .models import ChangeType, FileChange, SyncPlan
 from .validation import normalize_remote_root
 
@@ -40,6 +41,8 @@ class DeploymentResult:
     remote_root: str
     files: tuple[DeployedFile, ...]
     total_bytes: int
+    health_check: HealthCheckResult | None = None
+    deleted_files: tuple[str, ...] = ()
 
 
 @dataclass
@@ -48,6 +51,7 @@ class DeploymentAuthorization:
     backup_plan_id: str
     remote_root: str
     approved: bool
+    delete_paths: tuple[str, ...] = ()
     used: bool = False
 
     def consume(self, *, plan_id: str, remote_root: str) -> None:
@@ -72,6 +76,13 @@ class _PreparedFile:
     sha256: str
     size: int
     mode: int
+
+
+@dataclass(frozen=True)
+class _PreparedDeletion:
+    change: FileChange
+    destination: str
+    old_temporary: str
 
 
 def _safe_token(value: str) -> str:
@@ -155,6 +166,7 @@ class RemoteDeploymentEngine:
             raise DeployError("Remote root is not a directory")
         token = f"{_safe_token(plan.plan_id)[:24]}-{uuid.uuid4().hex[:12]}"
         prepared: list[_PreparedFile] = []
+        prepared_deletions: list[_PreparedDeletion] = []
         created_directories: list[str] = []
 
         upload_changes = [
@@ -235,7 +247,36 @@ class RemoteDeploymentEngine:
             self._clean_prepared(sftp, prepared, created_directories)
             raise
 
+        remote_only = {
+            change.relative_path: change
+            for change in plan.changes
+            if change.change_type is ChangeType.REMOTE_ONLY
+        }
+        requested_deletions = set(authorization.delete_paths)
+        if requested_deletions - set(remote_only):
+            self._clean_prepared(sftp, prepared, created_directories)
+            raise DeployError("Deletion approval contains files outside the plan")
+        for relative in sorted(requested_deletions):
+            change = remote_only[relative]
+            if change.remote is None or not change.remote.sha256:
+                self._clean_prepared(sftp, prepared, created_directories)
+                raise DeployError(f"Missing approved remote hash: {relative}")
+            destination = str(PurePosixPath(normalized_root) / relative)
+            if not _exists(sftp, destination):
+                self._clean_prepared(sftp, prepared, created_directories)
+                raise DeployError(f"Deletion candidate is missing: {relative}")
+            current_hash, _ = _hash_remote(sftp, destination)
+            if current_hash != change.remote.sha256:
+                self._clean_prepared(sftp, prepared, created_directories)
+                raise DeployError(f"Deletion candidate changed: {relative}")
+            old_temporary = destination + f".dxsync-{token}.old"
+            if _exists(sftp, old_temporary):
+                self._clean_prepared(sftp, prepared, created_directories)
+                raise DeployError(f"Deletion temporary file already exists: {relative}")
+            prepared_deletions.append(_PreparedDeletion(change, destination, old_temporary))
+
         applied: list[_PreparedFile] = []
+        applied_deletions: list[_PreparedDeletion] = []
         try:
             for item in prepared:
                 if item.change.change_type is ChangeType.UPDATE:
@@ -255,8 +296,23 @@ class RemoteDeploymentEngine:
                 deployed_hash, deployed_size = _hash_remote(sftp, item.destination)
                 if deployed_hash != item.sha256 or deployed_size != item.size:
                     raise DeployError(f"Published file verification failed: {item.change.relative_path}")
+            for item in prepared_deletions:
+                assert item.change.remote is not None
+                current_hash, _ = _hash_remote(sftp, item.destination)
+                if current_hash != item.change.remote.sha256:
+                    raise DeployError(
+                        f"Deletion candidate changed during deployment: {item.change.relative_path}"
+                    )
+                sftp.rename(item.destination, item.old_temporary)
+                applied_deletions.append(item)
         except Exception as exc:
-            rollback_errors = self._rollback(sftp, applied, prepared, created_directories)
+            rollback_errors = self._rollback(
+                sftp,
+                applied,
+                prepared,
+                created_directories,
+                applied_deletions,
+            )
             if rollback_errors:
                 raise DeployError(
                     f"Deployment failed and rollback needs attention: {exc}; "
@@ -266,6 +322,9 @@ class RemoteDeploymentEngine:
 
         for item in prepared:
             if item.old_temporary and _exists(sftp, item.old_temporary):
+                sftp.remove(item.old_temporary)
+        for item in prepared_deletions:
+            if _exists(sftp, item.old_temporary):
                 sftp.remove(item.old_temporary)
 
         files = tuple(
@@ -282,6 +341,7 @@ class RemoteDeploymentEngine:
             remote_root=normalized_root,
             files=files,
             total_bytes=sum(item.size for item in prepared),
+            deleted_files=tuple(item.change.relative_path for item in prepared_deletions),
         )
 
     def _clean_prepared(
@@ -305,8 +365,17 @@ class RemoteDeploymentEngine:
         applied: list[_PreparedFile],
         prepared: list[_PreparedFile],
         created_directories: list[str],
+        applied_deletions: list[_PreparedDeletion] | None = None,
     ) -> list[str]:
         errors: list[str] = []
+        for item in reversed(applied_deletions or []):
+            try:
+                if _exists(sftp, item.destination):
+                    raise DeployError(f"Deletion destination reappeared: {item.change.relative_path}")
+                if _exists(sftp, item.old_temporary):
+                    sftp.rename(item.old_temporary, item.destination)
+            except Exception as exc:
+                errors.append(f"deleted {item.change.relative_path}: {exc}")
         for item in reversed(applied):
             try:
                 if _exists(sftp, item.destination):

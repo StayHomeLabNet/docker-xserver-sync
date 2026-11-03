@@ -133,3 +133,44 @@ def test_backup_root_cannot_be_inside_deployment_root() -> None:
             remote_root="/home/user/site",
             backup_root="/home/user/site/backups",
         )
+
+
+def test_backup_copies_only_approved_remote_only_deletion_candidates() -> None:
+    sftp = MemorySftp()
+    sftp.directories.update({"/home", "/home/user", "/home/user/site"})
+    sftp.files["/home/user/site/remove.php"] = b"remove"
+    sftp.files["/home/user/site/keep.php"] = b"keep"
+    now = utc_now()
+    changes = tuple(
+        FileChange(
+            name,
+            ChangeType.REMOTE_ONLY,
+            None,
+            FileRecord(name, EntryKind.FILE, len(content), 1, digest(content)),
+        )
+        for name, content in (("remove.php", b"remove"), ("keep.php", b"keep"))
+    )
+    plan = SyncPlan(
+        "plan-delete",
+        "mapping-1",
+        now,
+        now + timedelta(minutes=5),
+        changes,
+        "local",
+        "remote",
+    )
+
+    result = RemoteBackupEngine().create_backup(
+        sftp=sftp,
+        plan=plan,
+        project_id="project-1",
+        remote_root="/home/user/site",
+        backup_root="/home/user/.dxsync/backups",
+        delete_paths=("remove.php",),
+    )
+
+    assert [item.relative_path for item in result.files] == ["remove.php"]
+    assert result.files[0].change_type is ChangeType.REMOTE_ONLY
+    assert result.files[0].mode == 0o600
+    assert sftp.files["/home/user/site/remove.php"] == b"remove"
+    assert sftp.files["/home/user/site/keep.php"] == b"keep"

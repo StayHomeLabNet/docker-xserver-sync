@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -6,7 +7,11 @@ from dxsync.storage import BackupRecord, ProjectStore
 
 
 def test_project_round_trip(tmp_path: Path) -> None:
-    mapping = SyncMapping.create("public", str(tmp_path / "site"), "/remote/public_html")
+    mapping = replace(
+        SyncMapping.create("public", str(tmp_path / "site"), "/remote/public_html"),
+        protect_patterns=("userfiles/",),
+        runtime_paths_confirmed=True,
+    )
     project = Project.create(
         name="Example",
         site_type=SiteType.WORDPRESS,

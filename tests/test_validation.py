@@ -1,9 +1,10 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from dxsync.models import Project, SiteType, SyncMapping
-from dxsync.validation import normalize_remote_root, validate_project
+from dxsync.validation import normalize_remote_root, normalize_runtime_directory, validate_project
 
 
 def make_project(tmp_path: Path, mappings: tuple[SyncMapping, ...]) -> Project:
@@ -57,4 +58,38 @@ def test_missing_connection_fields_are_rejected(tmp_path: Path) -> None:
     )
     issues = validate_project(project)
     assert {issue.code for issue in issues} >= {"ssh_host", "ssh_username"}
+
+
+def test_custom_php_requires_explicit_runtime_path_confirmation(tmp_path: Path) -> None:
+    local = tmp_path / "site"
+    local.mkdir()
+    mapping = SyncMapping.create("public", str(local), "/home/user/public")
+    project = replace(
+        make_project(tmp_path, (mapping,)),
+        site_type=SiteType.CUSTOM_PHP,
+    )
+
+    assert any(issue.code == "runtime_paths_unconfirmed" for issue in validate_project(project))
+
+    confirmed = replace(
+        project,
+        mappings=(replace(mapping, runtime_paths_confirmed=True),),
+    )
+    assert not any(
+        issue.code == "runtime_paths_unconfirmed" for issue in validate_project(confirmed)
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("uploads", "uploads/"), ("data/sessions/", "data/sessions/")],
+)
+def test_runtime_directory_is_normalized(value: str, expected: str) -> None:
+    assert normalize_runtime_directory(value) == expected
+
+
+@pytest.mark.parametrize("value", ["/absolute", "../escape", r"data\\sessions", "logs/*"])
+def test_unsafe_runtime_directory_is_rejected(value: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_runtime_directory(value)
 

@@ -115,6 +115,7 @@ class SyncMapping:
     remote_root: str
     exclude_patterns: tuple[str, ...] = ()
     protect_patterns: tuple[str, ...] = ()
+    runtime_paths_confirmed: bool = False
     file_mode: int = 0o644
     directory_mode: int = 0o755
 

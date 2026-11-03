@@ -65,9 +65,9 @@ class _RestoreItem:
     backup_path: str
     backup_hash: str
     backup_size: int
-    expected_current_hash: str
+    expected_current_hash: str | None
     new_temporary: str
-    old_temporary: str
+    old_temporary: str | None
     mode: int
 
 
@@ -96,7 +96,7 @@ class RemoteRestoreEngine:
         sftp: RestoreRemoteFileSystem,
         manifest_path: str,
         destination_root: str,
-        expected_current_hashes: dict[str, str],
+        expected_current_hashes: dict[str, str | None],
         authorization: RestoreAuthorization,
     ) -> RestoreResult:
         destination_root = normalize_remote_root(destination_root)
@@ -123,6 +123,8 @@ class RemoteRestoreEngine:
                 backup_hash = str(record["sha256"])
                 backup_size = int(record["size"])
                 backup_path = str(PurePosixPath(str(record["backup_path"])))
+                change_type = str(record.get("change_type", "update"))
+                mode = int(record.get("mode", 0o644))
             except (KeyError, TypeError, ValueError) as exc:
                 raise RestoreError(f"Invalid backup file record: {exc}") from exc
             if relative in seen:
@@ -130,26 +132,35 @@ class RemoteRestoreEngine:
             seen.add(relative)
             if not backup_path.startswith(manifest_directory + "/"):
                 raise RestoreError(f"Backup file is outside its job directory: {relative}")
-            expected_current = expected_current_hashes.get(relative)
-            if not expected_current:
+            if relative not in expected_current_hashes:
                 raise RestoreError(f"Missing expected current hash: {relative}")
+            expected_current = expected_current_hashes[relative]
             destination = str(PurePosixPath(destination_root) / relative)
-            if not _exists(sftp, destination):
-                raise RestoreError(f"Current destination file is missing: {relative}")
-            current_hash, _ = _hash_remote(sftp, destination)
-            if current_hash != expected_current:
-                raise RestoreError(f"Current file was externally modified: {relative}")
+            destination_exists = _exists(sftp, destination)
+            if change_type == "remote_only":
+                if expected_current is not None or destination_exists:
+                    raise RestoreError(f"Deleted destination unexpectedly exists: {relative}")
+            else:
+                if expected_current is None or not destination_exists:
+                    raise RestoreError(f"Current destination file is missing: {relative}")
+                current_hash, _ = _hash_remote(sftp, destination)
+                if current_hash != expected_current:
+                    raise RestoreError(f"Current file was externally modified: {relative}")
             actual_hash, actual_size = _hash_remote(sftp, backup_path)
             if actual_hash != backup_hash or actual_size != backup_size:
                 raise RestoreError(f"Backup file verification failed: {relative}")
             new_temporary = destination + f".dxsync-restore-{token}.new"
-            old_temporary = destination + f".dxsync-restore-{token}.old"
-            if _exists(sftp, new_temporary) or _exists(sftp, old_temporary):
+            old_temporary = (
+                destination + f".dxsync-restore-{token}.old" if destination_exists else None
+            )
+            if _exists(sftp, new_temporary) or (
+                old_temporary is not None and _exists(sftp, old_temporary)
+            ):
                 raise RestoreError(f"Restore temporary file already exists: {relative}")
             items.append(_RestoreItem(
                 relative, destination, backup_path, backup_hash, backup_size,
                 expected_current, new_temporary, old_temporary,
-                stat.S_IMODE(sftp.stat(destination).st_mode),
+                stat.S_IMODE(sftp.stat(destination).st_mode) if destination_exists else mode,
             ))
 
         prepared: list[_RestoreItem] = []
@@ -172,10 +183,17 @@ class RemoteRestoreEngine:
         applied: list[_RestoreItem] = []
         try:
             for item in prepared:
-                current_hash, _ = _hash_remote(sftp, item.destination)
-                if current_hash != item.expected_current_hash:
-                    raise RestoreError(f"Current file changed during restore: {item.relative_path}")
-                sftp.rename(item.destination, item.old_temporary)
+                if item.expected_current_hash is None:
+                    if _exists(sftp, item.destination):
+                        raise RestoreError(
+                            f"Deleted destination reappeared during restore: {item.relative_path}"
+                        )
+                else:
+                    current_hash, _ = _hash_remote(sftp, item.destination)
+                    if current_hash != item.expected_current_hash:
+                        raise RestoreError(f"Current file changed during restore: {item.relative_path}")
+                    assert item.old_temporary is not None
+                    sftp.rename(item.destination, item.old_temporary)
                 applied.append(item)
                 sftp.rename(item.new_temporary, item.destination)
                 restored_hash, restored_size = _hash_remote(sftp, item.destination)
@@ -190,7 +208,7 @@ class RemoteRestoreEngine:
             raise
 
         for item in applied:
-            if _exists(sftp, item.old_temporary):
+            if item.old_temporary is not None and _exists(sftp, item.old_temporary):
                 sftp.remove(item.old_temporary)
         return RestoreResult(
             backup_id=backup_id,
@@ -216,7 +234,7 @@ class RemoteRestoreEngine:
             try:
                 if _exists(sftp, item.destination):
                     sftp.remove(item.destination)
-                if _exists(sftp, item.old_temporary):
+                if item.old_temporary is not None and _exists(sftp, item.old_temporary):
                     sftp.rename(item.old_temporary, item.destination)
             except Exception as exc:
                 errors.append(f"{item.relative_path}: {exc}")
