@@ -9,7 +9,7 @@ def run() -> int:
 
         app = QApplication([])
         window = MainWindow()
-        print(window.windowTitle())
+        print("Docker XServer Sync")
         window.close()
         app.quit()
         return 0

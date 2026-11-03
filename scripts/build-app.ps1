@@ -49,9 +49,13 @@ try {
     }
 
     $env:DXSYNC_STATE_DIR = Join-Path $buildRoot "state"
-    & $executable --smoke-test
-    if ($LASTEXITCODE -ne 0) {
-        throw "Compiled application smoke test failed with exit code $LASTEXITCODE."
+    $smokeTest = Start-Process `
+        -FilePath $executable `
+        -ArgumentList "--smoke-test" `
+        -Wait `
+        -PassThru
+    if ($smokeTest.ExitCode -ne 0) {
+        throw "Compiled application smoke test failed with exit code $($smokeTest.ExitCode)."
     }
 
     New-Item -ItemType Directory -Force -Path $distDirectory | Out-Null
@@ -72,6 +76,6 @@ finally {
     Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
     Remove-Item Env:DXSYNC_STATE_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $buildRoot) {
-        Remove-Item -LiteralPath $buildRoot -Recurse -Force
+        Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
