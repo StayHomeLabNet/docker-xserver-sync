@@ -90,10 +90,9 @@ try {
             Remove-Item -LiteralPath $installerPath -Force
         }
 
-        & $iscc `
-            "/DAppSource=`"$appDirectory`"" `
-            "/DOutputDir=`"$distDirectory`"" `
-            scripts/windows-installer.iss
+        $env:DXSYNC_APP_SOURCE = $appDirectory
+        $env:DXSYNC_OUTPUT_DIR = $distDirectory
+        & $iscc scripts/windows-installer.iss
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
             throw "Windows installer compilation failed."
         }
@@ -149,6 +148,8 @@ try {
 finally {
     Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
     Remove-Item Env:DXSYNC_STATE_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:DXSYNC_APP_SOURCE -ErrorAction SilentlyContinue
+    Remove-Item Env:DXSYNC_OUTPUT_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $buildRoot) {
         Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
     }

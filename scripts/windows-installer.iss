@@ -3,13 +3,8 @@
 #define MyAppPublisher "StayHomeLabNet"
 #define MyAppExeName "Docker XServer Sync.exe"
 
-#ifndef AppSource
-  #error AppSource must be supplied with /DAppSource=...
-#endif
-
-#ifndef OutputDir
-  #error OutputDir must be supplied with /DOutputDir=...
-#endif
+#define AppSource GetEnv("DXSYNC_APP_SOURCE")
+#define OutputDir GetEnv("DXSYNC_OUTPUT_DIR")
 
 [Setup]
 AppId={{D8E35107-A38C-4EE9-B3BA-EB38BB08A6D2}
