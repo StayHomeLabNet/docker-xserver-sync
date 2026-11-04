@@ -1,3 +1,7 @@
+param(
+    [switch]$BuildInstaller
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -12,6 +16,7 @@ $buildRoot = Join-Path $env:TEMP ("dxsync-windows-build-" + [guid]::NewGuid().To
 $buildVenv = Join-Path $buildRoot "venv"
 $distDirectory = Join-Path $repoRoot "dist"
 $zipPath = Join-Path $distDirectory "Docker XServer Sync-Windows-x64.zip"
+$installerPath = Join-Path $distDirectory "Docker-XServer-Sync-Setup-v0.1.0.exe"
 
 New-Item -ItemType Directory -Path $buildRoot | Out-Null
 
@@ -71,6 +76,75 @@ try {
     $hash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
     Write-Output $archive.FullName
     Write-Output ("SHA256 " + $hash.Hash.ToLowerInvariant())
+
+    if ($BuildInstaller) {
+        $isccCandidates = @(
+            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup 6/ISCC.exe")
+        )
+        $iscc = $isccCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if (-not $iscc) {
+            throw "Inno Setup 6 compiler was not found."
+        }
+        if (Test-Path -LiteralPath $installerPath) {
+            Remove-Item -LiteralPath $installerPath -Force
+        }
+
+        & $iscc `
+            "/DAppSource=`"$appDirectory`"" `
+            "/DOutputDir=`"$distDirectory`"" `
+            scripts/windows-installer.iss
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+            throw "Windows installer compilation failed."
+        }
+
+        $installTestDirectory = Join-Path $buildRoot "installed"
+        $installResult = Start-Process `
+            -FilePath $installerPath `
+            -ArgumentList @(
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/DIR=`"$installTestDirectory`""
+            ) `
+            -Wait `
+            -PassThru
+        if ($installResult.ExitCode -ne 0) {
+            throw "Silent installer test failed with exit code $($installResult.ExitCode)."
+        }
+
+        $installedExecutable = Join-Path $installTestDirectory "Docker XServer Sync.exe"
+        if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
+            throw "Installed executable was not found: $installedExecutable"
+        }
+        $env:DXSYNC_STATE_DIR = Join-Path $buildRoot "installed-state"
+        $installedSmokeTest = Start-Process `
+            -FilePath $installedExecutable `
+            -ArgumentList "--smoke-test" `
+            -Wait `
+            -PassThru
+        if ($installedSmokeTest.ExitCode -ne 0) {
+            throw "Installed application smoke test failed with exit code $($installedSmokeTest.ExitCode)."
+        }
+
+        $uninstaller = Join-Path $installTestDirectory "unins000.exe"
+        if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+            throw "Uninstaller was not found: $uninstaller"
+        }
+        $uninstallResult = Start-Process `
+            -FilePath $uninstaller `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+            -Wait `
+            -PassThru
+        if ($uninstallResult.ExitCode -ne 0) {
+            throw "Silent uninstall test failed with exit code $($uninstallResult.ExitCode)."
+        }
+
+        $installer = Get-Item -LiteralPath $installerPath
+        $installerHash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA256
+        Write-Output $installer.FullName
+        Write-Output ("SHA256 " + $installerHash.Hash.ToLowerInvariant())
+    }
 }
 finally {
     Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue

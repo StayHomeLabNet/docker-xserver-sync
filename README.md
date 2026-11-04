@@ -61,11 +61,12 @@ zsh scripts/build-app.sh
 
 ## Windowsアプリのビルド
 
-Windows x64環境で次を実行すると、全テスト、Nuitkaコンパイル、起動スモークテスト、ZIP作成まで行います。
+Windows x64環境で次を実行すると、全テスト、Nuitkaコンパイル、起動スモークテスト、ZIP作成まで行います。Inno Setup 6が導入済みの場合は`-BuildInstaller`でインストーラーとインストール後の起動・アンインストール試験も実行できます。
 
 ```powershell
 pwsh -File scripts/build-app.ps1
+pwsh -File scripts/build-app.ps1 -BuildInstaller
 ```
 
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.0.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
 
