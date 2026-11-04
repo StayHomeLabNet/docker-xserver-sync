@@ -107,6 +107,40 @@ def test_backup_copies_update_and_verifies_manifest() -> None:
     assert sftp.files["/home/user/site/index.php"] == b"old"
 
 
+def test_backup_creates_manifest_when_remote_is_empty() -> None:
+    sftp = MemorySftp()
+    sftp.directories.update({"/home", "/home/user", "/home/user/site"})
+    now = utc_now()
+    plan = SyncPlan(
+        "plan-empty",
+        "mapping-1",
+        now,
+        now + timedelta(minutes=15),
+        (
+            FileChange(
+                "index.php",
+                ChangeType.ADD,
+                FileRecord("index.php", EntryKind.FILE, 3, 1, digest(b"new")),
+                None,
+            ),
+        ),
+        "local",
+        "remote",
+    )
+
+    result = RemoteBackupEngine().create_backup(
+        sftp=sftp,
+        plan=plan,
+        project_id="project-1",
+        remote_root="/home/user/site",
+        backup_root="/home/user/.dxsync/backups",
+    )
+
+    assert result.files == ()
+    assert result.total_bytes == 0
+    assert result.manifest_path in sftp.files
+
+
 def test_backup_stops_if_remote_changed_after_plan() -> None:
     sftp = MemorySftp()
     sftp.directories.update({"/home", "/home/user", "/home/user/site"})

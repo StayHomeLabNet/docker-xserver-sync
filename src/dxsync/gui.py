@@ -31,6 +31,7 @@ try:
         QLineEdit,
         QMainWindow,
         QMessageBox,
+        QProgressBar,
         QPushButton,
         QSpinBox,
         QTableView,
@@ -50,6 +51,7 @@ from .health import perform_https_health_check
 from .approval_dialog import (
     BackupConfirmationDialog,
     DeploymentApprovalDialog,
+    ForceOverwriteApprovalDialog,
     RestoreApprovalDialog,
 )
 from .backup import BackupResult, RemoteBackupEngine
@@ -58,6 +60,7 @@ from .deployment import (
     DeploymentResult,
     RemoteDeploymentEngine,
 )
+from .force_overwrite import ForceOverwriteEngine, ForceOverwriteResult
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
@@ -366,6 +369,7 @@ class DeployWorker(QObject):
     completed = Signal(object)
     blocked = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(
         self,
@@ -422,6 +426,7 @@ class DeployWorker(QObject):
                 authorization=self.authorization,
                 file_mode=self.mapping.file_mode,
                 directory_mode=self.mapping.directory_mode,
+                progress_callback=self.progress.emit,
             )
             if self.health_check_path is not None:
                 result = replace(
@@ -431,6 +436,57 @@ class DeployWorker(QObject):
                         path=self.health_check_path,
                     ),
                 )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if sftp is not None:
+                sftp.close()
+            if client is not None:
+                client.close()
+
+
+class ForceOverwriteWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(
+        self,
+        *,
+        project: Project,
+        mapping: SyncMapping,
+        passphrase: str | None,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.mapping = mapping
+        self.passphrase = passphrase
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            preset = get_preset(self.project.site_type)
+            result = ForceOverwriteEngine().overwrite(
+                sftp=sftp,
+                local_root=Path(self.mapping.local_root),
+                remote_root=self.mapping.remote_root,
+                exclude_patterns=preset.exclude_patterns + self.mapping.exclude_patterns,
+                protect_patterns=preset.protect_patterns + self.mapping.protect_patterns,
+                file_mode=self.mapping.file_mode,
+                directory_mode=self.mapping.directory_mode,
+                progress_callback=self.progress.emit,
+            )
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -555,6 +611,7 @@ class MainWindow(QMainWindow):
         self._current_plan_id: str | None = None
         self._validated_plan_id: str | None = None
         self._current_backup_id: str | None = None
+        self._backup_skipped = False
         self._approved_delete_paths: tuple[str, ...] = ()
         self._restore_backup_id: str | None = None
         self._current_operation_id: str | None = None
@@ -572,7 +629,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "安全同期モード — 再検証・バックアップ・明示承認を必須にしています"
+            "安全同期モード — 通常は再検証・バックアップ・明示承認を行います"
         )
         subtitle.setStyleSheet("color: #57606a;")
         layout.addWidget(subtitle)
@@ -660,6 +717,9 @@ class MainWindow(QMainWindow):
         self.deploy_button = QPushButton("承認付き同期")
         self.deploy_button.clicked.connect(self._start_deployment)
         self.deploy_button.setEnabled(False)
+        self.force_overwrite_button = QPushButton("無条件上書き")
+        self.force_overwrite_button.clicked.connect(self._start_force_overwrite)
+        self.force_overwrite_button.setEnabled(False)
 
         connection_layout.addWidget(QLabel("ホスト"), 0, 0)
         connection_layout.addWidget(self.host_edit, 0, 1)
@@ -675,6 +735,7 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.key_edit, 3, 1, 1, 3)
         connection_layout.addWidget(key_browse, 3, 4)
         connection_layout.addWidget(self.passphrase_edit, 3, 5)
+        connection_layout.addWidget(self.force_overwrite_button, 4, 1)
         connection_layout.addWidget(self.revalidate_button, 4, 2)
         connection_layout.addWidget(self.backup_button, 4, 3)
         connection_layout.addWidget(self.deploy_button, 4, 4)
@@ -684,6 +745,10 @@ class MainWindow(QMainWindow):
         self.summary = QLabel("フォルダを選択して検査してください。")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        layout.addWidget(self.progress_bar)
 
         self.table_model = FileTableModel()
         table = QTableView()
@@ -775,6 +840,7 @@ class MainWindow(QMainWindow):
         if self._validated_plan_id != self._current_plan_id:
             self._validated_plan_id = None
             self._current_backup_id = None
+            self._backup_skipped = False
         self.revalidate_button.setEnabled(
             self._current_plan_id is not None and self._thread is None
         )
@@ -784,6 +850,7 @@ class MainWindow(QMainWindow):
         self._validated_plan_id = None
         self._current_backup_id = None
         self._approved_delete_paths = ()
+        self._backup_skipped = False
         if hasattr(self, "backup_button"):
             self.backup_button.setEnabled(False)
         if hasattr(self, "deploy_button"):
@@ -796,7 +863,12 @@ class MainWindow(QMainWindow):
             and self._validated_plan_id == self._current_plan_id
         )
         self.backup_button.setEnabled(idle and validated and self._current_backup_id is None)
-        self.deploy_button.setEnabled(idle and validated and self._current_backup_id is not None)
+        self.deploy_button.setEnabled(
+            idle and validated and (self._current_backup_id is not None or self._backup_skipped)
+        )
+        self.force_overwrite_button.setEnabled(
+            idle and self._current_project is not None and self._selected_mapping() is not None
+        )
         self.recovery_button.setEnabled(idle and self._current_project is not None)
 
     def _backup_root(self) -> str:
@@ -878,7 +950,7 @@ class MainWindow(QMainWindow):
             kind=kind,
             details={
                 "mode": "write"
-                if kind in {"backup", "deployment", "restore"}
+                if kind in {"backup", "deployment", "force_overwrite", "restore"}
                 else "read_only"
             },
         )
@@ -1057,6 +1129,15 @@ class MainWindow(QMainWindow):
         if confirmation.exec() != QDialog.Accepted:
             return
         self._approved_delete_paths = confirmation.selected_delete_paths()
+        if confirmation.should_skip_backup():
+            self._backup_skipped = True
+            self._current_backup_id = None
+            self._update_action_buttons()
+            self.summary.setText(
+                "バックアップをスキップしました。復元できないことを確認して承認付き同期へ進んでください。"
+            )
+            return
+        self._backup_skipped = False
 
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
@@ -1092,7 +1173,7 @@ class MainWindow(QMainWindow):
         if (
             self._thread is not None
             or self._validated_plan_id != self._current_plan_id
-            or self._current_backup_id is None
+            or (self._current_backup_id is None and not self._backup_skipped)
         ):
             return
         if not self._require_runtime_paths_confirmation():
@@ -1103,13 +1184,15 @@ class MainWindow(QMainWindow):
         backups = {
             backup.backup_id: backup for backup in self.store.list_backups(project.project_id)
         } if project else {}
-        backup = backups.get(self._current_backup_id)
+        backup = backups.get(self._current_backup_id) if self._current_backup_id else None
         if (
             project is None
             or mapping is None
             or stored is None
-            or backup is None
-            or backup.plan_id != stored.plan.plan_id
+            or (
+                not self._backup_skipped
+                and (backup is None or backup.plan_id != stored.plan.plan_id)
+            )
         ):
             QMessageBox.warning(self, "同期できません", "この計画に対応するバックアップがありません。")
             return
@@ -1126,7 +1209,8 @@ class MainWindow(QMainWindow):
             add_count=counts[ChangeType.ADD],
             update_count=counts[ChangeType.UPDATE],
             upload_bytes=upload_bytes,
-            backup_id=backup.backup_id,
+            backup_id=backup.backup_id if backup is not None else None,
+            backup_skipped=self._backup_skipped,
             delete_count=len(self._approved_delete_paths),
             parent=self,
         )
@@ -1139,6 +1223,15 @@ class MainWindow(QMainWindow):
         self.backup_button.setEnabled(False)
         self.deploy_button.setEnabled(False)
         self.summary.setText("承認済み同期を実行中… 一時転送と検証を行っています。")
+        total_changes = (
+            counts[ChangeType.ADD]
+            + counts[ChangeType.UPDATE]
+            + len(self._approved_delete_paths)
+        )
+        self.progress_bar.setRange(0, max(total_changes, 1))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("承認済み同期 %v/%m")
+        self.progress_bar.setVisible(True)
         self._begin_operation("deployment")
         thread = QThread(self)
         worker = DeployWorker(
@@ -1148,9 +1241,10 @@ class MainWindow(QMainWindow):
             passphrase=self.passphrase_edit.text() or None,
             authorization=DeploymentAuthorization(
                 plan_id=stored.plan.plan_id,
-                backup_plan_id=backup.plan_id,
+                backup_plan_id=backup.plan_id if backup is not None else None,
                 remote_root=mapping.remote_root,
                 approved=True,
+                backup_skipped=self._backup_skipped,
                 delete_paths=self._approved_delete_paths,
             ),
             health_check_path=approval.selected_health_check_path(),
@@ -1160,8 +1254,64 @@ class MainWindow(QMainWindow):
         worker.completed.connect(self._deployment_completed)
         worker.blocked.connect(self._deployment_blocked)
         worker.failed.connect(self._deployment_failed)
+        worker.progress.connect(self._deployment_progress)
         worker.completed.connect(thread.quit)
         worker.blocked.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    @Slot()
+    def _start_force_overwrite(self) -> None:
+        if self._thread is not None or not self._require_runtime_paths_confirmation():
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            return
+        if not Path(mapping.local_root).expanduser().is_dir():
+            QMessageBox.warning(self, "フォルダを確認", "同期元のローカルフォルダを読み取れません。")
+            return
+        approval = ForceOverwriteApprovalDialog(
+            domain=project.domain,
+            remote_root=mapping.remote_root,
+            parent=self,
+        )
+        if approval.exec() != QDialog.Accepted:
+            return
+        if self._current_plan_id is not None:
+            self.store.set_plan_status(self._current_plan_id, "invalid")
+            self._current_plan_id = None
+        self._reset_write_state()
+        cleanup_stale_staging(self.store, self.staging_parent)
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.force_overwrite_button.setEnabled(False)
+        self.revalidate_button.setEnabled(False)
+        self.backup_button.setEnabled(False)
+        self.deploy_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("無条件上書きの準備中…")
+        self.progress_bar.setVisible(True)
+        self.summary.setText(
+            "無条件上書き中… 差分照合・バックアップ・転送後ハッシュ検証は行いません。"
+        )
+        self._begin_operation("force_overwrite")
+        thread = QThread(self)
+        worker = ForceOverwriteWorker(
+            project=project,
+            mapping=mapping,
+            passphrase=self.passphrase_edit.text() or None,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._force_overwrite_progress)
+        worker.completed.connect(self._force_overwrite_completed)
+        worker.failed.connect(self._force_overwrite_failed)
+        worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
@@ -1325,7 +1475,7 @@ class MainWindow(QMainWindow):
             set(result.local.skipped_protected_paths) | set(result.remote.skipped_protected_paths)
         )
         status = "実行不可" if result.has_blocking_issues else "確認可能"
-        persisted = " / 計画保存済み（5分間有効）" if self._current_plan_id else ""
+        persisted = " / 計画保存済み（15分間有効）" if self._current_plan_id else ""
         self._finish_operation(
             "blocked" if result.has_blocking_issues else "succeeded",
             details={
@@ -1354,6 +1504,7 @@ class MainWindow(QMainWindow):
         if result.valid:
             self._validated_plan_id = self._current_plan_id
             self._current_backup_id = None
+            self._backup_skipped = False
             self._update_action_buttons()
             self._finish_operation("succeeded", details={"valid": True})
             self.summary.setText(
@@ -1400,6 +1551,7 @@ class MainWindow(QMainWindow):
         )
         self.store.save_backup(backup)
         self._current_backup_id = backup.backup_id
+        self._backup_skipped = False
         self._finish_operation(
             "succeeded",
             details={
@@ -1433,6 +1585,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _deployment_completed(self, result: DeploymentResult) -> None:
+        self.progress_bar.setVisible(False)
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "used")
         details = {
@@ -1440,6 +1593,7 @@ class MainWindow(QMainWindow):
             "file_count": len(result.files),
             "total_bytes": result.total_bytes,
             "backup_id": self._current_backup_id,
+            "backup_skipped": self._backup_skipped,
             "deleted_files": list(result.deleted_files),
         }
         if result.health_check is not None:
@@ -1482,6 +1636,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _deployment_blocked(self, result: RevalidationResult) -> None:
+        self.progress_bar.setVisible(False)
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "invalid")
         self._finish_operation(
@@ -1495,6 +1650,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _deployment_failed(self, message: str) -> None:
+        self.progress_bar.setVisible(False)
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "invalid")
         self._finish_operation("failed", error=message)
@@ -1503,6 +1659,50 @@ class MainWindow(QMainWindow):
         cleanup_stale_staging(self.store, self.staging_parent)
         self.summary.setText("同期に失敗しました。適用済みファイルは可能な限り復元されました。")
         QMessageBox.critical(self, "同期エラー", message)
+
+    @Slot(int, int, str)
+    def _deployment_progress(self, current: int, total: int, phase: str) -> None:
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(current)
+        self.progress_bar.setFormat(f"{phase}  {current}/{total}")
+        self.summary.setText(f"承認済み同期を実行中… {current}/{total}  {phase}")
+
+    @Slot(int, int, str)
+    def _force_overwrite_progress(self, current: int, total: int, path: str) -> None:
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(current)
+        self.progress_bar.setFormat(f"無条件上書き {current}/{total}")
+        self.summary.setText(f"無条件上書き中… {current}/{total}  {path}")
+
+    @Slot(object)
+    def _force_overwrite_completed(self, result: ForceOverwriteResult) -> None:
+        self.progress_bar.setVisible(False)
+        self._finish_operation(
+            "succeeded",
+            details={
+                "file_count": len(result.files),
+                "total_bytes": result.total_bytes,
+                "remote_root": result.remote_root,
+                "validation": "skipped",
+            },
+        )
+        self.summary.setText(
+            f"無条件上書き完了 / {len(result.files)}ファイル / "
+            f"{result.total_bytes:,} bytes。リモートのみのファイルは削除していません。"
+        )
+        self._current_plan_id = None
+        self._reset_write_state()
+        cleanup_stale_staging(self.store, self.staging_parent)
+
+    @Slot(str)
+    def _force_overwrite_failed(self, message: str) -> None:
+        self.progress_bar.setVisible(False)
+        self._finish_operation("failed", error=message)
+        self._reset_write_state()
+        self.summary.setText(
+            "無条件上書きに失敗しました。このモードはバックアップとロールバックを行いません。"
+        )
+        QMessageBox.critical(self, "無条件上書きエラー", message)
 
     @Slot(object)
     def _recovery_scan_completed(self, result: RecoveryAnalysisResult) -> None:

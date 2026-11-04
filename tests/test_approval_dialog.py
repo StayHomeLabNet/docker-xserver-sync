@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from dxsync.approval_dialog import (
     BackupConfirmationDialog,
     DeploymentApprovalDialog,
+    ForceOverwriteApprovalDialog,
     RestoreApprovalDialog,
 )
 
@@ -40,6 +41,42 @@ def test_backup_confirmation_deletion_candidates_are_opt_in() -> None:
     assert dialog.selected_delete_paths() == ()
     dialog.deletion_table.item(0, 0).setCheckState(Qt.Checked)
     assert dialog.selected_delete_paths() == ("remove.php",)
+
+
+def test_backup_confirmation_preserves_checked_folder() -> None:
+    app()
+    dialog = BackupConfirmationDialog(
+        update_count=0,
+        backup_root="/home/user/.dxsync/backups",
+        remote_only_paths=("uploads/one.jpg", "cache/two.txt"),
+    )
+    dialog.deletion_table.item(0, 0).setCheckState(Qt.Checked)
+    uploads_row = next(
+        row
+        for row in range(dialog.preserve_table.rowCount())
+        if dialog.preserve_table.item(row, 0).text() == "uploads/"
+    )
+    dialog.preserve_table.item(uploads_row, 0).setCheckState(Qt.Checked)
+
+    assert "uploads/" in dialog.preserved_folder_paths()
+    assert "uploads/one.jpg" not in dialog.selected_delete_paths()
+
+
+def test_backup_can_be_explicitly_skipped_without_deletions() -> None:
+    app()
+    dialog = BackupConfirmationDialog(
+        update_count=1,
+        backup_root="/home/user/.dxsync/backups",
+        remote_only_paths=("remove.php",),
+    )
+    dialog.deletion_table.item(0, 0).setCheckState(Qt.Checked)
+    dialog.skip_backup.setChecked(True)
+
+    assert dialog.should_skip_backup()
+    assert dialog.selected_delete_paths() == ()
+    assert not dialog.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    dialog.confirm.setChecked(True)
+    assert dialog.buttons.button(QDialogButtonBox.Ok).isEnabled()
 
 
 def test_deployment_approval_requires_all_checks_and_exact_domain() -> None:
@@ -103,3 +140,17 @@ def test_restore_approval_requires_confirmation_and_exact_domain() -> None:
     assert not dialog.restore_button.isEnabled()
     dialog.domain_edit.setText("example.com")
     assert dialog.restore_button.isEnabled()
+
+
+def test_force_overwrite_requires_risk_destination_and_domain() -> None:
+    app()
+    dialog = ForceOverwriteApprovalDialog(
+        domain="example.com",
+        remote_root="/home/user/site",
+    )
+    dialog.risk_check.setChecked(True)
+    dialog.destination_check.setChecked(True)
+    dialog.domain_edit.setText("wrong.example.com")
+    assert not dialog.apply_button.isEnabled()
+    dialog.domain_edit.setText("example.com")
+    assert dialog.apply_button.isEnabled()

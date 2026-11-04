@@ -32,7 +32,7 @@ class PlanBuilder:
         mapping_id: str,
         local: ScanResult,
         remote_records: tuple[FileRecord, ...],
-        validity: timedelta = timedelta(minutes=5),
+        validity: timedelta = timedelta(minutes=15),
         config_sha256: str = "",
     ) -> SyncPlan:
         local_by_path = local.by_path

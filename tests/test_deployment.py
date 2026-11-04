@@ -155,6 +155,67 @@ def test_deploy_add_and_update_after_full_temporary_upload(tmp_path: Path) -> No
     assert not any(".dxsync-" in path for path in sftp.files)
 
 
+def test_deploy_reports_file_progress(tmp_path: Path) -> None:
+    sftp = MemorySftp()
+    stage(tmp_path, "one.php", b"one")
+    stage(tmp_path, "two.php", b"two")
+    plan = make_plan(
+        tuple(
+            FileChange(name, ChangeType.ADD, record(name, content), None)
+            for name, content in (("one.php", b"one"), ("two.php", b"two"))
+        )
+    )
+    progress: list[tuple[int, int, str]] = []
+
+    RemoteDeploymentEngine().deploy(
+        sftp=sftp,
+        plan=plan,
+        staging_root=tmp_path,
+        remote_root="/home/user/site",
+        authorization=authorize(plan),
+        progress_callback=lambda current, total, phase: progress.append(
+            (current, total, phase)
+        ),
+    )
+
+    assert (1, 2) in [(current, total) for current, total, _ in progress]
+    assert progress[-1][:2] == (2, 2)
+
+
+def test_deploy_allows_explicit_backup_skip_but_not_deletion(tmp_path: Path) -> None:
+    sftp = MemorySftp()
+    stage(tmp_path, "index.php", b"new")
+    plan = make_plan(
+        (FileChange("index.php", ChangeType.ADD, record("index.php", b"new"), None),)
+    )
+    approval = DeploymentAuthorization(
+        plan_id=plan.plan_id,
+        backup_plan_id=None,
+        remote_root="/home/user/site",
+        approved=True,
+        backup_skipped=True,
+    )
+    result = RemoteDeploymentEngine().deploy(
+        sftp=sftp,
+        plan=plan,
+        staging_root=tmp_path,
+        remote_root="/home/user/site",
+        authorization=approval,
+    )
+    assert len(result.files) == 1
+
+    invalid_approval = DeploymentAuthorization(
+        plan_id=plan.plan_id,
+        backup_plan_id=None,
+        remote_root="/home/user/site",
+        approved=True,
+        backup_skipped=True,
+        delete_paths=("remote.php",),
+    )
+    with pytest.raises(DeployError, match="cannot be deleted"):
+        invalid_approval.consume(plan_id=plan.plan_id, remote_root="/home/user/site")
+
+
 def test_deploy_deletes_only_explicitly_approved_remote_only_file(tmp_path: Path) -> None:
     sftp = MemorySftp()
     sftp.files["/home/user/site/remove.php"] = b"remove"

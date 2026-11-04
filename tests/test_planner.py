@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import timedelta
 
 from dxsync.models import ChangeType, EntryKind, FileRecord, ScanResult
 from dxsync.planner import PlanBuilder
@@ -40,4 +41,5 @@ def test_plan_classifies_changes_and_protects_runtime_data(tmp_path: Path) -> No
         "wp-content/uploads/local.jpg": ChangeType.PROTECTED,
     }
     assert not plan.has_blocking_changes
+    assert plan.expires_at - plan.created_at == timedelta(minutes=15)
 

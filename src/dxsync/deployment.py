@@ -6,7 +6,7 @@ import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO, Callable, Protocol
 
 from .health import HealthCheckResult
 from .models import ChangeType, FileChange, SyncPlan
@@ -48,9 +48,10 @@ class DeploymentResult:
 @dataclass
 class DeploymentAuthorization:
     plan_id: str
-    backup_plan_id: str
+    backup_plan_id: str | None
     remote_root: str
     approved: bool
+    backup_skipped: bool = False
     delete_paths: tuple[str, ...] = ()
     used: bool = False
 
@@ -60,7 +61,14 @@ class DeploymentAuthorization:
             raise DeployError("Deployment was not explicitly approved")
         if self.used:
             raise DeployError("Deployment approval has already been used")
-        if self.plan_id != plan_id or self.backup_plan_id != plan_id:
+        if self.plan_id != plan_id:
+            raise DeployError("Deployment approval does not match the plan")
+        if self.backup_skipped:
+            if self.backup_plan_id is not None:
+                raise DeployError("Skipped backup approval contains an unexpected backup")
+            if self.delete_paths:
+                raise DeployError("Files cannot be deleted when backup is skipped")
+        elif self.backup_plan_id != plan_id:
             raise DeployError("Deployment approval does not match the plan and backup")
         if normalize_remote_root(self.remote_root) != normalized_root:
             raise DeployError("Deployment approval does not match the remote root")
@@ -157,6 +165,7 @@ class RemoteDeploymentEngine:
         authorization: DeploymentAuthorization,
         file_mode: int = 0o644,
         directory_mode: int = 0o755,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> DeploymentResult:
         normalized_root = normalize_remote_root(remote_root)
         authorization.consume(plan_id=plan.plan_id, remote_root=normalized_root)
@@ -174,8 +183,9 @@ class RemoteDeploymentEngine:
             for change in plan.changes
             if change.change_type in {ChangeType.ADD, ChangeType.UPDATE}
         ]
+        total_changes = len(upload_changes) + len(authorization.delete_paths)
         try:
-            for change in upload_changes:
+            for index, change in enumerate(upload_changes, start=1):
                 if change.local is None or not change.local.sha256:
                     raise DeployError(f"Missing approved local hash: {change.relative_path}")
                 local_path = staging_root / Path(change.relative_path)
@@ -243,6 +253,8 @@ class RemoteDeploymentEngine:
                         destination_mode,
                     )
                 )
+                if progress_callback is not None:
+                    progress_callback(index, total_changes, f"転送準備: {change.relative_path}")
         except Exception:
             self._clean_prepared(sftp, prepared, created_directories)
             raise
@@ -256,7 +268,7 @@ class RemoteDeploymentEngine:
         if requested_deletions - set(remote_only):
             self._clean_prepared(sftp, prepared, created_directories)
             raise DeployError("Deletion approval contains files outside the plan")
-        for relative in sorted(requested_deletions):
+        for delete_index, relative in enumerate(sorted(requested_deletions), start=1):
             change = remote_only[relative]
             if change.remote is None or not change.remote.sha256:
                 self._clean_prepared(sftp, prepared, created_directories)
@@ -274,11 +286,17 @@ class RemoteDeploymentEngine:
                 self._clean_prepared(sftp, prepared, created_directories)
                 raise DeployError(f"Deletion temporary file already exists: {relative}")
             prepared_deletions.append(_PreparedDeletion(change, destination, old_temporary))
+            if progress_callback is not None:
+                progress_callback(
+                    len(upload_changes) + delete_index,
+                    total_changes,
+                    f"削除準備: {relative}",
+                )
 
         applied: list[_PreparedFile] = []
         applied_deletions: list[_PreparedDeletion] = []
         try:
-            for item in prepared:
+            for publish_index, item in enumerate(prepared, start=1):
                 if item.change.change_type is ChangeType.UPDATE:
                     assert item.old_temporary is not None
                     current_hash, _ = _hash_remote(sftp, item.destination)
@@ -296,7 +314,13 @@ class RemoteDeploymentEngine:
                 deployed_hash, deployed_size = _hash_remote(sftp, item.destination)
                 if deployed_hash != item.sha256 or deployed_size != item.size:
                     raise DeployError(f"Published file verification failed: {item.change.relative_path}")
-            for item in prepared_deletions:
+                if progress_callback is not None:
+                    progress_callback(
+                        publish_index,
+                        total_changes,
+                        f"公開切り替え: {item.change.relative_path}",
+                    )
+            for delete_index, item in enumerate(prepared_deletions, start=1):
                 assert item.change.remote is not None
                 current_hash, _ = _hash_remote(sftp, item.destination)
                 if current_hash != item.change.remote.sha256:
@@ -305,6 +329,12 @@ class RemoteDeploymentEngine:
                     )
                 sftp.rename(item.destination, item.old_temporary)
                 applied_deletions.append(item)
+                if progress_callback is not None:
+                    progress_callback(
+                        len(prepared) + delete_index,
+                        total_changes,
+                        f"削除適用: {item.change.relative_path}",
+                    )
         except Exception as exc:
             rollback_errors = self._rollback(
                 sftp,
