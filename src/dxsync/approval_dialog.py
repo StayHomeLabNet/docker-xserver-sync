@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
 )
 
@@ -260,11 +262,18 @@ class DeploymentApprovalDialog(QDialog):
 
 
 class ForceOverwriteApprovalDialog(QDialog):
-    def __init__(self, *, domain: str, remote_root: str, parent=None) -> None:
+    def __init__(
+        self,
+        *,
+        domain: str,
+        remote_root: str,
+        file_paths: tuple[str, ...],
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.domain = domain
         self.setWindowTitle("無条件上書きの最終確認")
-        self.resize(620, 340)
+        self.resize(700, 600)
         layout = QVBoxLayout(self)
         warning = QLabel(
             "この操作は差分計画・リモート内容照合・バックアップ・転送後ハッシュ検証を行いません。"
@@ -278,6 +287,21 @@ class ForceOverwriteApprovalDialog(QDialog):
         summary.addRow("転送先", QLabel(remote_root))
         summary.addRow("リモートのみのファイル", QLabel("削除せずそのまま残します"))
         layout.addLayout(summary)
+        selection_note = QLabel(
+            "上書きするファイルまたはフォルダーをチェックしてください。"
+            "フォルダーのチェックを外すと、その配下もすべて対象外になります。"
+        )
+        selection_note.setWordWrap(True)
+        layout.addWidget(selection_note)
+        self.file_tree = QTreeWidget()
+        self.file_tree.setHeaderLabels(("上書き対象",))
+        self.file_tree.setMinimumHeight(220)
+        self._populate_file_tree(file_paths)
+        self.file_tree.itemChanged.connect(self._selection_changed)
+        self.file_tree.expandToDepth(1)
+        layout.addWidget(self.file_tree)
+        self.selection_label = QLabel()
+        layout.addWidget(self.selection_label)
         self.risk_check = QCheckBox(
             "バックアップと内容検証なしで上書きすることを理解しました"
         )
@@ -298,12 +322,86 @@ class ForceOverwriteApprovalDialog(QDialog):
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
+        self._update_selection_label()
+
+    def _populate_file_tree(self, file_paths: tuple[str, ...]) -> None:
+        folders: dict[str, QTreeWidgetItem] = {}
+        for path in sorted(file_paths):
+            parts = path.split("/")
+            parent: QTreeWidgetItem | QTreeWidget = self.file_tree
+            for index, part in enumerate(parts[:-1], start=1):
+                folder_path = "/".join(parts[:index])
+                folder = folders.get(folder_path)
+                if folder is None:
+                    folder = QTreeWidgetItem(parent, (part,))
+                    folder.setFlags(
+                        folder.flags()
+                        | Qt.ItemIsUserCheckable
+                        | Qt.ItemIsAutoTristate
+                    )
+                    folder.setCheckState(0, Qt.Checked)
+                    folders[folder_path] = folder
+                parent = folder
+            file_item = QTreeWidgetItem(parent, (parts[-1],))
+            file_item.setFlags(file_item.flags() | Qt.ItemIsUserCheckable)
+            file_item.setData(0, Qt.UserRole, path)
+            file_item.setCheckState(0, Qt.Checked)
+
+    def _selection_changed(self, item: QTreeWidgetItem, _column: int) -> None:
+        self.file_tree.blockSignals(True)
+        try:
+            if item.childCount() and item.checkState(0) != Qt.PartiallyChecked:
+                self._set_descendants(item, item.checkState(0))
+            parent = item.parent()
+            while parent is not None:
+                states = {
+                    parent.child(index).checkState(0)
+                    for index in range(parent.childCount())
+                }
+                if states == {Qt.Checked}:
+                    parent.setCheckState(0, Qt.Checked)
+                elif states == {Qt.Unchecked}:
+                    parent.setCheckState(0, Qt.Unchecked)
+                else:
+                    parent.setCheckState(0, Qt.PartiallyChecked)
+                parent = parent.parent()
+        finally:
+            self.file_tree.blockSignals(False)
+        self._update_selection_label()
+        self._update_enabled()
+
+    def _set_descendants(
+        self, item: QTreeWidgetItem, state: Qt.CheckState
+    ) -> None:
+        for index in range(item.childCount()):
+            child = item.child(index)
+            child.setCheckState(0, state)
+            self._set_descendants(child, state)
+
+    def selected_file_paths(self) -> tuple[str, ...]:
+        selected: list[str] = []
+        pending = [
+            self.file_tree.topLevelItem(index)
+            for index in range(self.file_tree.topLevelItemCount())
+        ]
+        while pending:
+            item = pending.pop(0)
+            path = item.data(0, Qt.UserRole)
+            if path and item.checkState(0) == Qt.Checked:
+                selected.append(str(path))
+            pending[0:0] = [item.child(index) for index in range(item.childCount())]
+        return tuple(sorted(selected))
+
+    def _update_selection_label(self) -> None:
+        selected = len(self.selected_file_paths())
+        self.selection_label.setText(f"選択中: {selected}ファイル")
 
     def _update_enabled(self) -> None:
         self.apply_button.setEnabled(
             self.risk_check.isChecked()
             and self.destination_check.isChecked()
             and self.domain_edit.text().strip() == self.domain
+            and bool(self.selected_file_paths())
         )
 
 

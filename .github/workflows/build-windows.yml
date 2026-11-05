@@ -35,9 +35,9 @@ jobs:
       - name: Upload Windows release files
         uses: actions/upload-artifact@v7
         with:
-          name: docker-xserver-sync-windows-v0.1.1
+          name: docker-xserver-sync-windows-v0.1.2
           path: |
             dist/Docker XServer Sync-Windows-x64.zip
-            dist/Docker-XServer-Sync-Setup-v0.1.1.exe
+            dist/Docker-XServer-Sync-Setup-v0.1.2.exe
           if-no-files-found: error
           retention-days: 14

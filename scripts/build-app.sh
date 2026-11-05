@@ -16,9 +16,9 @@ UV_PROJECT_ENVIRONMENT="$build_venv" uv sync --python 3.12 --extra dev --extra g
   --macos-create-app-bundle \
   --macos-app-mode=gui \
   --macos-app-name="Docker XServer Sync" \
-  --macos-app-version="0.1.1" \
+  --macos-app-version="0.1.2" \
   --product-name="Docker XServer Sync" \
-  --product-version="0.1.1" \
+  --product-version="0.1.2" \
   --output-filename="Docker XServer Sync" \
   --macos-app-icon=none \
   --enable-plugin=pyside6 \

@@ -3,7 +3,10 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from dxsync.force_overwrite import ForceOverwriteEngine
+from dxsync.force_overwrite import (
+    ForceOverwriteEngine,
+    collect_overwrite_candidates,
+)
 
 
 @dataclass
@@ -81,3 +84,31 @@ def test_force_overwrite_copies_without_deleting_remote_only(tmp_path: Path) -> 
     assert "/home/user/site/uploads/keep.jpg" not in sftp.files
     assert result.files == ("index.php", "nested/new.php")
     assert progress[-1][:2] == (2, 2)
+
+
+def test_force_overwrite_copies_only_selected_files(tmp_path: Path) -> None:
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "index.php").write_bytes(b"new-index")
+    (tmp_path / "nested" / "selected.php").write_bytes(b"selected")
+    (tmp_path / "nested" / "skipped.php").write_bytes(b"local-skipped")
+    sftp = MemorySftp()
+    sftp.files["/home/user/site/index.php"] = b"old-index"
+    sftp.files["/home/user/site/nested/skipped.php"] = b"remote-skipped"
+
+    candidates = collect_overwrite_candidates(tmp_path)
+    result = ForceOverwriteEngine().overwrite(
+        sftp=sftp,
+        local_root=tmp_path,
+        remote_root="/home/user/site",
+        include_paths=("nested/selected.php",),
+    )
+
+    assert candidates == (
+        "index.php",
+        "nested/selected.php",
+        "nested/skipped.php",
+    )
+    assert result.files == ("nested/selected.php",)
+    assert sftp.files["/home/user/site/nested/selected.php"] == b"selected"
+    assert sftp.files["/home/user/site/index.php"] == b"old-index"
+    assert sftp.files["/home/user/site/nested/skipped.php"] == b"remote-skipped"

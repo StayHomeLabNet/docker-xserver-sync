@@ -60,7 +60,11 @@ from .deployment import (
     DeploymentResult,
     RemoteDeploymentEngine,
 )
-from .force_overwrite import ForceOverwriteEngine, ForceOverwriteResult
+from .force_overwrite import (
+    ForceOverwriteEngine,
+    ForceOverwriteResult,
+    collect_overwrite_candidates,
+)
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
@@ -457,11 +461,13 @@ class ForceOverwriteWorker(QObject):
         project: Project,
         mapping: SyncMapping,
         passphrase: str | None,
+        selected_paths: tuple[str, ...],
     ) -> None:
         super().__init__()
         self.project = project
         self.mapping = mapping
         self.passphrase = passphrase
+        self.selected_paths = selected_paths
 
     @Slot()
     def run(self) -> None:
@@ -483,6 +489,7 @@ class ForceOverwriteWorker(QObject):
                 remote_root=self.mapping.remote_root,
                 exclude_patterns=preset.exclude_patterns + self.mapping.exclude_patterns,
                 protect_patterns=preset.protect_patterns + self.mapping.protect_patterns,
+                include_paths=self.selected_paths,
                 file_mode=self.mapping.file_mode,
                 directory_mode=self.mapping.directory_mode,
                 progress_callback=self.progress.emit,
@@ -1274,13 +1281,32 @@ class MainWindow(QMainWindow):
         if not Path(mapping.local_root).expanduser().is_dir():
             QMessageBox.warning(self, "フォルダを確認", "同期元のローカルフォルダを読み取れません。")
             return
+        preset = get_preset(project.site_type)
+        try:
+            candidates = collect_overwrite_candidates(
+                Path(mapping.local_root),
+                exclude_patterns=preset.exclude_patterns + mapping.exclude_patterns,
+                protect_patterns=preset.protect_patterns + mapping.protect_patterns,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "上書き対象を確認できません", str(exc))
+            return
+        if not candidates:
+            QMessageBox.warning(
+                self,
+                "上書き対象がありません",
+                "除外・保護ルール適用後に上書きできるローカルファイルがありません。",
+            )
+            return
         approval = ForceOverwriteApprovalDialog(
             domain=project.domain,
             remote_root=mapping.remote_root,
+            file_paths=candidates,
             parent=self,
         )
         if approval.exec() != QDialog.Accepted:
             return
+        selected_paths = approval.selected_file_paths()
         if self._current_plan_id is not None:
             self.store.set_plan_status(self._current_plan_id, "invalid")
             self._current_plan_id = None
@@ -1305,6 +1331,7 @@ class MainWindow(QMainWindow):
             project=project,
             mapping=mapping,
             passphrase=self.passphrase_edit.text() or None,
+            selected_paths=selected_paths,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

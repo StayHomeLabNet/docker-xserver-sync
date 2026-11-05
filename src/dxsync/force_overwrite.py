@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Protocol
 
+from .models import normalize_relative_path
 from .rules import PathRules
 from .validation import normalize_remote_root
 
@@ -80,6 +81,19 @@ def _local_files(
     return tuple(sorted(files, key=lambda item: item.relative_to(resolved).as_posix()))
 
 
+def collect_overwrite_candidates(
+    local_root: Path,
+    *,
+    exclude_patterns: tuple[str, ...] = (),
+    protect_patterns: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    resolved_root = local_root.expanduser().resolve()
+    return tuple(
+        path.relative_to(resolved_root).as_posix()
+        for path in _local_files(resolved_root, exclude_patterns, protect_patterns)
+    )
+
+
 def _ensure_parents(
     sftp: ForceOverwriteRemoteFileSystem,
     root: str,
@@ -111,6 +125,7 @@ class ForceOverwriteEngine:
         remote_root: str,
         exclude_patterns: tuple[str, ...] = (),
         protect_patterns: tuple[str, ...] = (),
+        include_paths: tuple[str, ...] | None = None,
         file_mode: int = 0o644,
         directory_mode: int = 0o755,
         progress_callback: Callable[[int, int, str], None] | None = None,
@@ -121,7 +136,20 @@ class ForceOverwriteEngine:
             raise ForceOverwriteError(f"Remote root does not exist: {normalized_root}")
         if not stat.S_ISDIR(sftp.stat(normalized_root).st_mode):
             raise ForceOverwriteError("Remote root is not a directory")
-        files = _local_files(resolved_root, exclude_patterns, protect_patterns)
+        all_files = _local_files(resolved_root, exclude_patterns, protect_patterns)
+        if include_paths is None:
+            files = all_files
+        else:
+            available = {
+                path.relative_to(resolved_root).as_posix(): path for path in all_files
+            }
+            selected = tuple(dict.fromkeys(normalize_relative_path(path) for path in include_paths))
+            missing = sorted(set(selected) - set(available))
+            if missing:
+                raise ForceOverwriteError(
+                    "Selected local file is no longer available: " + ", ".join(missing)
+                )
+            files = tuple(available[path] for path in selected)
         copied: list[str] = []
         total_bytes = 0
         total = len(files)

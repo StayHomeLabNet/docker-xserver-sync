@@ -147,6 +147,7 @@ def test_force_overwrite_requires_risk_destination_and_domain() -> None:
     dialog = ForceOverwriteApprovalDialog(
         domain="example.com",
         remote_root="/home/user/site",
+        file_paths=("index.php", "nested/one.php", "nested/two.php"),
     )
     dialog.risk_check.setChecked(True)
     dialog.destination_check.setChecked(True)
@@ -154,3 +155,27 @@ def test_force_overwrite_requires_risk_destination_and_domain() -> None:
     assert not dialog.apply_button.isEnabled()
     dialog.domain_edit.setText("example.com")
     assert dialog.apply_button.isEnabled()
+
+
+def test_force_overwrite_selection_supports_folders_and_files() -> None:
+    app()
+    dialog = ForceOverwriteApprovalDialog(
+        domain="example.com",
+        remote_root="/home/user/site",
+        file_paths=("index.php", "nested/one.php", "nested/two.php"),
+    )
+    assert dialog.selected_file_paths() == (
+        "index.php",
+        "nested/one.php",
+        "nested/two.php",
+    )
+    nested = next(
+        dialog.file_tree.topLevelItem(index)
+        for index in range(dialog.file_tree.topLevelItemCount())
+        if dialog.file_tree.topLevelItem(index).text(0) == "nested"
+    )
+    nested.setCheckState(0, Qt.Unchecked)
+    assert dialog.selected_file_paths() == ("index.php",)
+    nested.setCheckState(0, Qt.Checked)
+    nested.child(0).setCheckState(0, Qt.Unchecked)
+    assert dialog.selected_file_paths() == ("index.php", "nested/two.php")
