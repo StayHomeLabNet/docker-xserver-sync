@@ -179,3 +179,23 @@ def test_force_overwrite_selection_supports_folders_and_files() -> None:
     nested.setCheckState(0, Qt.Checked)
     nested.child(0).setCheckState(0, Qt.Unchecked)
     assert dialog.selected_file_paths() == ("index.php", "nested/two.php")
+
+
+def test_force_overwrite_select_all_and_clear_all() -> None:
+    app()
+    dialog = ForceOverwriteApprovalDialog(
+        domain="example.com",
+        remote_root="/home/user/site",
+        file_paths=("index.php", "nested/one.php", "nested/two.php"),
+    )
+
+    dialog.clear_all_button.click()
+    assert dialog.selected_file_paths() == ()
+    assert dialog.selection_label.text() == "選択中: 0ファイル"
+
+    dialog.select_all_button.click()
+    assert dialog.selected_file_paths() == (
+        "index.php",
+        "nested/one.php",
+        "nested/two.php",
+    )

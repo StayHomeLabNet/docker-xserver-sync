@@ -6,8 +6,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -300,6 +302,15 @@ class ForceOverwriteApprovalDialog(QDialog):
         self.file_tree.itemChanged.connect(self._selection_changed)
         self.file_tree.expandToDepth(1)
         layout.addWidget(self.file_tree)
+        selection_buttons = QHBoxLayout()
+        self.select_all_button = QPushButton("すべてチェック")
+        self.clear_all_button = QPushButton("すべてチェック解除")
+        self.select_all_button.clicked.connect(lambda: self._set_all(Qt.Checked))
+        self.clear_all_button.clicked.connect(lambda: self._set_all(Qt.Unchecked))
+        selection_buttons.addWidget(self.select_all_button)
+        selection_buttons.addWidget(self.clear_all_button)
+        selection_buttons.addStretch(1)
+        layout.addLayout(selection_buttons)
         self.selection_label = QLabel()
         layout.addWidget(self.selection_label)
         self.risk_check = QCheckBox(
@@ -377,6 +388,18 @@ class ForceOverwriteApprovalDialog(QDialog):
             child = item.child(index)
             child.setCheckState(0, state)
             self._set_descendants(child, state)
+
+    def _set_all(self, state: Qt.CheckState) -> None:
+        self.file_tree.blockSignals(True)
+        try:
+            for index in range(self.file_tree.topLevelItemCount()):
+                item = self.file_tree.topLevelItem(index)
+                item.setCheckState(0, state)
+                self._set_descendants(item, state)
+        finally:
+            self.file_tree.blockSignals(False)
+        self._update_selection_label()
+        self._update_enabled()
 
     def selected_file_paths(self) -> tuple[str, ...]:
         selected: list[str] = []

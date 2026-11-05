@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from .models import Project, SiteType, SyncMapping, utc_now
 from .presets import get_preset
 from .storage import ProjectStore
+from .secure_store import SecureStoreError
 from .validation import ValidationIssue, normalize_runtime_directory, validate_project
 
 
@@ -449,6 +450,15 @@ class ProjectDialog(QDialog):
                 "\n".join(f"• {issue.message}" for issue in issues),
             )
             return
-        self.store.save(project)
+        try:
+            self.store.save(project)
+        except SecureStoreError as exc:
+            QMessageBox.critical(
+                self,
+                "安全な保存領域を使用できません",
+                "接続先の確認コードをOSの安全な保存領域へ登録できませんでした。\n\n"
+                f"{exc}",
+            )
+            return
         self.saved_project = project
         self.accept()

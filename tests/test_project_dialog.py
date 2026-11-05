@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QDialogButtonBox
 from dxsync.models import SiteType
 from dxsync.project_dialog import ProjectDialog, RuntimePathsDialog
 from dxsync.storage import ProjectStore
+from dxsync.secure_store import MemoryHostKeyStore
 
 
 def app() -> QApplication:
@@ -30,7 +31,9 @@ def test_runtime_paths_dialog_requires_confirmation_and_normalizes_paths() -> No
 
 def test_project_dialog_marks_new_custom_php_mapping_unconfirmed(tmp_path) -> None:
     app()
-    dialog = ProjectDialog(ProjectStore(tmp_path / "state.db"))
+    dialog = ProjectDialog(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    )
     dialog.site_combo.setCurrentIndex(dialog.site_combo.findData(SiteType.CUSTOM_PHP.value))
     dialog._append_mapping("public", str(tmp_path), "/home/user/public_html")
 

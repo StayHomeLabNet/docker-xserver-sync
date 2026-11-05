@@ -11,6 +11,7 @@ try:
         QAbstractTableModel,
         QModelIndex,
         QObject,
+        QSettings,
         QStandardPaths,
         Qt,
         QThread,
@@ -20,6 +21,7 @@ try:
     from PySide6.QtGui import QColor, QFont
     from PySide6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QComboBox,
         QDialog,
         QFileDialog,
@@ -27,6 +29,7 @@ try:
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QLineEdit,
         QMainWindow,
@@ -44,6 +47,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the GUI 
     ) from exc
 
 from .models import ChangeType, FileRecord, Project, ScanResult, SiteType, SyncMapping
+from . import __version__
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
 from .history_dialog import HistoryDialog
@@ -80,6 +84,8 @@ from .rules import PathRules
 from .scanner import LocalScanner
 from .service import DryRunResult, DryRunService
 from .storage import BackupRecord, ProjectStore, StoredPlan
+from .secure_store import SecureStoreError
+from .settings_dialog import MASK_FIELDS, MaskSettingsDialog
 from .validation import custom_runtime_paths_issue
 
 
@@ -595,7 +601,11 @@ class RestoreWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, store: ProjectStore | None = None) -> None:
+    def __init__(
+        self,
+        store: ProjectStore | None = None,
+        settings: QSettings | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("Docker → XServer Sync")
         self.resize(1040, 700)
@@ -609,6 +619,7 @@ class MainWindow(QMainWindow):
             )
             store = ProjectStore(state_directory / "state.db")
         self.store = store
+        self.settings = settings or QSettings()
         self.staging_parent = self.store.database_path.parent / "staging"
         self._interrupted_operations = self.store.recover_interrupted_operations()
         self.store.expire_plans()
@@ -727,6 +738,9 @@ class MainWindow(QMainWindow):
         self.force_overwrite_button = QPushButton("無条件上書き")
         self.force_overwrite_button.clicked.connect(self._start_force_overwrite)
         self.force_overwrite_button.setEnabled(False)
+        self.mask_toggle = QCheckBox("接続情報のマスクを一時解除")
+        self.mask_toggle.setToolTip("この画面を閉じるまでの表示だけを切り替えます")
+        self.mask_toggle.toggled.connect(self._apply_connection_masks)
 
         connection_layout.addWidget(QLabel("ホスト"), 0, 0)
         connection_layout.addWidget(self.host_edit, 0, 1)
@@ -747,6 +761,7 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.backup_button, 4, 3)
         connection_layout.addWidget(self.deploy_button, 4, 4)
         connection_layout.addWidget(self.dry_run_button, 4, 5)
+        connection_layout.addWidget(self.mask_toggle, 5, 1, 1, 5)
         layout.addWidget(connection)
 
         self.summary = QLabel("フォルダを選択して検査してください。")
@@ -773,6 +788,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(footer)
 
         self.setCentralWidget(root)
+        self._create_menus()
+        self._apply_connection_masks()
         self._reload_projects()
         if self._interrupted_operations:
             self.summary.setText(
@@ -798,6 +815,7 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _project_selected(self, index: int) -> None:
         self._reset_write_state()
+        self.mask_toggle.setChecked(False)
         project_id = self.project_combo.itemData(index) if index >= 0 else None
         self._current_project = self._projects.get(project_id)
         has_project = self._current_project is not None
@@ -820,6 +838,7 @@ class MainWindow(QMainWindow):
                 self.mapping_combo.addItem(mapping.name, mapping.mapping_id)
         self.mapping_combo.blockSignals(False)
         self._mapping_selected(self.mapping_combo.currentIndex())
+        self._apply_connection_masks()
 
     @Slot(int)
     def _mapping_selected(self, index: int) -> None:
@@ -829,6 +848,123 @@ class MainWindow(QMainWindow):
             self.path_edit.setText(mapping.local_root)
             self.remote_root_edit.setText(mapping.remote_root)
         self._refresh_ready_plan()
+        self._apply_connection_masks()
+
+    def _mask_preferences(self) -> dict[str, bool]:
+        return {
+            key: self.settings.value(f"display_mask/{key}", True, type=bool)
+            for key, _label in MASK_FIELDS
+        }
+
+    @Slot()
+    def _apply_connection_masks(self) -> None:
+        preferences = self._mask_preferences()
+        reveal = self.mask_toggle.isChecked()
+        fields = {
+            "host": self.host_edit,
+            "username": self.user_edit,
+            "remote_root": self.remote_root_edit,
+            "fingerprint": self.fingerprint_edit,
+            "private_key": self.key_edit,
+        }
+        for key, editor in fields.items():
+            masked = preferences.get(key, True) and not reveal
+            editor.setEchoMode(QLineEdit.Password if masked else QLineEdit.Normal)
+        self.passphrase_edit.setEchoMode(
+            QLineEdit.Normal if reveal else QLineEdit.Password
+        )
+
+    def _create_menus(self) -> None:
+        settings_menu = self.menuBar().addMenu("設定")
+        mask_action = settings_menu.addAction("接続情報のマスク設定…")
+        mask_action.triggered.connect(self._show_mask_settings)
+        security_action = settings_menu.addAction("確認コードの保存状態…")
+        security_action.triggered.connect(self._show_security_status)
+        register_action = settings_menu.addAction("接続先の確認コードを再登録…")
+        register_action.triggered.connect(self._reregister_host_key)
+        settings_menu.addSeparator()
+        reset_action = settings_menu.addAction("表示設定を初期状態に戻す")
+        reset_action.triggered.connect(self._reset_display_settings)
+
+        help_menu = self.menuBar().addMenu("ヘルプ")
+        about_action = help_menu.addAction("バージョン情報")
+        about_action.triggered.connect(self._show_about)
+
+    @Slot()
+    def _show_mask_settings(self) -> None:
+        dialog = MaskSettingsDialog(self._mask_preferences(), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        for key, value in dialog.selected_values().items():
+            self.settings.setValue(f"display_mask/{key}", value)
+        self.settings.sync()
+        self.mask_toggle.setChecked(False)
+        self._apply_connection_masks()
+
+    @Slot()
+    def _reset_display_settings(self) -> None:
+        for key, _label in MASK_FIELDS:
+            self.settings.remove(f"display_mask/{key}")
+        self.settings.sync()
+        self.mask_toggle.setChecked(False)
+        self._apply_connection_masks()
+
+    @Slot()
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "Docker → XServer Sync バージョン情報",
+            f"Docker → XServer Sync\nバージョン {__version__}\n\n"
+            "接続先の確認コードはOS資格情報ストアに保存します。",
+        )
+
+    @Slot()
+    def _show_security_status(self) -> None:
+        if not self._projects:
+            QMessageBox.information(self, "確認コードの保存状態", "保存済みプロジェクトはありません。")
+            return
+        state_labels = {
+            "secure": "保護済み",
+            "legacy": "移行未完了",
+            "unavailable": "読み取り不可",
+            "missing": "未登録",
+        }
+        lines = []
+        for project in self._projects.values():
+            status = self.store.security_status(project.project_id)
+            lines.append(f"{project.name}: {state_labels.get(status.state, status.state)}")
+        backend = self.store.secure_store.backend_name
+        QMessageBox.information(
+            self,
+            "確認コードの保存状態",
+            "\n".join(lines) + f"\n\n資格情報ストア: {backend}",
+        )
+
+    @Slot()
+    def _reregister_host_key(self) -> None:
+        project = self._current_project
+        if project is None:
+            QMessageBox.information(self, "再登録", "保存済みプロジェクトを選択してください。")
+            return
+        fingerprint, accepted = QInputDialog.getText(
+            self,
+            "接続先の確認コードを再登録",
+            "XServerサーバーパネルで確認した SHA256: から始まる値:",
+            QLineEdit.Password,
+        )
+        fingerprint = fingerprint.strip()
+        if not accepted:
+            return
+        if not fingerprint.startswith("SHA256:"):
+            QMessageBox.warning(self, "入力を確認", "SHA256: から始まる確認コードを入力してください。")
+            return
+        try:
+            self.store.update_host_key(project.project_id, fingerprint)
+        except SecureStoreError as exc:
+            QMessageBox.critical(self, "再登録できません", str(exc))
+            return
+        self._reload_projects(project.project_id)
+        QMessageBox.information(self, "再登録完了", "OS資格情報ストアへ保存しました。")
 
     def _refresh_ready_plan(self) -> None:
         self.store.expire_plans()
@@ -897,6 +1033,17 @@ class MainWindow(QMainWindow):
         mapping = self._selected_mapping()
         if project is None or mapping is None:
             return True
+        security = self.store.security_status(project.project_id)
+        if security.state != "secure":
+            QMessageBox.warning(
+                self,
+                "接続先の確認コードを利用できません",
+                "接続先の確認コードがOS資格情報ストアで保護されていないため、"
+                "この操作を実行できません。\n\n"
+                "「設定」→「接続先の確認コードを再登録…」から再登録してください。\n\n"
+                f"状態: {security.message}",
+            )
+            return False
         issue = custom_runtime_paths_issue(project, mapping)
         if issue is None:
             return True
@@ -934,7 +1081,16 @@ class MainWindow(QMainWindow):
             "リモートファイルとローカルファイルは削除されません。",
         )
         if answer == QMessageBox.Yes:
-            self.store.delete(self._current_project.project_id)
+            try:
+                self.store.delete(self._current_project.project_id)
+            except SecureStoreError as exc:
+                QMessageBox.critical(
+                    self,
+                    "プロジェクトを削除できません",
+                    "OS資格情報ストアから確認コードを削除できなかったため、"
+                    f"プロジェクトを残しました。\n\n{exc}",
+                )
+                return
             self._current_project = None
             self._reload_projects()
 
@@ -1800,7 +1956,10 @@ class MainWindow(QMainWindow):
 
 def main(argv: Sequence[str] | None = None) -> int:
     app = QApplication(list(argv) if argv is not None else sys.argv)
+    app.setOrganizationName("Docker XServer Sync")
+    app.setOrganizationDomain("dxsync.local")
     app.setApplicationName("Docker XServer Sync")
+    app.setApplicationVersion(__version__)
     window = MainWindow()
     window.show()
     return app.exec()

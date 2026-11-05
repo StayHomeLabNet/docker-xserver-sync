@@ -10,6 +10,7 @@ from dxsync.models import Project, SiteType, SyncMapping, utc_now
 from dxsync.revalidation import PlanRevalidator
 from dxsync.service import DryRunService
 from dxsync.storage import ProjectStore
+from dxsync.secure_store import MemoryHostKeyStore
 
 
 @dataclass
@@ -74,7 +75,7 @@ def test_revalidation_accepts_unchanged_plan_and_rejects_source_change(tmp_path:
         staging_parent=tmp_path / "staging",
         config_sha256=config_hash,
     )
-    store = ProjectStore(tmp_path / "state.db")
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
     store.save(project)
     store.save_plan(
         project.project_id,
@@ -117,7 +118,7 @@ def test_revalidation_blocks_custom_php_when_runtime_paths_become_unconfirmed(
         staging_parent=tmp_path / "staging",
         config_sha256=config_hash,
     )
-    store = ProjectStore(tmp_path / "state.db")
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
     store.save(project)
     store.save_plan(project.project_id, initial.plan, str(initial.staging.root))
     stored = store.get_plan(initial.plan.plan_id)
@@ -148,7 +149,7 @@ def test_cleanup_removes_only_stale_referenced_staging(tmp_path: Path) -> None:
         staging_parent=tmp_path / "staging",
         config_sha256=config_hash,
     )
-    store = ProjectStore(tmp_path / "state.db")
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
     store.save(project)
     store.save_plan(project.project_id, result.plan, str(result.staging.root))
     store.expire_plans(result.plan.expires_at + timedelta(seconds=1))

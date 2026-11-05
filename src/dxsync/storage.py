@@ -10,9 +10,22 @@ from typing import Iterator
 from uuid import uuid4
 
 from .models import ChangeType, FileChange, FileRecord, Project, SiteType, SyncMapping, SyncPlan
+from .secure_store import (
+    HostKeySecureStore,
+    KeyringHostKeyStore,
+    SecureStoreError,
+)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+
+@dataclass(frozen=True)
+class ProjectSecurityStatus:
+    project_id: str
+    state: str
+    backend: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -51,8 +64,14 @@ class BackupRecord:
 
 
 class ProjectStore:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        secure_store: HostKeySecureStore | None = None,
+    ) -> None:
         self.database_path = database_path
+        self.secure_store = secure_store or KeyringHostKeyStore()
+        self._initialized = False
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -66,6 +85,8 @@ class ProjectStore:
             connection.close()
 
     def initialize(self) -> None:
+        if self._initialized:
+            return
         with self._connection() as connection:
             connection.executescript(
                 """
@@ -82,6 +103,7 @@ class ProjectStore:
                     ssh_port INTEGER NOT NULL,
                     ssh_username TEXT NOT NULL,
                     host_key_fingerprint TEXT NOT NULL,
+                    host_key_reference TEXT NOT NULL DEFAULT '',
                     private_key_reference TEXT NOT NULL,
                     mappings_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -139,13 +161,67 @@ class ProjectStore:
                 connection.execute(
                     "ALTER TABLE plans ADD COLUMN config_sha256 TEXT NOT NULL DEFAULT ''"
                 )
+            project_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(projects)").fetchall()
+            }
+            if "host_key_reference" not in project_columns:
+                connection.execute(
+                    "ALTER TABLE projects ADD COLUMN "
+                    "host_key_reference TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+        self._initialized = True
+        self._migrate_legacy_host_keys()
+
+    def _migrate_legacy_host_keys(self) -> None:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT project_id, host_key_fingerprint FROM projects "
+                "WHERE host_key_reference = '' AND host_key_fingerprint != ''"
+            ).fetchall()
+        migrated = False
+        for row in rows:
+            project_id = row["project_id"]
+            fingerprint = row["host_key_fingerprint"]
+            try:
+                reference = self.secure_store.store(project_id, fingerprint)
+                if self.secure_store.retrieve(reference) != fingerprint:
+                    raise SecureStoreError("Credential verification returned a different value")
+            except SecureStoreError as exc:
+                with self._connection() as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                        (f"host_key_migration_error:{project_id}", str(exc)),
+                    )
+                continue
+            with self._connection() as connection:
+                connection.execute(
+                    "UPDATE projects SET host_key_fingerprint = '', "
+                    "host_key_reference = ? WHERE project_id = ? "
+                    "AND host_key_fingerprint = ?",
+                    (reference, project_id, fingerprint),
+                )
+                connection.execute(
+                    "DELETE FROM metadata WHERE key = ?",
+                    (f"host_key_migration_error:{project_id}",),
+                )
+            migrated = True
+        if migrated:
+            connection = sqlite3.connect(self.database_path)
+            try:
+                connection.execute("VACUUM")
+            finally:
+                connection.close()
 
     def save(self, project: Project) -> None:
         self.initialize()
+        reference = self.secure_store.store(
+            project.project_id, project.host_key_fingerprint
+        )
         mappings_json = json.dumps(
             [asdict(mapping) for mapping in project.mappings],
             ensure_ascii=False,
@@ -156,9 +232,10 @@ class ProjectStore:
                 """
                 INSERT INTO projects (
                     project_id, name, site_type, domain, ssh_host, ssh_port,
-                    ssh_username, host_key_fingerprint, private_key_reference,
+                    ssh_username, host_key_fingerprint, host_key_reference,
+                    private_key_reference,
                     mappings_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     name=excluded.name,
                     site_type=excluded.site_type,
@@ -167,6 +244,7 @@ class ProjectStore:
                     ssh_port=excluded.ssh_port,
                     ssh_username=excluded.ssh_username,
                     host_key_fingerprint=excluded.host_key_fingerprint,
+                    host_key_reference=excluded.host_key_reference,
                     private_key_reference=excluded.private_key_reference,
                     mappings_json=excluded.mappings_json,
                     updated_at=excluded.updated_at
@@ -179,7 +257,8 @@ class ProjectStore:
                     project.ssh_host,
                     project.ssh_port,
                     project.ssh_username,
-                    project.host_key_fingerprint,
+                    "",
+                    reference,
                     project.private_key_reference,
                     mappings_json,
                     project.created_at.isoformat(),
@@ -195,6 +274,13 @@ class ProjectStore:
             ).fetchone()
         if row is None:
             return None
+        fingerprint = row["host_key_fingerprint"]
+        reference = row["host_key_reference"]
+        if reference:
+            try:
+                fingerprint = self.secure_store.retrieve(reference) or ""
+            except SecureStoreError:
+                fingerprint = ""
         mappings = tuple(
             SyncMapping(
                 mapping_id=item["mapping_id"],
@@ -217,7 +303,7 @@ class ProjectStore:
             ssh_host=row["ssh_host"],
             ssh_port=row["ssh_port"],
             ssh_username=row["ssh_username"],
-            host_key_fingerprint=row["host_key_fingerprint"],
+            host_key_fingerprint=fingerprint,
             private_key_reference=row["private_key_reference"],
             mappings=mappings,
             created_at=datetime.fromisoformat(row["created_at"]),
@@ -238,11 +324,76 @@ class ProjectStore:
     def delete(self, project_id: str) -> bool:
         self.initialize()
         with self._connection() as connection:
+            row = connection.execute(
+                "SELECT host_key_reference FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        if row is not None and row["host_key_reference"]:
+            self.secure_store.delete(row["host_key_reference"])
+        with self._connection() as connection:
             connection.execute("DELETE FROM plans WHERE project_id = ?", (project_id,))
             cursor = connection.execute(
                 "DELETE FROM projects WHERE project_id = ?", (project_id,)
             )
         return cursor.rowcount > 0
+
+    def security_status(self, project_id: str) -> ProjectSecurityStatus:
+        self.initialize()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT host_key_fingerprint, host_key_reference FROM projects "
+                "WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        backend = self.secure_store.backend_name
+        if row is None:
+            return ProjectSecurityStatus(project_id, "missing", backend, "Project not found")
+        reference = row["host_key_reference"]
+        if not reference:
+            return ProjectSecurityStatus(
+                project_id,
+                "legacy",
+                backend,
+                "Host-key fingerprint is still stored in the local database",
+            )
+        try:
+            fingerprint = self.secure_store.retrieve(reference)
+        except SecureStoreError as exc:
+            return ProjectSecurityStatus(project_id, "unavailable", backend, str(exc))
+        if not fingerprint:
+            return ProjectSecurityStatus(
+                project_id,
+                "missing",
+                backend,
+                "Host-key fingerprint is missing from the OS credential store",
+            )
+        return ProjectSecurityStatus(
+            project_id,
+            "secure",
+            backend,
+            "Host-key fingerprint is stored in the OS credential store",
+        )
+
+    def update_host_key(self, project_id: str, fingerprint: str) -> bool:
+        self.initialize()
+        with self._connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+        if exists is None:
+            return False
+        reference = self.secure_store.store(project_id, fingerprint)
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE projects SET host_key_fingerprint = '', "
+                "host_key_reference = ?, updated_at = ? WHERE project_id = ?",
+                (reference, datetime.now(timezone.utc).isoformat(), project_id),
+            )
+            connection.execute(
+                "DELETE FROM metadata WHERE key = ?",
+                (f"host_key_migration_error:{project_id}",),
+            )
+        return True
 
     def save_plan(
         self,

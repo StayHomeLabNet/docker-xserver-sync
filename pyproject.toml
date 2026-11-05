@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docker-xserver-sync"
-version = "0.1.2"
+version = "0.1.3"
 description = "Safe one-way deployment from local Docker projects to XServer"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Docker XServer Sync contributors" }]
-dependencies = []
+dependencies = ["keyring>=25.7,<26"]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.8,<6.9"]
