@@ -90,9 +90,9 @@ from .validation import custom_runtime_paths_issue
 
 
 SITE_LABELS = {
+    SiteType.CUSTOM_PHP: "独自 PHP",
     SiteType.WORDPRESS: "WordPress",
     SiteType.LARAVEL: "Laravel",
-    SiteType.CUSTOM_PHP: "独自 PHP",
 }
 
 

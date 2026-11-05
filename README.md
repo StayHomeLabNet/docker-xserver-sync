@@ -72,5 +72,15 @@ pwsh -File scripts/build-app.ps1
 pwsh -File scripts/build-app.ps1 -BuildInstaller
 ```
 
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.3.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.4.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+
+## Linuxアプリのビルド
+
+Ubuntu x64環境では`patchelf`を導入したうえで、次のコマンドによりテスト、Nuitkaコンパイル、ヘッドレス起動確認、tar.gz作成まで実行できます。
+
+```bash
+bash scripts/build-app-linux.sh
+```
+
+完成物は`dist/Docker XServer Sync-Linux-x64.tar.gz`です。GitHubの「Build Linux app」ワークフローでも同じビルドを実行できます。Linux版はUbuntu x64向けで、現時点では署名前の開発版です。
 

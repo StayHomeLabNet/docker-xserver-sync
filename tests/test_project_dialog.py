@@ -41,3 +41,19 @@ def test_project_dialog_marks_new_custom_php_mapping_unconfirmed(tmp_path) -> No
     assert dialog.mapping_table.item(0, 3).text() == "未確認（同期不可）"
     mapping = dialog._read_mappings()[0]
     assert not mapping.runtime_paths_confirmed
+
+
+def test_project_dialog_site_order_and_mapping_button_order(tmp_path) -> None:
+    app()
+    dialog = ProjectDialog(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    )
+
+    assert [dialog.site_combo.itemData(index) for index in range(3)] == [
+        SiteType.CUSTOM_PHP.value,
+        SiteType.WORDPRESS.value,
+        SiteType.LARAVEL.value,
+    ]
+    assert dialog.mapping_header.indexOf(dialog.add_mapping_button) < (
+        dialog.mapping_header.indexOf(dialog.runtime_paths_button)
+    )

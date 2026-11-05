@@ -99,6 +99,8 @@
 - 接続項目ごとの起動時マスク設定と画面内の一時解除
 - 設定・ヘルプメニューとバージョン情報
 - 接続先確認コードのOS資格情報ストア保存、旧SQLiteからの移行、失敗時の同期禁止
+- サイト種別を独自PHP、WordPress、Laravelの順に統一
+- Windows x64、macOS Apple Silicon、Linux x64のリリースバイナリ
 - Inno SetupによるWindowsユーザー単位インストーラー
 - Windowsインストール・インストール後起動・アンインストールのCI検証
 

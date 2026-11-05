@@ -33,9 +33,9 @@ from .validation import ValidationIssue, normalize_runtime_directory, validate_p
 
 
 SITE_LABELS = {
+    SiteType.CUSTOM_PHP: "独自 PHP（上記以外）",
     SiteType.WORDPRESS: "WordPress（wp-contentがある）",
     SiteType.LARAVEL: "Laravel（artisanがある）",
-    SiteType.CUSTOM_PHP: "独自 PHP（上記以外）",
 }
 
 
@@ -181,19 +181,19 @@ class ProjectDialog(QDialog):
         form.addRow("", _hint("XServerへ公開鍵を登録したときにPCへ保存した秘密鍵。.pubファイルではありません。"))
         layout.addLayout(form)
 
-        mapping_header = QHBoxLayout()
-        mapping_header.addWidget(QLabel("同期するフォルダの組み合わせ"))
-        mapping_header.addStretch(1)
+        self.mapping_header = QHBoxLayout()
+        self.mapping_header.addWidget(QLabel("同期するフォルダの組み合わせ"))
+        self.mapping_header.addStretch(1)
+        self.add_mapping_button = QPushButton("PC側フォルダを追加…")
+        self.add_mapping_button.clicked.connect(self._add_mapping)
+        self.mapping_header.addWidget(self.add_mapping_button)
         self.runtime_paths_button = QPushButton("本番書き込み先を設定…")
         self.runtime_paths_button.clicked.connect(self._edit_runtime_paths)
-        mapping_header.addWidget(self.runtime_paths_button)
-        add_mapping = QPushButton("PC側フォルダを追加…")
-        add_mapping.clicked.connect(self._add_mapping)
+        self.mapping_header.addWidget(self.runtime_paths_button)
         remove_mapping = QPushButton("選択行を削除")
         remove_mapping.clicked.connect(self._remove_mapping)
-        mapping_header.addWidget(add_mapping)
-        mapping_header.addWidget(remove_mapping)
-        layout.addLayout(mapping_header)
+        self.mapping_header.addWidget(remove_mapping)
+        layout.addLayout(self.mapping_header)
 
         self.mapping_table = QTableWidget(0, 4)
         self.mapping_table.setHorizontalHeaderLabels(
