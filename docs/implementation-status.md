@@ -101,6 +101,9 @@
 - 接続先確認コードのOS資格情報ストア保存、旧SQLiteからの移行、失敗時の同期禁止
 - サイト種別を独自PHP、WordPress、Laravelの順に統一
 - Windows x64、macOS Apple Silicon、Linux x64のリリースバイナリ
+- ドライラン後の統合確認から再検証・バックアップ・同期・HTTPS確認までの安全な自動実行
+- プロジェクト別の自動実行設定、安全上限、REMOTE_ONLY非削除、段階別進捗表示
+- メニューバー直下の上余白縮小
 - Inno SetupによるWindowsユーザー単位インストーラー
 - Windowsインストール・インストール後起動・アンインストールのCI検証
 

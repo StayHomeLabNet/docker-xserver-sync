@@ -28,4 +28,14 @@ def test_main_window_site_order(tmp_path: Path) -> None:
         SiteType.WORDPRESS.value,
         SiteType.LARAVEL.value,
     ]
+    assert window.centralWidget().layout().contentsMargins().top() == 4
+    connection_layout = window.auto_sync_button.parentWidget().layout()
+    dry_position = connection_layout.getItemPosition(
+        connection_layout.indexOf(window.dry_run_button)
+    )
+    auto_position = connection_layout.getItemPosition(
+        connection_layout.indexOf(window.auto_sync_button)
+    )
+    assert auto_position[0] == dry_position[0] + 1
+    assert auto_position[1] == dry_position[1]
     window.close()

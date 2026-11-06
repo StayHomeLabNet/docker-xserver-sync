@@ -6,6 +6,8 @@ Dockerへbind mountしたローカルのPHPサイトを、ドライランと承�
 
 初回配置などのため、バックアップの明示的なスキップと、差分・バックアップ・転送後ハッシュ照合を行わない「無条件上書き」も利用できます。確認画面でフォルダーまたはファイル単位の上書き対象を選択でき、「すべてチェック」「すべてチェック解除」も利用できます。無条件上書きでも、SSHホスト鍵、除外パターン、本番書き込み先の保護、明示承認は維持され、未選択ファイルとリモートのみのファイルは削除されません。
 
+「安全同期を自動実行」では、読み取り専用ドライラン後に変更内容と事前設定を一度だけ統合確認し、承認後は再検証、バックアップ、承認付き同期、HTTPSヘルスチェックを自動継続します。自動実行設定はプロジェクト単位で「設定」メニューから保存できます。REMOTE_ONLYは自動削除せず、安全上限・再検証・バックアップのいずれかに失敗した場合は停止します。
+
 ## 開発環境
 
 Python 3.12以上と[uv](https://docs.astral.sh/uv/)を使用します。
@@ -72,7 +74,7 @@ pwsh -File scripts/build-app.ps1
 pwsh -File scripts/build-app.ps1 -BuildInstaller
 ```
 
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.4.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.5.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
 
 ## Linuxアプリのビルド
 

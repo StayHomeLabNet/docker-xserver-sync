@@ -15,6 +15,7 @@ try:
         QStandardPaths,
         Qt,
         QThread,
+        QTimer,
         Signal,
         Slot,
     )
@@ -51,12 +52,20 @@ from . import __version__
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
 from .history_dialog import HistoryDialog
-from .health import perform_https_health_check
+from .health import normalize_health_check_path, perform_https_health_check
 from .approval_dialog import (
     BackupConfirmationDialog,
     DeploymentApprovalDialog,
     ForceOverwriteApprovalDialog,
     RestoreApprovalDialog,
+)
+from .auto_sync import (
+    AutoSyncApprovalDialog,
+    AutoSyncPreferences,
+    AutoSyncSettingsDialog,
+    auto_sync_policy_issues,
+    load_auto_sync_preferences,
+    save_auto_sync_preferences,
 )
 from .backup import BackupResult, RemoteBackupEngine
 from .deployment import (
@@ -633,10 +642,16 @@ class MainWindow(QMainWindow):
         self._approved_delete_paths: tuple[str, ...] = ()
         self._restore_backup_id: str | None = None
         self._current_operation_id: str | None = None
+        self._auto_sync_active = False
+        self._auto_sync_stage: str | None = None
+        self._auto_sync_preferences: AutoSyncPreferences | None = None
+        self._auto_backup_skipped = False
+        self._auto_health_check_path: str | None = None
+        self._auto_dry_run_result: DryRunResult | None = None
 
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(24, 4, 24, 20)
         layout.setSpacing(14)
 
         title = QLabel("Docker → XServer Sync")
@@ -657,22 +672,22 @@ class MainWindow(QMainWindow):
         self.project_combo = QComboBox()
         self.project_combo.currentIndexChanged.connect(self._project_selected)
         project_bar.addWidget(self.project_combo, 1)
-        new_project = QPushButton("新規…")
-        new_project.clicked.connect(self._new_project)
+        self.new_project_button = QPushButton("新規…")
+        self.new_project_button.clicked.connect(self._new_project)
         self.edit_project_button = QPushButton("編集…")
         self.edit_project_button.clicked.connect(self._edit_project)
         self.delete_project_button = QPushButton("削除")
         self.delete_project_button.clicked.connect(self._delete_project)
-        history_button = QPushButton("履歴…")
-        history_button.clicked.connect(self._show_history)
+        self.history_button = QPushButton("履歴…")
+        self.history_button.clicked.connect(self._show_history)
         self.recovery_button = QPushButton("安全性確認")
         self.recovery_button.clicked.connect(self._start_recovery_scan)
         self.recovery_button.setEnabled(False)
-        project_bar.addWidget(new_project)
+        project_bar.addWidget(self.new_project_button)
         project_bar.addWidget(self.edit_project_button)
         project_bar.addWidget(self.delete_project_button)
         project_bar.addWidget(self.recovery_button)
-        project_bar.addWidget(history_button)
+        project_bar.addWidget(self.history_button)
         layout.addLayout(project_bar)
 
         controls = QFrame()
@@ -694,9 +709,9 @@ class MainWindow(QMainWindow):
         self.path_edit.setPlaceholderText("Dockerへbind mountしているローカルフォルダ")
         controls_layout.addWidget(self.path_edit, 1)
 
-        browse = QPushButton("参照…")
-        browse.clicked.connect(self._browse)
-        controls_layout.addWidget(browse)
+        self.browse_button = QPushButton("参照…")
+        self.browse_button.clicked.connect(self._browse)
+        controls_layout.addWidget(self.browse_button)
 
         self.scan_button = QPushButton("ローカルを検査")
         self.scan_button.clicked.connect(self._start_scan)
@@ -719,13 +734,16 @@ class MainWindow(QMainWindow):
         self.fingerprint_edit.setPlaceholderText("SHA256:...")
         self.key_edit = QLineEdit()
         self.key_edit.setPlaceholderText("秘密鍵ファイル")
-        key_browse = QPushButton("鍵を選択…")
-        key_browse.clicked.connect(self._browse_key)
+        self.key_browse_button = QPushButton("鍵を選択…")
+        self.key_browse_button.clicked.connect(self._browse_key)
         self.passphrase_edit = QLineEdit()
         self.passphrase_edit.setEchoMode(QLineEdit.Password)
         self.passphrase_edit.setPlaceholderText("保存しません")
         self.dry_run_button = QPushButton("読み取り専用ドライラン")
         self.dry_run_button.clicked.connect(self._start_dry_run)
+        self.auto_sync_button = QPushButton("安全同期を自動実行")
+        self.auto_sync_button.clicked.connect(self._start_auto_sync)
+        self.auto_sync_button.setEnabled(False)
         self.revalidate_button = QPushButton("計画を再検証")
         self.revalidate_button.clicked.connect(self._start_revalidation)
         self.revalidate_button.setEnabled(False)
@@ -754,14 +772,15 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.fingerprint_edit, 2, 1, 1, 5)
         connection_layout.addWidget(QLabel("秘密鍵ファイル"), 3, 0)
         connection_layout.addWidget(self.key_edit, 3, 1, 1, 3)
-        connection_layout.addWidget(key_browse, 3, 4)
+        connection_layout.addWidget(self.key_browse_button, 3, 4)
         connection_layout.addWidget(self.passphrase_edit, 3, 5)
         connection_layout.addWidget(self.force_overwrite_button, 4, 1)
         connection_layout.addWidget(self.revalidate_button, 4, 2)
         connection_layout.addWidget(self.backup_button, 4, 3)
         connection_layout.addWidget(self.deploy_button, 4, 4)
         connection_layout.addWidget(self.dry_run_button, 4, 5)
-        connection_layout.addWidget(self.mask_toggle, 5, 1, 1, 5)
+        connection_layout.addWidget(self.mask_toggle, 5, 1, 1, 4)
+        connection_layout.addWidget(self.auto_sync_button, 5, 5)
         layout.addWidget(connection)
 
         self.summary = QLabel("フォルダを選択して検査してください。")
@@ -878,6 +897,8 @@ class MainWindow(QMainWindow):
         settings_menu = self.menuBar().addMenu("設定")
         mask_action = settings_menu.addAction("接続情報のマスク設定…")
         mask_action.triggered.connect(self._show_mask_settings)
+        auto_action = settings_menu.addAction("自動実行設定…")
+        auto_action.triggered.connect(self._show_auto_sync_settings)
         security_action = settings_menu.addAction("確認コードの保存状態…")
         security_action.triggered.connect(self._show_security_status)
         register_action = settings_menu.addAction("接続先の確認コードを再登録…")
@@ -900,6 +921,40 @@ class MainWindow(QMainWindow):
         self.settings.sync()
         self.mask_toggle.setChecked(False)
         self._apply_connection_masks()
+
+    @Slot()
+    def _show_auto_sync_settings(self) -> None:
+        if self._auto_sync_active or self._thread is not None:
+            QMessageBox.information(
+                self,
+                "自動実行設定",
+                "処理の完了後に設定を変更してください。",
+            )
+            return
+        project = self._current_project
+        if project is None:
+            QMessageBox.information(
+                self,
+                "自動実行設定",
+                "保存済みプロジェクトを選択してください。",
+            )
+            return
+        preferences = load_auto_sync_preferences(
+            self.settings, project.project_id
+        )
+        dialog = AutoSyncSettingsDialog(preferences, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        save_auto_sync_preferences(
+            self.settings,
+            project.project_id,
+            dialog.selected_preferences(),
+        )
+        QMessageBox.information(
+            self,
+            "自動実行設定",
+            f"「{project.name}」の自動実行設定を保存しました。",
+        )
 
     @Slot()
     def _reset_display_settings(self) -> None:
@@ -1000,7 +1055,7 @@ class MainWindow(QMainWindow):
             self.deploy_button.setEnabled(False)
 
     def _update_action_buttons(self) -> None:
-        idle = self._thread is None
+        idle = self._thread is None and not self._auto_sync_active
         validated = (
             self._current_plan_id is not None
             and self._validated_plan_id == self._current_plan_id
@@ -1013,6 +1068,12 @@ class MainWindow(QMainWindow):
             idle and self._current_project is not None and self._selected_mapping() is not None
         )
         self.recovery_button.setEnabled(idle and self._current_project is not None)
+        self.auto_sync_button.setEnabled(
+            self._thread is None
+            and not self._auto_sync_active
+            and self._current_project is not None
+            and self._selected_mapping() is not None
+        )
 
     def _backup_root(self) -> str:
         if self._current_project is None:
@@ -1147,6 +1208,153 @@ class MainWindow(QMainWindow):
         selected, _ = QFileDialog.getOpenFileName(self, "SSH秘密鍵を選択")
         if selected:
             self.key_edit.setText(selected)
+
+    def _set_auto_sync_controls_locked(self, locked: bool) -> None:
+        for widget in (
+            self.project_combo,
+            self.mapping_combo,
+            self.site_combo,
+            self.path_edit,
+            self.host_edit,
+            self.port_spin,
+            self.user_edit,
+            self.remote_root_edit,
+            self.fingerprint_edit,
+            self.key_edit,
+            self.passphrase_edit,
+            self.new_project_button,
+            self.edit_project_button,
+            self.delete_project_button,
+            self.history_button,
+            self.recovery_button,
+            self.browse_button,
+            self.key_browse_button,
+            self.scan_button,
+            self.dry_run_button,
+            self.force_overwrite_button,
+            self.revalidate_button,
+            self.backup_button,
+            self.deploy_button,
+        ):
+            widget.setEnabled(not locked)
+        self.auto_sync_button.setEnabled(not locked)
+
+    def _set_auto_stage(self, step: int, label: str) -> None:
+        self.progress_bar.setRange(0, 4)
+        self.progress_bar.setValue(step)
+        self.progress_bar.setFormat(f"自動実行 {step}/4  {label}")
+        self.progress_bar.setVisible(True)
+        self.summary.setText(f"自動実行 {step}/4 — {label}")
+
+    def _stop_auto_sync(self, *, hide_progress: bool = True) -> None:
+        self._auto_sync_active = False
+        self._auto_sync_stage = None
+        self._auto_sync_preferences = None
+        self._auto_backup_skipped = False
+        self._auto_health_check_path = None
+        self._auto_dry_run_result = None
+        self._set_auto_sync_controls_locked(False)
+        if hide_progress:
+            self.progress_bar.setVisible(False)
+        self._update_action_buttons()
+
+    @Slot()
+    def _start_auto_sync(self) -> None:
+        if self._thread is not None or self._auto_sync_active:
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            QMessageBox.information(
+                self,
+                "自動実行できません",
+                "保存済みプロジェクトと同期対象を選択してください。",
+            )
+            return
+        self._auto_sync_active = True
+        self._auto_sync_stage = "dry_run"
+        self._auto_sync_preferences = load_auto_sync_preferences(
+            self.settings, project.project_id
+        )
+        self._auto_backup_skipped = False
+        self._auto_health_check_path = None
+        self._auto_dry_run_result = None
+        self._set_auto_sync_controls_locked(True)
+        self._update_action_buttons()
+        self._set_auto_stage(1, "読み取り専用ドライラン")
+        self._start_dry_run()
+        if self._thread is None:
+            self._stop_auto_sync()
+
+    def _continue_auto_sync(self) -> None:
+        if not self._auto_sync_active or self._thread is not None:
+            return
+        if self._auto_sync_stage == "approval":
+            result = self._auto_dry_run_result
+            self._auto_dry_run_result = None
+            if result is None:
+                self.summary.setText(
+                    "自動実行を停止しました。ドライラン結果がありません。"
+                )
+                self._stop_auto_sync()
+                return
+            self._prepare_auto_after_dry_run(result)
+            if self._auto_sync_active and self._auto_sync_stage == "revalidation":
+                QTimer.singleShot(0, self._continue_auto_sync)
+            return
+        if self._auto_sync_stage == "revalidation":
+            self._set_auto_stage(2, "計画を再検証")
+            self._start_revalidation()
+        elif self._auto_sync_stage == "backup":
+            self._set_auto_stage(3, "バックアップを作成")
+            self._start_auto_backup()
+        elif self._auto_sync_stage == "deployment":
+            self._set_auto_stage(4, "承認付き同期")
+            self._start_auto_deployment()
+        if self._thread is None and self._auto_sync_active:
+            self._stop_auto_sync()
+
+    def _start_auto_backup(self) -> None:
+        project = self._current_project
+        mapping = self._selected_mapping()
+        stored = self.store.get_plan(self._current_plan_id or "")
+        if project is None or mapping is None or stored is None:
+            QMessageBox.warning(
+                self, "自動実行を停止", "バックアップ対象の計画を取得できません。"
+            )
+            return
+        self._approved_delete_paths = ()
+        self._run_backup(project, mapping, stored)
+
+    def _start_auto_deployment(self) -> None:
+        project = self._current_project
+        mapping = self._selected_mapping()
+        stored = self.store.get_plan(self._current_plan_id or "")
+        backups = {
+            backup.backup_id: backup
+            for backup in self.store.list_backups(project.project_id)
+        } if project else {}
+        backup = backups.get(self._current_backup_id) if self._current_backup_id else None
+        if (
+            project is None
+            or mapping is None
+            or stored is None
+            or (
+                not self._backup_skipped
+                and (backup is None or backup.plan_id != stored.plan.plan_id)
+            )
+        ):
+            QMessageBox.warning(
+                self, "自動実行を停止", "この計画に対応するバックアップがありません。"
+            )
+            return
+        self._run_deployment(
+            project,
+            mapping,
+            stored,
+            backup,
+            self._auto_health_check_path,
+        )
 
     @Slot()
     def _start_scan(self) -> None:
@@ -1301,6 +1509,14 @@ class MainWindow(QMainWindow):
             )
             return
         self._backup_skipped = False
+        self._run_backup(project, mapping, stored)
+
+    def _run_backup(
+        self,
+        project: Project,
+        mapping: SyncMapping,
+        stored: StoredPlan,
+    ) -> None:
 
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
@@ -1379,6 +1595,23 @@ class MainWindow(QMainWindow):
         )
         if approval.exec() != QDialog.Accepted:
             return
+        self._run_deployment(
+            project,
+            mapping,
+            stored,
+            backup,
+            approval.selected_health_check_path(),
+        )
+
+    def _run_deployment(
+        self,
+        project: Project,
+        mapping: SyncMapping,
+        stored: StoredPlan,
+        backup: BackupRecord | None,
+        health_check_path: str | None,
+    ) -> None:
+        counts = stored.plan.counts()
 
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
@@ -1410,7 +1643,7 @@ class MainWindow(QMainWindow):
                 backup_skipped=self._backup_skipped,
                 delete_paths=self._approved_delete_paths,
             ),
-            health_check_path=approval.selected_health_check_path(),
+            health_check_path=health_check_path,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1675,12 +1908,101 @@ class MainWindow(QMainWindow):
             f"REMOTE_ONLY {counts[ChangeType.REMOTE_ONLY]:,} / "
             f"保護領域 {protected_count:,}件{persisted}"
         )
+        if self._auto_sync_active and self._auto_sync_stage == "dry_run":
+            self._auto_dry_run_result = result
+            self._auto_sync_stage = "approval"
+
+    def _prepare_auto_after_dry_run(self, result: DryRunResult) -> None:
+        preferences = self._auto_sync_preferences
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if (
+            preferences is None
+            or project is None
+            or mapping is None
+            or result.has_blocking_issues
+            or self._current_plan_id != result.plan.plan_id
+        ):
+            self.summary.setText(
+                "自動実行を停止しました。ドライランの要確認項目を確認してください。"
+            )
+            self._stop_auto_sync()
+            return
+
+        counts = result.plan.counts()
+        add_count = counts[ChangeType.ADD]
+        update_count = counts[ChangeType.UPDATE]
+        remote_only_count = counts[ChangeType.REMOTE_ONLY]
+        changed_count = add_count + update_count
+        upload_bytes = sum(
+            change.local.size or 0
+            for change in result.plan.changes
+            if change.change_type in {ChangeType.ADD, ChangeType.UPDATE}
+            and change.local is not None
+        )
+        policy_issues = auto_sync_policy_issues(
+            preferences,
+            add_count=add_count,
+            update_count=update_count,
+            remote_only_count=remote_only_count,
+            upload_bytes=upload_bytes,
+        )
+        if policy_issues:
+            self.summary.setText("自動実行を安全上限で停止しました。")
+            QMessageBox.warning(
+                self,
+                "自動実行を停止",
+                "\n".join(f"• {issue}" for issue in policy_issues),
+            )
+            self._stop_auto_sync()
+            return
+        if changed_count == 0:
+            self.summary.setText(
+                "自動実行完了。ADD・UPDATEはなく、XServerへの書き込みは行いませんでした。"
+            )
+            self._stop_auto_sync()
+            return
+
+        try:
+            health_path = (
+                normalize_health_check_path(preferences.health_check_path)
+                if preferences.health_check_enabled
+                else None
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "自動実行設定を確認", str(exc))
+            self._stop_auto_sync()
+            return
+        backup_skipped = preferences.resolved_backup_skip(update_count)
+        approval = AutoSyncApprovalDialog(
+            domain=project.domain,
+            remote_root=mapping.remote_root,
+            add_count=add_count,
+            update_count=update_count,
+            remote_only_count=remote_only_count,
+            upload_bytes=upload_bytes,
+            backup_skipped=backup_skipped,
+            health_check_path=health_path,
+            parent=self,
+        )
+        if approval.exec() != QDialog.Accepted:
+            self.summary.setText(
+                "自動実行をキャンセルしました。XServerへの書き込みは行っていません。"
+            )
+            self._stop_auto_sync()
+            return
+        self._approved_delete_paths = ()
+        self._auto_backup_skipped = backup_skipped
+        self._auto_health_check_path = health_path
+        self._auto_sync_stage = "revalidation"
 
     @Slot(str)
     def _dry_run_failed(self, message: str) -> None:
         self._finish_operation("failed", error=message)
         self.summary.setText("ドライランに失敗しました。リモートは変更されていません。")
         QMessageBox.critical(self, "ドライランエラー", message)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(object)
     def _revalidation_completed(self, result: RevalidationResult) -> None:
@@ -1693,6 +2015,14 @@ class MainWindow(QMainWindow):
             self.summary.setText(
                 "計画の再検証に成功しました。設定、ローカル、XServer、ステージングは一致しています。"
             )
+            if self._auto_sync_active and self._auto_sync_stage == "revalidation":
+                if self._auto_backup_skipped:
+                    self._backup_skipped = True
+                    self._current_backup_id = None
+                    self._set_auto_stage(3, "バックアップを設定によりスキップ")
+                    self._auto_sync_stage = "deployment"
+                else:
+                    self._auto_sync_stage = "backup"
             return
         if self._current_plan_id is not None:
             self.store.set_plan_status(self._current_plan_id, "invalid")
@@ -1707,12 +2037,16 @@ class MainWindow(QMainWindow):
         )
         self.summary.setText("計画は無効になりました。再度ドライランを実行してください。")
         QMessageBox.warning(self, "再検証に失敗", details)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(str)
     def _revalidation_failed(self, message: str) -> None:
         self._finish_operation("failed", error=message)
         self.summary.setText("再検証を完了できませんでした。計画は実行されていません。")
         QMessageBox.critical(self, "再検証エラー", message)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(object)
     def _backup_completed(self, result: BackupResult) -> None:
@@ -1747,6 +2081,8 @@ class MainWindow(QMainWindow):
             f"バックアップ完了 / {backup.file_count}ファイル / {backup.total_bytes:,} bytes。"
             "承認付き同期へ進めます。"
         )
+        if self._auto_sync_active and self._auto_sync_stage == "backup":
+            self._auto_sync_stage = "deployment"
 
     @Slot(object)
     def _backup_blocked(self, result: RevalidationResult) -> None:
@@ -1758,6 +2094,8 @@ class MainWindow(QMainWindow):
         self._reset_write_state()
         self.summary.setText("再検証に失敗したためバックアップを作成しませんでした。")
         QMessageBox.warning(self, "バックアップを中止", "\n".join(result.reasons))
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(str)
     def _backup_failed(self, message: str) -> None:
@@ -1765,6 +2103,8 @@ class MainWindow(QMainWindow):
         self._reset_write_state()
         self.summary.setText("バックアップに失敗しました。公開ファイルは変更されていません。")
         QMessageBox.critical(self, "バックアップエラー", message)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(object)
     def _deployment_completed(self, result: DeploymentResult) -> None:
@@ -1816,6 +2156,8 @@ class MainWindow(QMainWindow):
         self._current_plan_id = None
         self._reset_write_state()
         cleanup_stale_staging(self.store, self.staging_parent)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(object)
     def _deployment_blocked(self, result: RevalidationResult) -> None:
@@ -1830,6 +2172,8 @@ class MainWindow(QMainWindow):
         cleanup_stale_staging(self.store, self.staging_parent)
         self.summary.setText("再検証に失敗したため同期を実行しませんでした。")
         QMessageBox.warning(self, "同期を中止", "\n".join(result.reasons))
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(str)
     def _deployment_failed(self, message: str) -> None:
@@ -1842,13 +2186,18 @@ class MainWindow(QMainWindow):
         cleanup_stale_staging(self.store, self.staging_parent)
         self.summary.setText("同期に失敗しました。適用済みファイルは可能な限り復元されました。")
         QMessageBox.critical(self, "同期エラー", message)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
 
     @Slot(int, int, str)
     def _deployment_progress(self, current: int, total: int, phase: str) -> None:
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(current)
-        self.progress_bar.setFormat(f"{phase}  {current}/{total}")
-        self.summary.setText(f"承認済み同期を実行中… {current}/{total}  {phase}")
+        prefix = "自動実行 4/4  " if self._auto_sync_active else ""
+        self.progress_bar.setFormat(f"{prefix}{phase}  {current}/{total}")
+        self.summary.setText(
+            f"{prefix}承認済み同期を実行中… {current}/{total}  {phase}"
+        )
 
     @Slot(int, int, str)
     def _force_overwrite_progress(self, current: int, total: int, path: str) -> None:
@@ -1943,8 +2292,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _scan_finished(self) -> None:
-        self.scan_button.setEnabled(True)
-        self.dry_run_button.setEnabled(True)
+        self.scan_button.setEnabled(not self._auto_sync_active)
+        self.dry_run_button.setEnabled(not self._auto_sync_active)
         if self._worker is not None:
             self._worker.deleteLater()
         if self._thread is not None:
@@ -1952,6 +2301,13 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._thread = None
         self._refresh_ready_plan()
+        if self._auto_sync_active and self._auto_sync_stage in {
+            "approval",
+            "revalidation",
+            "backup",
+            "deployment",
+        }:
+            QTimer.singleShot(0, self._continue_auto_sync)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
