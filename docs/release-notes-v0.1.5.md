@@ -23,3 +23,13 @@
 ## 検証
 
 - 自動テスト89件に成功
+- Windows ZIP、Windowsインストーラー、macOS ZIP、Linux tar.gzの圧縮形式・実行形式を確認
+
+## SHA-256
+
+```text
+28228b9d4b707e2e90369e34bca1af47a3a37dfdb3b983d8fcc0f82f853a0bee  Docker XServer Sync-Linux-x64.tar.gz
+0911662ab2864126278b02e7a9a5f14862b50782f727bbc5894e0f39b8acaa10  Docker XServer Sync-Windows-x64.zip
+1c69aaea386403009c9bc42e5208c2b2a9544bfea9aef6c051627deaed8959a1  Docker XServer Sync-macOS-arm64.zip
+cdbfabc3609deacd5638fc8594d7773f70c0392ca8321e0a1319217485b19c18  Docker-XServer-Sync-Setup-v0.1.5.exe
+```
