@@ -39,7 +39,7 @@ jobs:
       - name: Upload Linux release file
         uses: actions/upload-artifact@v7
         with:
-          name: docker-xserver-sync-linux-v0.1.5
+          name: docker-xserver-sync-linux-v0.1.6
           path: dist/Docker XServer Sync-Linux-x64.tar.gz
           if-no-files-found: error
           retention-days: 14

@@ -2,7 +2,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QDialogButtonBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QFormLayout
 
 from dxsync.models import SiteType
 from dxsync.project_dialog import ProjectDialog, RuntimePathsDialog
@@ -57,3 +57,18 @@ def test_project_dialog_site_order_and_mapping_button_order(tmp_path) -> None:
     assert dialog.mapping_header.indexOf(dialog.add_mapping_button) < (
         dialog.mapping_header.indexOf(dialog.runtime_paths_button)
     )
+
+
+def test_project_dialog_hints_span_full_width_and_content_scrolls(tmp_path) -> None:
+    app()
+    dialog = ProjectDialog(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    )
+
+    row, role = dialog.details_form.getWidgetPosition(dialog.site_help)
+
+    assert row >= 0
+    assert role == QFormLayout.SpanningRole
+    assert dialog.scroll_area.widgetResizable()
+    assert dialog.minimumWidth() >= 760
+    dialog.close()

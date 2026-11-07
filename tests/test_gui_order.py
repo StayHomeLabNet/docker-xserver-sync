@@ -38,4 +38,9 @@ def test_main_window_site_order(tmp_path: Path) -> None:
     )
     assert auto_position[0] == dry_position[0] + 1
     assert auto_position[1] == dry_position[1]
+    assert window.wordpress_setup_button.isEnabled()
+    assert window.wordpress_setup_button.text() == "セットアップを開始…"
+    assert window.wordpress_setup_action.text() == (
+        "WordPressをXServerへ新規セットアップ…"
+    )
     window.close()

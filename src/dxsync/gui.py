@@ -81,6 +81,9 @@ from .force_overwrite import (
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
+from .wordpress_setup import WordPressSetupEngine, WordPressSetupRequest
+from .wordpress_setup_dialog import WordPressSetupWizard
+from .xserver_api import XServerApiClient
 from .recovery import (
     RecoveryAnalysisResult,
     analyze_recovery_artifacts,
@@ -609,6 +612,68 @@ class RestoreWorker(QObject):
                 client.close()
 
 
+class WordPressSetupWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        project: Project,
+        request: WordPressSetupRequest,
+        api_key: str,
+        servername: str,
+        passphrase: str | None,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.request = request
+        self.api_key = api_key
+        self.servername = servername
+        self.passphrase = passphrase
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            result = WordPressSetupEngine().setup(
+                request=self.request,
+                api=XServerApiClient(
+                    api_key=self.api_key,
+                    servername=self.servername,
+                ),
+                ssh_client=client,
+                sftp=sftp,
+                ssh_username=self.project.ssh_username,
+                progress_callback=self.progress.emit,
+            )
+            self.progress.emit("HTTPSで公開ページを確認中")
+            homepage = perform_https_health_check(domain=self.project.domain, path="/")
+            login = perform_https_health_check(
+                domain=self.project.domain, path="/wp-login.php"
+            )
+            self.completed.emit((result, homepage, login))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.api_key = ""
+            self.request = None
+            if sftp is not None:
+                sftp.close()
+            if client is not None:
+                client.close()
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -643,6 +708,7 @@ class MainWindow(QMainWindow):
         self._restore_backup_id: str | None = None
         self._current_operation_id: str | None = None
         self._auto_sync_active = False
+        self._wordpress_setup_active = False
         self._auto_sync_stage: str | None = None
         self._auto_sync_preferences: AutoSyncPreferences | None = None
         self._auto_backup_skipped = False
@@ -689,6 +755,23 @@ class MainWindow(QMainWindow):
         project_bar.addWidget(self.recovery_button)
         project_bar.addWidget(self.history_button)
         layout.addLayout(project_bar)
+
+        setup_panel = QFrame()
+        setup_panel.setFrameShape(QFrame.StyledPanel)
+        setup_layout = QHBoxLayout(setup_panel)
+        setup_text = QLabel(
+            "WordPress初回セットアップ — "
+            "ローカルDockerのWordPressを空のXServerへ配置します"
+        )
+        setup_text.setWordWrap(True)
+        setup_layout.addWidget(setup_text, 1)
+        self.wordpress_setup_button = QPushButton("セットアップを開始…")
+        self.wordpress_setup_button.setToolTip(
+            "WordPressプロジェクトを選び、空のXServerへ初回配置します"
+        )
+        self.wordpress_setup_button.clicked.connect(self._start_wordpress_setup)
+        setup_layout.addWidget(self.wordpress_setup_button)
+        layout.addWidget(setup_panel)
 
         controls = QFrame()
         controls.setFrameShape(QFrame.StyledPanel)
@@ -841,6 +924,7 @@ class MainWindow(QMainWindow):
         self.edit_project_button.setEnabled(has_project)
         self.delete_project_button.setEnabled(has_project)
         self.recovery_button.setEnabled(has_project and self._thread is None)
+        self.wordpress_setup_button.setEnabled(self._thread is None)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
         if self._current_project is not None:
@@ -894,6 +978,14 @@ class MainWindow(QMainWindow):
         )
 
     def _create_menus(self) -> None:
+        project_menu = self.menuBar().addMenu("プロジェクト")
+        new_action = project_menu.addAction("新しいプロジェクト…")
+        new_action.triggered.connect(self._new_project)
+        self.wordpress_setup_action = project_menu.addAction(
+            "WordPressをXServerへ新規セットアップ…"
+        )
+        self.wordpress_setup_action.triggered.connect(self._start_wordpress_setup)
+
         settings_menu = self.menuBar().addMenu("設定")
         mask_action = settings_menu.addAction("接続情報のマスク設定…")
         mask_action.triggered.connect(self._show_mask_settings)
@@ -1074,6 +1166,9 @@ class MainWindow(QMainWindow):
             and self._current_project is not None
             and self._selected_mapping() is not None
         )
+        self.wordpress_setup_button.setEnabled(idle)
+        if hasattr(self, "wordpress_setup_action"):
+            self.wordpress_setup_action.setEnabled(idle)
 
     def _backup_root(self) -> str:
         if self._current_project is None:
@@ -1122,6 +1217,108 @@ class MainWindow(QMainWindow):
         dialog = ProjectDialog(self.store, parent=self)
         if dialog.exec() == QDialog.Accepted and dialog.saved_project is not None:
             self._reload_projects(dialog.saved_project.project_id)
+
+    @Slot()
+    def _start_wordpress_setup(self) -> None:
+        if self._thread is not None or not self._require_runtime_paths_confirmation():
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None or project.site_type is not SiteType.WORDPRESS:
+            QMessageBox.information(
+                self,
+                "WordPress新規セットアップ",
+                "WordPressの保存済みプロジェクトを選択してください。",
+            )
+            return
+        wizard = WordPressSetupWizard(project, mapping, self)
+        if wizard.exec() != QDialog.Accepted:
+            return
+        request = wizard.request_value()
+        api_key = wizard.api_key
+        servername = wizard.servername
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.wordpress_setup_button.setEnabled(False)
+        self._update_action_buttons()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("WordPress初回セットアップ中…")
+        self.progress_bar.setVisible(True)
+        self.summary.setText("WordPressの初回セットアップを開始しました。")
+        self._begin_operation("wordpress_setup")
+        thread = QThread(self)
+        worker = WordPressSetupWorker(
+            project=project,
+            request=request,
+            api_key=api_key,
+            servername=servername,
+            passphrase=self.passphrase_edit.text() or None,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._wordpress_setup_progress)
+        worker.completed.connect(self._wordpress_setup_completed)
+        worker.failed.connect(self._wordpress_setup_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        self._wordpress_setup_active = True
+        self._set_auto_sync_controls_locked(True)
+        thread.start()
+
+    @Slot(str)
+    def _wordpress_setup_progress(self, message: str) -> None:
+        self.progress_bar.setFormat(message)
+        self.summary.setText(message)
+
+    @Slot(object)
+    def _wordpress_setup_completed(self, payload: object) -> None:
+        result, homepage, login = payload
+        health_ok = homepage.ok and login.ok
+        self._finish_operation(
+            "succeeded" if health_ok else "failed",
+            details={
+                "database": result.db_name,
+                "database_user": result.db_user,
+                "file_count": result.transferred_files,
+                "table_count": result.table_count,
+                "homepage_status": homepage.status_code,
+                "login_status": login.status_code,
+            },
+            error=None if health_ok else "HTTPS health check failed after setup",
+        )
+        self.progress_bar.setVisible(False)
+        if health_ok:
+            self.summary.setText(
+                f"WordPressセットアップ完了 / {result.transferred_files}ファイル / "
+                f"{result.table_count}テーブル。HTTPS動作確認済みです。"
+            )
+            QMessageBox.information(
+                self,
+                "WordPressセットアップ完了",
+                f"https://{self._current_project.domain}/\n"
+                f"https://{self._current_project.domain}/wp-login.php\n\n"
+                f"DB: {result.db_name}\nDBユーザー: {result.db_user}",
+            )
+        else:
+            self.summary.setText(
+                "ファイルとDBのセットアップは完了しましたが、HTTPS確認に失敗しました。"
+            )
+            QMessageBox.warning(
+                self,
+                "HTTPS確認が必要です",
+                f"トップ: {homepage.error or homepage.status_code}\n"
+                f"ログイン: {login.error or login.status_code}",
+            )
+
+    @Slot(str)
+    def _wordpress_setup_failed(self, message: str) -> None:
+        self._finish_operation("failed", error=message)
+        self.progress_bar.setVisible(False)
+        self.summary.setText("WordPress初回セットアップを完了できませんでした。")
+        QMessageBox.critical(self, "WordPressセットアップエラー", message)
 
     @Slot()
     def _edit_project(self) -> None:
@@ -1174,7 +1371,13 @@ class MainWindow(QMainWindow):
             kind=kind,
             details={
                 "mode": "write"
-                if kind in {"backup", "deployment", "force_overwrite", "restore"}
+                if kind in {
+                    "backup",
+                    "deployment",
+                    "force_overwrite",
+                    "restore",
+                    "wordpress_setup",
+                }
                 else "read_only"
             },
         )
@@ -1235,9 +1438,12 @@ class MainWindow(QMainWindow):
             self.revalidate_button,
             self.backup_button,
             self.deploy_button,
+            self.wordpress_setup_button,
         ):
             widget.setEnabled(not locked)
         self.auto_sync_button.setEnabled(not locked)
+        if hasattr(self, "wordpress_setup_action"):
+            self.wordpress_setup_action.setEnabled(not locked)
 
     def _set_auto_stage(self, step: int, label: str) -> None:
         self.progress_bar.setRange(0, 4)
@@ -1983,6 +2189,9 @@ class MainWindow(QMainWindow):
             upload_bytes=upload_bytes,
             backup_skipped=backup_skipped,
             health_check_path=health_path,
+            require_domain_confirmation=(
+                preferences.require_domain_confirmation
+            ),
             parent=self,
         )
         if approval.exec() != QDialog.Accepted:
@@ -2292,6 +2501,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _scan_finished(self) -> None:
+        if self._wordpress_setup_active:
+            self._wordpress_setup_active = False
+            self._set_auto_sync_controls_locked(False)
         self.scan_button.setEnabled(not self._auto_sync_active)
         self.dry_run_button.setEnabled(not self._auto_sync_active)
         if self._worker is not None:

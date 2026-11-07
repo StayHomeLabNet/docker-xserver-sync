@@ -28,6 +28,7 @@ class AutoSyncPreferences:
     max_changed_files: int = 1000
     max_update_files: int = 500
     max_upload_mib: int = 1024
+    require_domain_confirmation: bool = True
 
     def resolved_backup_skip(self, update_count: int) -> bool:
         if self.backup_mode == "skip":
@@ -96,6 +97,9 @@ def load_auto_sync_preferences(
         max_upload_mib=settings.value(
             f"{prefix}/max_upload_mib", 1024, type=int
         ),
+        require_domain_confirmation=settings.value(
+            f"{prefix}/require_domain_confirmation", True, type=bool
+        ),
     )
 
 
@@ -113,6 +117,10 @@ def save_auto_sync_preferences(
         ("max_changed_files", preferences.max_changed_files),
         ("max_update_files", preferences.max_update_files),
         ("max_upload_mib", preferences.max_upload_mib),
+        (
+            "require_domain_confirmation",
+            preferences.require_domain_confirmation,
+        ),
     ):
         settings.setValue(f"{prefix}/{key}", value)
     settings.sync()
@@ -126,7 +134,7 @@ class AutoSyncSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         note = QLabel(
             "この設定は選択中のプロジェクトに保存されます。自動実行でも、"
-            "ドライラン後の統合確認と対象ドメインの再入力は省略できません。"
+            "ドライラン後の統合確認と明示承認は省略できません。"
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -168,6 +176,14 @@ class AutoSyncSettingsDialog(QDialog):
         form.addRow("最大ADD＋UPDATE数", self.max_changed_files)
         form.addRow("最大UPDATE数", self.max_update_files)
         form.addRow("最大転送量（MiB）", self.max_upload_mib)
+
+        self.require_domain_confirmation = QCheckBox(
+            "最終確認で対象ドメインの再入力を要求する（推奨）"
+        )
+        self.require_domain_confirmation.setChecked(
+            preferences.require_domain_confirmation
+        )
+        form.addRow("実行時の確認", self.require_domain_confirmation)
         layout.addLayout(form)
 
         warning = QLabel(
@@ -215,6 +231,9 @@ class AutoSyncSettingsDialog(QDialog):
             max_changed_files=self.max_changed_files.value(),
             max_update_files=self.max_update_files.value(),
             max_upload_mib=self.max_upload_mib.value(),
+            require_domain_confirmation=(
+                self.require_domain_confirmation.isChecked()
+            ),
         )
 
 
@@ -230,10 +249,12 @@ class AutoSyncApprovalDialog(QDialog):
         upload_bytes: int,
         backup_skipped: bool,
         health_check_path: str | None,
+        require_domain_confirmation: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.domain = domain
+        self.require_domain_confirmation = require_domain_confirmation
         self.setWindowTitle("安全同期の自動実行を確認")
         self.resize(640, 460)
         layout = QVBoxLayout(self)
@@ -270,10 +291,19 @@ class AutoSyncApprovalDialog(QDialog):
         )
         layout.addWidget(self.destination_check)
         layout.addWidget(self.workflow_check)
-        layout.addWidget(QLabel(f"確認のため「{domain}」と入力してください。"))
+        self.domain_prompt = QLabel(
+            f"確認のため「{domain}」と入力してください。"
+        )
+        layout.addWidget(self.domain_prompt)
         self.domain_edit = QLineEdit()
         self.domain_edit.setPlaceholderText(domain)
         layout.addWidget(self.domain_edit)
+        if not require_domain_confirmation:
+            self.domain_prompt.setText(
+                "設定により対象ドメインの再入力を省略します。"
+            )
+            self.domain_prompt.setStyleSheet("color: #8a4b08;")
+            self.domain_edit.setVisible(False)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -292,5 +322,8 @@ class AutoSyncApprovalDialog(QDialog):
         self.apply_button.setEnabled(
             self.destination_check.isChecked()
             and self.workflow_check.isChecked()
-            and self.domain_edit.text().strip() == self.domain
+            and (
+                not self.require_domain_confirmation
+                or self.domain_edit.text().strip() == self.domain
+            )
         )

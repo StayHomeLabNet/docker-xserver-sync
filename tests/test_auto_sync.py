@@ -33,6 +33,7 @@ def test_auto_sync_preferences_round_trip_per_project(tmp_path: Path) -> None:
         max_changed_files=25,
         max_update_files=10,
         max_upload_mib=50,
+        require_domain_confirmation=False,
     )
 
     save_auto_sync_preferences(settings, "project-one", preferences)
@@ -90,6 +91,27 @@ def test_auto_sync_approval_requires_checks_and_exact_domain() -> None:
     dialog.domain_edit.setText("wrong.example.com")
     assert not dialog.apply_button.isEnabled()
     dialog.domain_edit.setText("example.com")
+    assert dialog.apply_button.isEnabled()
+
+
+def test_auto_sync_approval_can_skip_domain_reentry() -> None:
+    app()
+    dialog = AutoSyncApprovalDialog(
+        domain="example.com",
+        remote_root="/home/user/site",
+        add_count=1,
+        update_count=0,
+        remote_only_count=0,
+        upload_bytes=123,
+        backup_skipped=False,
+        health_check_path="/",
+        require_domain_confirmation=False,
+    )
+
+    assert dialog.domain_edit.isHidden()
+    dialog.destination_check.setChecked(True)
+    assert not dialog.apply_button.isEnabled()
+    dialog.workflow_check.setChecked(True)
     assert dialog.apply_button.isEnabled()
 
 

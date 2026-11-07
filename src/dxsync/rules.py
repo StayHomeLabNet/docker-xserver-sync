@@ -7,7 +7,7 @@ from .models import normalize_relative_path
 
 
 def _normalize_pattern(pattern: str) -> str:
-    return pattern.strip().replace("\\", "/").lstrip("/")
+    return pattern.strip().replace("\\", "/")
 
 
 def _matches(path: str, pattern: str, *, is_directory: bool) -> bool:
@@ -15,17 +15,26 @@ def _matches(path: str, pattern: str, *, is_directory: bool) -> bool:
     if not pattern or pattern.startswith("#"):
         return False
 
+    anchored = pattern.startswith("/")
+    pattern = pattern.lstrip("/")
     directory_rule = pattern.endswith("/")
     pattern = pattern.rstrip("/")
     if not pattern:
         return False
 
     if directory_rule:
+        if anchored:
+            return path == pattern or path.startswith(pattern + "/")
         parts = path.split("/")
         candidates = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
         if "/" not in pattern:
             return any(fnmatchcase(candidate.split("/")[-1], pattern) for candidate in candidates)
         return any(fnmatchcase(candidate, pattern) for candidate in candidates)
+
+    if anchored:
+        if "/" not in pattern and "/" in path:
+            return False
+        return fnmatchcase(path, pattern)
 
     if "/" not in pattern:
         return any(fnmatchcase(part, pattern) for part in path.split("/"))

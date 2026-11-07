@@ -1,9 +1,35 @@
 # 実装状況
 
-更新日: 2026-11-05
+更新日: 2026-11-07
+
+## 現在の最優先目標
+
+ローカルDocker環境で動作するWordPressを、空のXServerへ初回セットアップできるようにする。
+
+- XServer APIによるDB、DBユーザー、アクセス権の作成
+- ローカルDBのSQLダンプとXServerへのインポート
+- XServer用 `wp-config.php` の生成
+- 初回移行時の `wp-content/uploads/` 転送
+- WordPressシリアライズ値に対応したURL置換
+- トップページとログイン画面のHTTPS検証
+
+詳細と完了条件は[WordPress初回セットアップ仕様](wordpress-first-setup.md)に定義する。通常のファイル同期では引き続きMySQLを変更しない。
 
 ## 完了
 
+- WordPress新規セットアップウィザードの最小版
+- Git、Docker、IDE、ルート文書、テストなど本番不要ファイルの既定除外
+- ルート限定除外パターンによるプラグイン・テーマ内文書の保持
+- WordPressコアを必須とした `wp-content/` 選択アップロード
+- XServer APIによる新規DB、DBユーザー、アクセス権の作成
+- 既存DB・DBユーザーと非空リモートルートの検出・停止
+- SQLダンプの暗号化転送とMySQLインポート
+- 別DBを変更するSQL文の拒否
+- `uploads`を含むWordPress初回ファイル転送とSQLファイルの公開除外
+- XServer用 `wp-config.php` と認証ソルトの生成
+- WP-CLIによるシリアライズ対応URL置換
+- トップページと `wp-login.php` のHTTPS確認
+- APIキーとDBパスワードを永続保存しない実行フロー
 - Python 3.12プロジェクトとuv環境
 - WordPress、Laravel、独自PHPのサイトプリセット
 - 除外・保護ルール
@@ -102,7 +128,7 @@
 - サイト種別を独自PHP、WordPress、Laravelの順に統一
 - Windows x64、macOS Apple Silicon、Linux x64のリリースバイナリ
 - ドライラン後の統合確認から再検証・バックアップ・同期・HTTPS確認までの安全な自動実行
-- プロジェクト別の自動実行設定、安全上限、REMOTE_ONLY非削除、段階別進捗表示
+- プロジェクト別の自動実行設定（対象ドメイン再入力の省略を含む）、安全上限、REMOTE_ONLY非削除、段階別進捗表示
 - メニューバー直下の上余白縮小
 - Inno SetupによるWindowsユーザー単位インストーラー
 - Windowsインストール・インストール後起動・アンインストールのCI検証
@@ -110,9 +136,17 @@
 ## 安全上、まだ無効にしている機能
 
 - 残存一時ファイルの自動削除・自動判定
-- MySQL操作
+- 通常同期でのMySQL操作（MySQL書き込みは初回セットアップに限定）
 
 ## 推奨する次の実装単位
+
+### 0. WordPress初回セットアップの完成
+
+- Docker Compose構成の自動検出とSQLダンプ自動作成
+- APIを使わない場合の手動作成済みDB入力フロー
+- APIキーをOS資格情報ストアへ保存するオプション
+- 途中失敗からの再開と個別承認付き後始末
+- XServer実環境の空テストドメインでのエンドツーエンド検証
 
 ### 1. 読み取り専用の保護領域試験
 

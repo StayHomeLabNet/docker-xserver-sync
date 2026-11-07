@@ -12,6 +12,12 @@ def test_wordpress_preset_protects_uploads_but_not_vendor() -> None:
     assert not excludes.matches("vendor/autoload.php")
     assert excludes.matches(".env")
     assert not excludes.matches(".env.example")
+    assert excludes.matches(".gitignore")
+    assert excludes.matches("compose.yaml")
+    assert excludes.matches("README.md")
+    assert excludes.matches("docs/development.md")
+    assert excludes.matches("tests/test_plugin.php")
+    assert not excludes.matches("wp-content/plugins/example/README.md")
 
 
 def test_laravel_preset_protects_runtime_storage() -> None:

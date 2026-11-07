@@ -16,3 +16,14 @@ def test_glob_matches_path_components() -> None:
     assert rules.matches("wp-content/backup-2026/archive.zip")
     assert not rules.matches("wp-content/uploads/photo.jpg")
 
+
+def test_leading_slash_anchors_rules_to_project_root() -> None:
+    rules = PathRules(("/README*", "/docs/", "/.gitignore"))
+
+    assert rules.matches("README.md")
+    assert rules.matches("docs/setup.md")
+    assert rules.matches(".gitignore")
+    assert not rules.matches("wp-content/plugins/example/README.md")
+    assert not rules.matches("wp-content/themes/example/docs/setup.md")
+    assert not rules.matches("nested/.gitignore")
+

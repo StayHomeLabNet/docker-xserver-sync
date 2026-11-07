@@ -19,10 +19,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from .models import Project, SiteType, SyncMapping, utc_now
@@ -42,7 +45,9 @@ SITE_LABELS = {
 def _hint(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
-    label.setStyleSheet("color: #57606a; font-size: 11px;")
+    label.setTextFormat(Qt.PlainText)
+    label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+    label.setStyleSheet("color: #8c959f; padding: 1px 0 6px 0;")
     return label
 
 
@@ -125,9 +130,20 @@ class ProjectDialog(QDialog):
             mapping.mapping_id: mapping for mapping in project.mappings
         } if project else {}
         self.setWindowTitle("プロジェクトを編集" if project else "プロジェクトを作成")
-        self.resize(860, 560)
+        self.resize(960, 720)
+        self.setMinimumSize(760, 560)
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll_area = scroll
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll, 1)
         intro_row = QHBoxLayout()
         intro = QLabel("分からない値は、右の「入力項目の確認方法」で場所と例を確認できます。")
         intro.setWordWrap(True)
@@ -138,6 +154,11 @@ class ProjectDialog(QDialog):
         layout.addLayout(intro_row)
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(6)
+        self.details_form = form
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("例: example.com テスト")
         self.site_combo = QComboBox()
@@ -164,21 +185,32 @@ class ProjectDialog(QDialog):
         key_button.clicked.connect(self._browse_key)
         key_row.addWidget(key_button)
 
+        for editor in (
+            self.name_edit,
+            self.site_combo,
+            self.domain_edit,
+            self.host_edit,
+            self.user_edit,
+            self.fingerprint_edit,
+            self.key_edit,
+        ):
+            editor.setMinimumWidth(440)
+
         form.addRow("プロジェクト名", self.name_edit)
-        form.addRow("", _hint("自分が見分けるための名前です。XServerの設定には影響しません。"))
+        form.addRow(_hint("自分が見分けるための名前です。XServerの設定には影響しません。"))
         form.addRow("サイトの種類", self.site_combo)
-        form.addRow("", self.site_help)
+        form.addRow(self.site_help)
         form.addRow("公開ドメイン", self.domain_edit)
-        form.addRow("", _hint("テスト先があるドメイン名。https://は付けません。"))
+        form.addRow(_hint("テスト先があるドメイン名。https://は付けません。"))
         form.addRow("SSHホスト", self.host_edit)
-        form.addRow("", _hint("XServer サーバーパネル → SSH設定 → SSHソフト設定で確認します。"))
+        form.addRow(_hint("XServer サーバーパネル → SSH設定 → SSHソフト設定で確認します。"))
         form.addRow("SSHポート", self.port_spin)
         form.addRow("SSHユーザー", self.user_edit)
-        form.addRow("", _hint("通常はサーバーIDです。独自ドメイン名ではありません。"))
+        form.addRow(_hint("通常はサーバーIDです。独自ドメイン名ではありません。"))
         form.addRow("接続先の確認コード", self.fingerprint_edit)
-        form.addRow("", _hint("SSHソフト設定に表示されるSHA256:から始まるホスト鍵フィンガープリントです。"))
+        form.addRow(_hint("SSHソフト設定に表示されるSHA256:から始まるホスト鍵フィンガープリントです。"))
         form.addRow("秘密鍵ファイル", key_row)
-        form.addRow("", _hint("XServerへ公開鍵を登録したときにPCへ保存した秘密鍵。.pubファイルではありません。"))
+        form.addRow(_hint("XServerへ公開鍵を登録したときにPCへ保存した秘密鍵。.pubファイルではありません。"))
         layout.addLayout(form)
 
         self.mapping_header = QHBoxLayout()
@@ -228,7 +260,7 @@ class ProjectDialog(QDialog):
         buttons.button(QDialogButtonBox.Save).setText("保存")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer_layout.addWidget(buttons)
 
         if project:
             self._load(project)
