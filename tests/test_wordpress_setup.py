@@ -9,6 +9,7 @@ import pytest
 
 from dxsync.wordpress_setup import (
     WordPressSetupError,
+    WordPressSetupProgress,
     WordPressSetupRequest,
     WordPressSetupEngine,
     generate_wp_config,
@@ -221,11 +222,22 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
             return io.BytesIO(), Output(output), io.BytesIO()
 
     transfer_arguments = {}
+    progress: list[WordPressSetupProgress] = []
 
     def fake_overwrite(*_args, **kwargs):
         transfer_arguments.update(kwargs)
+        kwargs["file_started_callback"](0, 2, "index.php")
+        kwargs["progress_callback"](1, 2, "index.php")
+        kwargs["file_started_callback"](
+            1, 2, "wp-content/plugins/example/plugin.php"
+        )
+        kwargs["progress_callback"](
+            2, 2, "wp-content/plugins/example/plugin.php"
+        )
         return ForceOverwriteResult(
-            "/home/sample/example.com/public_html", ("index.php",), 100
+            "/home/sample/example.com/public_html",
+            ("index.php", "wp-content/plugins/example/plugin.php"),
+            100,
         )
 
     monkeypatch.setattr(
@@ -246,6 +258,7 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
         ssh_client=client,
         sftp=sftp,
         ssh_username="sample",
+        progress_callback=progress.append,
     )
 
     assert result.db_name == "sample_wp"
@@ -256,6 +269,22 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
     assert any("search-replace" in command for command in client.commands)
     assert not any(path.endswith("database.sql") for path in sftp.files)
     assert transfer_arguments["include_paths"] == setup_request.include_paths
+    assert all(item.total_steps == 10 for item in progress)
+    assert any(
+        item.step == 6
+        and item.unit == "bytes"
+        and item.current == item.total == sql.stat().st_size
+        for item in progress
+    )
+    assert any(
+        item.step == 8
+        and item.unit == "files"
+        and item.current == 1
+        and item.total == 2
+        and item.detail == "index.php"
+        for item in progress
+    )
+    assert any(item.step == 8 and item.current == item.total == 2 for item in progress)
 
 
 def test_setup_engine_uses_existing_empty_database_without_api(
@@ -376,7 +405,7 @@ def test_setup_engine_rejects_existing_database_with_tables(
         existing_db_user="sample_user",
     )
 
-    with pytest.raises(WordPressSetupError, match="空ではありません"):
+    with pytest.raises(WordPressSetupError, match="空ではありません") as error:
         WordPressSetupEngine().setup(
             request=setup_request,
             api=None,
@@ -386,3 +415,4 @@ def test_setup_engine_rejects_existing_database_with_tables(
         )
 
     assert not any(" < " in command for command in commands)
+    assert "WordPressファイル配置は開始していません" in str(error.value)

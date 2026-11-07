@@ -3,7 +3,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLineEdit
 
 from dxsync.models import Project, SiteType, SyncMapping
 from dxsync.wordpress_setup_dialog import WordPressSetupWizard
@@ -45,6 +45,13 @@ def test_wordpress_setup_wizard_builds_request_without_persisting_secrets(
         mappings=(mapping,),
     )
     wizard = WordPressSetupWizard(project, mapping)
+    assert wizard.db_host_edit.text() == "localhost"
+    assert "localhost" in wizard.db_host_edit.placeholderText()
+    assert wizard.minimumWidth() == 900
+    assert all(
+        editor.minimumWidth() >= 620
+        for editor in wizard.findChildren(QLineEdit)
+    )
     wizard.sql_edit.setText(str(sql))
     wizard.db_host_edit.setText("mysql.example.xserver.jp")
     wizard.database_mode_combo.setCurrentIndex(
@@ -75,6 +82,7 @@ def test_wordpress_setup_wizard_builds_request_without_persisting_secrets(
 
 def test_wordpress_setup_wizard_supports_existing_database_without_api(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     app()
     for directory in ("wp-admin", "wp-includes", "wp-content"):
@@ -100,6 +108,8 @@ def test_wordpress_setup_wizard_supports_existing_database_without_api(
     wizard = WordPressSetupWizard(project, mapping)
     wizard.sql_edit.setText(str(sql))
     wizard.db_host_edit.setText("mysql.example.xserver.jp")
+    assert wizard.existing_db_name_edit.text() == ""
+    assert wizard.existing_db_user_edit.text() == ""
     wizard.existing_db_name_edit.setText("sample_wordpress")
     wizard.existing_db_user_edit.setText("sample_wp_user")
 
@@ -112,4 +122,23 @@ def test_wordpress_setup_wizard_supports_existing_database_without_api(
     assert value.existing_db_user == "sample_wp_user"
     assert not wizard.api_key_edit.isEnabled()
     assert wizard.existing_db_name_edit.isEnabled()
+    assert wizard.existing_db_prepared_check.isVisible() is False
+    wizard.show()
+    app().processEvents()
+    wizard.setCurrentId(wizard.pageIds()[2])
+    app().processEvents()
+    assert wizard.existing_db_prepared_check.isVisible()
+    assert "アプリはDBやMySQLユーザーを作成しません" in (
+        wizard.database_instructions.text()
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup_dialog.QMessageBox.warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+    wizard.confirm_domain_edit.setText(project.domain)
+    wizard.accept()
+    assert warnings
+    assert "アクセス権" in warnings[-1]
+    assert wizard.result() == 0
     wizard.close()

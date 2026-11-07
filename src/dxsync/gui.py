@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
@@ -81,7 +82,12 @@ from .force_overwrite import (
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp
-from .wordpress_setup import WordPressSetupEngine, WordPressSetupRequest
+from .wordpress_setup import (
+    WORDPRESS_SETUP_TOTAL_STEPS,
+    WordPressSetupEngine,
+    WordPressSetupProgress,
+    WordPressSetupRequest,
+)
 from .wordpress_setup_dialog import WordPressSetupWizard
 from .xserver_api import XServerApiClient
 from .recovery import (
@@ -615,7 +621,7 @@ class RestoreWorker(QObject):
 class WordPressSetupWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
-    progress = Signal(str)
+    progress = Signal(object)
 
     def __init__(
         self,
@@ -638,6 +644,13 @@ class WordPressSetupWorker(QObject):
         client = None
         sftp = None
         try:
+            self.progress.emit(
+                WordPressSetupProgress(
+                    step=1,
+                    total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
+                    message="XServerへSSH接続中",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -661,8 +674,21 @@ class WordPressSetupWorker(QObject):
                 ssh_username=self.project.ssh_username,
                 progress_callback=self.progress.emit,
             )
-            self.progress.emit("HTTPSで公開ページを確認中")
+            self.progress.emit(
+                WordPressSetupProgress(
+                    step=10,
+                    total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
+                    message="HTTPSでトップページを確認中",
+                )
+            )
             homepage = perform_https_health_check(domain=self.project.domain, path="/")
+            self.progress.emit(
+                WordPressSetupProgress(
+                    step=10,
+                    total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
+                    message="HTTPSでログイン画面を確認中",
+                )
+            )
             login = perform_https_health_check(
                 domain=self.project.domain, path="/wp-login.php"
             )
@@ -713,6 +739,16 @@ class MainWindow(QMainWindow):
         self._current_operation_id: str | None = None
         self._auto_sync_active = False
         self._wordpress_setup_active = False
+        self._wordpress_progress_event: WordPressSetupProgress | None = None
+        self._wordpress_progress_started_at: float | None = None
+        self._wordpress_progress_phase_started_at: float | None = None
+        self._wordpress_progress_last_update_at: float | None = None
+        self._wordpress_progress_phase_key: tuple[object, ...] | None = None
+        self._wordpress_progress_timer = QTimer(self)
+        self._wordpress_progress_timer.setInterval(1000)
+        self._wordpress_progress_timer.timeout.connect(
+            self._refresh_wordpress_progress
+        )
         self._auto_sync_stage: str | None = None
         self._auto_sync_preferences: AutoSyncPreferences | None = None
         self._auto_backup_skipped = False
@@ -760,22 +796,26 @@ class MainWindow(QMainWindow):
         project_bar.addWidget(self.history_button)
         layout.addLayout(project_bar)
 
-        setup_panel = QFrame()
-        setup_panel.setFrameShape(QFrame.StyledPanel)
-        setup_layout = QHBoxLayout(setup_panel)
-        setup_text = QLabel(
-            "WordPress初回セットアップ — "
-            "ローカルDockerのWordPressを空のXServerへ配置します"
-        )
-        setup_text.setWordWrap(True)
-        setup_layout.addWidget(setup_text, 1)
+        self.setup_panel = QFrame()
+        self.setup_panel.setFrameShape(QFrame.StyledPanel)
+        setup_layout = QHBoxLayout(self.setup_panel)
+        self.setup_text = QLabel()
+        self.setup_text.setWordWrap(True)
+        setup_layout.addWidget(self.setup_text, 1)
         self.wordpress_setup_button = QPushButton("セットアップを開始…")
         self.wordpress_setup_button.setToolTip(
             "WordPressプロジェクトを選び、空のXServerへ初回配置します"
         )
         self.wordpress_setup_button.clicked.connect(self._start_wordpress_setup)
         setup_layout.addWidget(self.wordpress_setup_button)
-        layout.addWidget(setup_panel)
+        self.laravel_setup_button = QPushButton("セットアップ手順を確認…")
+        self.laravel_setup_button.setToolTip(
+            "LaravelをXServerへ初回配置するための手順と注意事項を表示します"
+        )
+        self.laravel_setup_button.clicked.connect(self._show_laravel_setup_guide)
+        setup_layout.addWidget(self.laravel_setup_button)
+        self.setup_panel.setVisible(False)
+        layout.addWidget(self.setup_panel)
 
         controls = QFrame()
         controls.setFrameShape(QFrame.StyledPanel)
@@ -928,7 +968,6 @@ class MainWindow(QMainWindow):
         self.edit_project_button.setEnabled(has_project)
         self.delete_project_button.setEnabled(has_project)
         self.recovery_button.setEnabled(has_project and self._thread is None)
-        self.wordpress_setup_button.setEnabled(self._thread is None)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
         if self._current_project is not None:
@@ -946,6 +985,7 @@ class MainWindow(QMainWindow):
         self.mapping_combo.blockSignals(False)
         self._mapping_selected(self.mapping_combo.currentIndex())
         self._apply_connection_masks()
+        self._update_setup_panel()
 
     @Slot(int)
     def _mapping_selected(self, index: int) -> None:
@@ -989,6 +1029,12 @@ class MainWindow(QMainWindow):
             "WordPressをXServerへ新規セットアップ…"
         )
         self.wordpress_setup_action.triggered.connect(self._start_wordpress_setup)
+        self.laravel_setup_action = project_menu.addAction(
+            "Laravel初回セットアップ手順…"
+        )
+        self.laravel_setup_action.triggered.connect(
+            self._show_laravel_setup_guide
+        )
 
         settings_menu = self.menuBar().addMenu("設定")
         mask_action = settings_menu.addAction("接続情報のマスク設定…")
@@ -1170,9 +1216,39 @@ class MainWindow(QMainWindow):
             and self._current_project is not None
             and self._selected_mapping() is not None
         )
-        self.wordpress_setup_button.setEnabled(idle)
+        self._update_setup_panel()
+
+    def _update_setup_panel(self) -> None:
+        project = self._current_project
+        site_type = project.site_type if project is not None else None
+        idle = self._thread is None and not self._auto_sync_active
+        is_wordpress = site_type is SiteType.WORDPRESS
+        is_laravel = site_type is SiteType.LARAVEL
+
+        self.setup_panel.setVisible(is_wordpress or is_laravel)
+        self.wordpress_setup_button.setVisible(is_wordpress)
+        self.wordpress_setup_button.setEnabled(idle and is_wordpress)
+        self.laravel_setup_button.setVisible(is_laravel)
+        self.laravel_setup_button.setEnabled(idle and is_laravel)
+        if is_wordpress:
+            self.setup_text.setText(
+                "WordPress初回セットアップ — "
+                "ローカルDockerのWordPressを空のXServerへ配置します"
+            )
+        elif is_laravel:
+            self.setup_text.setText(
+                "Laravel初回セットアップ — "
+                "ローカルDockerのLaravelを空のXServerへ配置する準備を確認します"
+            )
+        else:
+            self.setup_text.clear()
+
         if hasattr(self, "wordpress_setup_action"):
-            self.wordpress_setup_action.setEnabled(idle)
+            self.wordpress_setup_action.setVisible(is_wordpress)
+            self.wordpress_setup_action.setEnabled(idle and is_wordpress)
+        if hasattr(self, "laravel_setup_action"):
+            self.laravel_setup_action.setVisible(is_laravel)
+            self.laravel_setup_action.setEnabled(idle and is_laravel)
 
     def _backup_root(self) -> str:
         if self._current_project is None:
@@ -1223,6 +1299,22 @@ class MainWindow(QMainWindow):
             self._reload_projects(dialog.saved_project.project_id)
 
     @Slot()
+    def _show_laravel_setup_guide(self) -> None:
+        project = self._current_project
+        if project is None or project.site_type is not SiteType.LARAVEL:
+            return
+        QMessageBox.information(
+            self,
+            "Laravel初回セットアップ",
+            "Laravel専用の自動セットアップは現在準備中です。\n\n"
+            "現時点では、プロジェクト設定でアプリ本体とpublicを別々に"
+            "マッピングし、読み取り専用ドライランから安全同期を実行してください。\n\n"
+            "本番の.env作成、APP_KEY、DB設定、storageへの書き込み権限、"
+            "public/storageのリンク、artisan migrateやキャッシュ生成は"
+            "自動実行しません。XServer上で内容を確認して個別に実行してください。",
+        )
+
+    @Slot()
     def _start_wordpress_setup(self) -> None:
         if self._thread is not None or not self._require_runtime_paths_confirmation():
             return
@@ -1246,9 +1338,19 @@ class MainWindow(QMainWindow):
         self.wordpress_setup_button.setEnabled(False)
         self._update_action_buttons()
         self.progress_bar.setRange(0, 0)
-        self.progress_bar.setFormat("WordPress初回セットアップ中…")
         self.progress_bar.setVisible(True)
-        self.summary.setText("WordPressの初回セットアップを開始しました。")
+        now = time.monotonic()
+        self._wordpress_progress_started_at = now
+        self._wordpress_progress_phase_started_at = now
+        self._wordpress_progress_last_update_at = now
+        self._wordpress_progress_phase_key = None
+        self._wordpress_progress_event = WordPressSetupProgress(
+            step=1,
+            total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
+            message="XServerへSSH接続中",
+        )
+        self._wordpress_progress_timer.start()
+        self._refresh_wordpress_progress()
         self._begin_operation("wordpress_setup")
         thread = QThread(self)
         worker = WordPressSetupWorker(
@@ -1272,13 +1374,117 @@ class MainWindow(QMainWindow):
         self._set_auto_sync_controls_locked(True)
         thread.start()
 
-    @Slot(str)
-    def _wordpress_setup_progress(self, message: str) -> None:
-        self.progress_bar.setFormat(message)
-        self.summary.setText(message)
+    @Slot(object)
+    def _wordpress_setup_progress(self, event: object) -> None:
+        if isinstance(event, str):
+            event = WordPressSetupProgress(
+                step=1,
+                total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
+                message=event,
+            )
+        if not isinstance(event, WordPressSetupProgress):
+            return
+        now = time.monotonic()
+        phase_key = (event.step, event.message, event.unit, event.total)
+        if phase_key != self._wordpress_progress_phase_key:
+            self._wordpress_progress_phase_started_at = now
+            self._wordpress_progress_phase_key = phase_key
+        self._wordpress_progress_event = event
+        self._wordpress_progress_last_update_at = now
+        self._refresh_wordpress_progress()
+
+    @staticmethod
+    def _format_progress_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}秒"
+        minutes, remaining_seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return (
+                f"{minutes}分{remaining_seconds}秒"
+                if remaining_seconds
+                else f"{minutes}分"
+            )
+        hours, remaining_minutes = divmod(minutes, 60)
+        return (
+            f"{hours}時間{remaining_minutes}分"
+            if remaining_minutes
+            else f"{hours}時間"
+        )
+
+    @staticmethod
+    def _format_progress_amount(event: WordPressSetupProgress) -> str:
+        assert event.current is not None and event.total is not None
+        if event.unit == "bytes":
+            mib = 1024 * 1024
+            return f"{event.current / mib:.1f}/{event.total / mib:.1f} MiB"
+        return f"{event.current:,}/{event.total:,}"
+
+    @Slot()
+    def _refresh_wordpress_progress(self) -> None:
+        event = self._wordpress_progress_event
+        if event is None:
+            return
+        now = time.monotonic()
+        overall_elapsed = now - (self._wordpress_progress_started_at or now)
+        stage = f"手順 {event.step}/{event.total_steps}"
+        elapsed_text = f"経過 {self._format_progress_duration(overall_elapsed)}"
+        details = [stage, event.message]
+
+        determinate = (
+            event.current is not None
+            and event.total is not None
+            and event.total > 0
+        )
+        if determinate:
+            assert event.current is not None and event.total is not None
+            current = min(max(event.current, 0), event.total)
+            ratio = current / event.total
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(round(ratio * 1000))
+            amount = self._format_progress_amount(
+                replace(event, current=current)
+            )
+            percent = f"{ratio * 100:.1f}%"
+            details.extend((amount, percent))
+            eta_text = ""
+            phase_elapsed = now - (self._wordpress_progress_phase_started_at or now)
+            if 0 < current < event.total and phase_elapsed >= 1:
+                eta_seconds = phase_elapsed * (event.total - current) / current
+                eta_text = (
+                    f"残り約 {self._format_progress_duration(eta_seconds)}"
+                )
+            elif current == 0:
+                eta_text = "残り時間を計算中"
+            elif current >= event.total:
+                eta_text = "完了"
+            if eta_text:
+                details.append(eta_text)
+            self.progress_bar.setFormat(f"{event.message}  {amount}  {percent}")
+        else:
+            self.progress_bar.setRange(0, 0)
+            details.append("処理継続中")
+            self.progress_bar.setFormat(f"{stage}  {event.message}")
+
+        details.append(elapsed_text)
+        if event.detail:
+            details.append(event.detail)
+        since_update = now - (self._wordpress_progress_last_update_at or now)
+        if since_update >= 2:
+            details.append(
+                "サーバー応答待ち "
+                f"(最終更新から {self._format_progress_duration(since_update)})"
+            )
+        self.summary.setText(" / ".join(details))
+
+    def _stop_wordpress_progress(self) -> None:
+        self._wordpress_progress_timer.stop()
+        self._wordpress_progress_event = None
+        self._wordpress_progress_phase_key = None
 
     @Slot(object)
     def _wordpress_setup_completed(self, payload: object) -> None:
+        self._stop_wordpress_progress()
         result, homepage, login = payload
         health_ok = homepage.ok and login.ok
         self._finish_operation(
@@ -1319,6 +1525,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _wordpress_setup_failed(self, message: str) -> None:
+        self._stop_wordpress_progress()
         self._finish_operation("failed", error=message)
         self.progress_bar.setVisible(False)
         self.summary.setText("WordPress初回セットアップを完了できませんでした。")
@@ -1443,11 +1650,16 @@ class MainWindow(QMainWindow):
             self.backup_button,
             self.deploy_button,
             self.wordpress_setup_button,
+            self.laravel_setup_button,
         ):
             widget.setEnabled(not locked)
         self.auto_sync_button.setEnabled(not locked)
         if hasattr(self, "wordpress_setup_action"):
             self.wordpress_setup_action.setEnabled(not locked)
+        if hasattr(self, "laravel_setup_action"):
+            self.laravel_setup_action.setEnabled(not locked)
+        if not locked:
+            self._update_setup_panel()
 
     def _set_auto_stage(self, step: int, label: str) -> None:
         self.progress_bar.setRange(0, 4)

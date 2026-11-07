@@ -5,6 +5,7 @@ import string
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -40,8 +41,8 @@ class WordPressSetupWizard(QWizard):
         self.project = project
         self.mapping = mapping
         self.setWindowTitle("WordPressをXServerへセットアップ")
-        self.resize(820, 640)
-        self.setMinimumSize(720, 560)
+        self.resize(1040, 700)
+        self.setMinimumSize(900, 620)
         self.setOption(QWizard.NoBackButtonOnStartPage)
         self._candidate_root = ""
         self._mandatory_paths: tuple[str, ...] = ()
@@ -52,7 +53,12 @@ class WordPressSetupWizard(QWizard):
         self._add_database_page()
         self._add_url_page()
         self._add_confirmation_page()
+        self._configure_input_widths()
         self.currentIdChanged.connect(self._page_changed)
+
+    def _configure_input_widths(self) -> None:
+        for editor in self.findChildren(QLineEdit):
+            editor.setMinimumWidth(620)
 
     def _add_source_page(self) -> None:
         page = QWizardPage()
@@ -142,18 +148,17 @@ class WordPressSetupWizard(QWizard):
         )
         self.servername_edit = QLineEdit(initial_domain)
         self.servername_edit.setPlaceholderText("サーバーID.xsrv.jp（API用初期ドメイン）")
-        self.db_host_edit = QLineEdit()
-        self.db_host_edit.setPlaceholderText("例: mysql1234.xserver.jp")
+        self.db_host_edit = QLineEdit("localhost")
+        self.db_host_edit.setPlaceholderText("MariaDB 10.5 / 10.11: localhost")
         suffix = (
             self.project.domain.split(".", 1)[0].replace("-", "_")[:16]
             or "wordpress"
         )
         self.db_suffix_edit = QLineEdit(suffix)
         self.user_suffix_edit = QLineEdit((suffix + "_user")[:32])
-        server_id = initial_domain.split(".", 1)[0]
-        self.existing_db_name_edit = QLineEdit(f"{server_id}_{suffix}")
+        self.existing_db_name_edit = QLineEdit()
         self.existing_db_name_edit.setPlaceholderText("例: xs123456_wordpress")
-        self.existing_db_user_edit = QLineEdit(f"{server_id}_{suffix}_user")
+        self.existing_db_user_edit = QLineEdit()
         self.existing_db_user_edit.setPlaceholderText("例: xs123456_wp_user")
         self.db_password_edit = QLineEdit(_password())
         self.db_password_edit.setEchoMode(QLineEdit.Password)
@@ -171,15 +176,17 @@ class WordPressSetupWizard(QWizard):
         form.addRow("作成済みDB名", self.existing_db_name_edit)
         form.addRow("作成済みDBユーザー", self.existing_db_user_edit)
         form.addRow("DBパスワード", password_row)
-        hint = QLabel(
-            "作成済みDBを使う場合は、先にXServerのサーバーパネルでDBと"
-            "MySQLユーザーを作成してアクセス権を付与してください。"
-            "アプリは接続と空DBを確認し、既存テーブルがあれば停止します。"
-            "APIキーとDBパスワードは保存しません。"
+        self.database_instructions = QLabel()
+        self.database_instructions.setWordWrap(True)
+        self.database_instructions.setStyleSheet(
+            "background: #fff8c5; color: #5d4a00; padding: 10px; "
+            "border: 1px solid #d4a72c;"
         )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #57606a;")
-        form.addRow("", hint)
+        form.addRow("", self.database_instructions)
+        self.existing_db_prepared_check = QCheckBox(
+            "DB・MySQLユーザーの作成とアクセス権付与が完了しています"
+        )
+        form.addRow("事前準備の確認", self.existing_db_prepared_check)
         self._database_mode_changed()
         self.addPage(page)
 
@@ -194,6 +201,23 @@ class WordPressSetupWizard(QWizard):
             editor.setEnabled(uses_api)
         self.existing_db_name_edit.setEnabled(not uses_api)
         self.existing_db_user_edit.setEnabled(not uses_api)
+        self.existing_db_prepared_check.setVisible(not uses_api)
+        if uses_api:
+            self.database_instructions.setText(
+                "この方式では、アプリがXServer APIを使って新しいDBと"
+                "MySQLユーザーを作成し、アクセス権を付与します。"
+                "APIキーとDBパスワードは保存しません。"
+            )
+        else:
+            self.database_instructions.setText(
+                "重要: この方式ではアプリはDBやMySQLユーザーを作成しません。\n"
+                "先にXServerのサーバーパネルで、次の順に準備してください。\n"
+                "1. 空のDBを作成\n"
+                "2. MySQLユーザーを作成\n"
+                "3. そのユーザーをDBのアクセス権所有ユーザーへ追加\n"
+                "準備後、画面に完全なDB名・ユーザー名・パスワードを入力します。\n"
+                "MariaDB 10.5 / 10.11のMySQLホストは通常localhostです。"
+            )
 
     def _add_url_page(self) -> None:
         page = QWizardPage()
@@ -373,6 +397,18 @@ class WordPressSetupWizard(QWizard):
             return
         if self.uses_xserver_api and not self.api_key_edit.text().strip():
             QMessageBox.warning(self, "APIキーを確認", "XServer APIキーを入力してください。")
+            return
+        if (
+            not self.uses_xserver_api
+            and not self.existing_db_prepared_check.isChecked()
+        ):
+            QMessageBox.warning(
+                self,
+                "XServer側の事前準備を確認",
+                "先にXServerのサーバーパネルで空のDBとMySQLユーザーを作成し、"
+                "そのユーザーへDBのアクセス権を付与してください。\n\n"
+                "準備が完了したら確認欄をチェックしてください。",
+            )
             return
         try:
             validate_setup_request(self.request_value())

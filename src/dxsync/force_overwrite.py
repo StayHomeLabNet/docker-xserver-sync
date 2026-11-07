@@ -129,6 +129,7 @@ class ForceOverwriteEngine:
         file_mode: int = 0o644,
         directory_mode: int = 0o755,
         progress_callback: Callable[[int, int, str], None] | None = None,
+        file_started_callback: Callable[[int, int, str], None] | None = None,
     ) -> ForceOverwriteResult:
         resolved_root = local_root.expanduser().resolve()
         normalized_root = normalize_remote_root(remote_root)
@@ -156,6 +157,8 @@ class ForceOverwriteEngine:
         token = uuid.uuid4().hex[:12]
         for index, local_path in enumerate(files, start=1):
             relative = local_path.relative_to(resolved_root).as_posix()
+            if file_started_callback is not None:
+                file_started_callback(index - 1, total, relative)
             destination = str(PurePosixPath(normalized_root) / relative)
             temporary = destination + f".dxsync-force-{token}.tmp"
             old_temporary = destination + f".dxsync-force-{token}.old"
