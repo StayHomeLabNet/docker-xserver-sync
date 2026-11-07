@@ -206,6 +206,7 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
 
     class Client:
         commands = []
+        table_counts = iter((0, 12))
 
         def exec_command(self, command):
             self.commands.append(command)
@@ -214,7 +215,7 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
             elif "command -v wp" in command:
                 output = b"/usr/local/bin/wp\n"
             elif "information_schema.tables" in command:
-                output = b"12\n"
+                output = f"{next(self.table_counts)}\n".encode()
             else:
                 output = b""
             return io.BytesIO(), Output(output), io.BytesIO()
@@ -255,3 +256,133 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
     assert any("search-replace" in command for command in client.commands)
     assert not any(path.endswith("database.sql") for path in sftp.files)
     assert transfer_arguments["include_paths"] == setup_request.include_paths
+
+
+def test_setup_engine_uses_existing_empty_database_without_api(
+    tmp_path: Path, monkeypatch
+) -> None:
+    make_wordpress(tmp_path)
+    sql = tmp_path / "site.sql"
+    sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
+    commands: list[str] = []
+    table_counts = iter((0, 3))
+
+    def fake_run_remote(_client, command: str) -> str:
+        commands.append(command)
+        if "command -v mysql" in command:
+            return "/usr/bin/mysql"
+        if "information_schema.tables" in command:
+            return str(next(table_counts))
+        return ""
+
+    class Sftp:
+        def listdir_attr(self, _path):
+            return []
+
+        def open(self, _path, _mode="r"):
+            return io.BytesIO()
+
+        def chmod(self, _path, _mode):
+            pass
+
+        def remove(self, _path):
+            pass
+
+        def rmdir(self, _path):
+            pass
+
+        def posix_rename(self, _old, _new):
+            pass
+
+    monkeypatch.setattr("dxsync.wordpress_setup._run_remote", fake_run_remote)
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._mkdir_private", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._upload_bytes", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup.ForceOverwriteEngine.overwrite",
+        lambda *_args, **_kwargs: ForceOverwriteResult(
+            "/home/sample/example.com/public_html", ("index.php",), 100
+        ),
+    )
+    setup_request = replace(
+        request(tmp_path, sql),
+        old_url="https://example.com",
+        database_mode="existing",
+        existing_db_name="sample_existing",
+        existing_db_user="sample_user",
+    )
+
+    result = WordPressSetupEngine().setup(
+        request=setup_request,
+        api=None,
+        ssh_client=object(),
+        sftp=Sftp(),
+        ssh_username="sample",
+    )
+
+    assert result.db_name == "sample_existing"
+    assert result.db_user == "sample_user"
+    assert result.table_count == 3
+    assert any("sample_existing" in command for command in commands)
+
+
+def test_setup_engine_rejects_existing_database_with_tables(
+    tmp_path: Path, monkeypatch
+) -> None:
+    make_wordpress(tmp_path)
+    sql = tmp_path / "site.sql"
+    sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
+    commands: list[str] = []
+
+    def fake_run_remote(_client, command: str) -> str:
+        commands.append(command)
+        if "command -v mysql" in command:
+            return "/usr/bin/mysql"
+        if "information_schema.tables" in command:
+            return "2"
+        return ""
+
+    class Sftp:
+        def listdir_attr(self, _path):
+            return []
+
+        def open(self, _path, _mode="r"):
+            return io.BytesIO()
+
+        def chmod(self, _path, _mode):
+            pass
+
+        def remove(self, _path):
+            pass
+
+        def rmdir(self, _path):
+            pass
+
+    monkeypatch.setattr("dxsync.wordpress_setup._run_remote", fake_run_remote)
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._mkdir_private", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._upload_bytes", lambda *_args, **_kwargs: None
+    )
+    setup_request = replace(
+        request(tmp_path, sql),
+        old_url="https://example.com",
+        database_mode="existing",
+        existing_db_name="sample_existing",
+        existing_db_user="sample_user",
+    )
+
+    with pytest.raises(WordPressSetupError, match="空ではありません"):
+        WordPressSetupEngine().setup(
+            request=setup_request,
+            api=None,
+            ssh_client=object(),
+            sftp=Sftp(),
+            ssh_username="sample",
+        )
+
+    assert not any(" < " in command for command in commands)

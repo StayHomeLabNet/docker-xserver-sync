@@ -35,6 +35,9 @@ class WordPressSetupRequest:
     db_password: str
     table_prefix: str = "wp_"
     include_paths: tuple[str, ...] | None = None
+    database_mode: str = "api"
+    existing_db_name: str = ""
+    existing_db_user: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ class WordPressSetupResult:
 
 
 _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+_FULL_DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _TABLE_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
@@ -71,12 +75,27 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
     normalize_remote_root(request.remote_root)
     if not request.domain.strip() or "/" in request.domain:
         raise WordPressSetupError("Invalid target domain")
-    for label, value in (
-        ("database suffix", request.db_name_suffix),
-        ("database user suffix", request.db_user_suffix),
-    ):
-        if not _SUFFIX_RE.fullmatch(value):
-            raise WordPressSetupError(f"Invalid {label}; use letters, numbers, and underscores")
+    if request.database_mode not in {"api", "existing"}:
+        raise WordPressSetupError("DBの準備方法が正しくありません")
+    if request.database_mode == "api":
+        for label, value in (
+            ("database suffix", request.db_name_suffix),
+            ("database user suffix", request.db_user_suffix),
+        ):
+            if not _SUFFIX_RE.fullmatch(value):
+                raise WordPressSetupError(
+                    f"Invalid {label}; use letters, numbers, and underscores"
+                )
+    else:
+        for label, value in (
+            ("作成済みDB名", request.existing_db_name),
+            ("作成済みDBユーザー", request.existing_db_user),
+        ):
+            if not _FULL_DB_NAME_RE.fullmatch(value):
+                raise WordPressSetupError(
+                    f"{label}が正しくありません。"
+                    "サーバーパネルに表示された完全な名前を入力してください"
+                )
     if len(request.db_password) < 8:
         raise WordPressSetupError("Database password must contain at least 8 characters")
     if "\n" in request.db_password or "\r" in request.db_password:
@@ -188,7 +207,7 @@ class WordPressSetupEngine:
         self,
         *,
         request: WordPressSetupRequest,
-        api: XServerApiClient,
+        api: XServerApiClient | None,
         ssh_client: Any,
         sftp: Any,
         ssh_username: str,
@@ -196,16 +215,28 @@ class WordPressSetupEngine:
     ) -> WordPressSetupResult:
         validate_setup_request(request)
         progress = progress_callback or (lambda _message: None)
-        server_id = api.servername.split(".", 1)[0]
-        expected_db = f"{server_id}_{request.db_name_suffix}"
-        expected_user = f"{server_id}_{request.db_user_suffix}"
+        uses_api = request.database_mode == "api"
+        if uses_api:
+            if api is None:
+                raise WordPressSetupError(
+                    "APIでDBを新規作成するにはXServer APIキーが必要です"
+                )
+            server_id = api.servername.split(".", 1)[0]
+            expected_db = f"{server_id}_{request.db_name_suffix}"
+            expected_user = f"{server_id}_{request.db_user_suffix}"
 
-        progress("XServer APIと作成先を確認中")
-        api.key_info()
-        if expected_db in api.list_databases():
-            raise WordPressSetupError(f"Database already exists: {expected_db}")
-        if expected_user in api.list_database_users():
-            raise WordPressSetupError(f"Database user already exists: {expected_user}")
+            progress("XServer APIと作成先を確認中")
+            api.key_info()
+            if expected_db in api.list_databases():
+                raise WordPressSetupError(f"Database already exists: {expected_db}")
+            if expected_user in api.list_database_users():
+                raise WordPressSetupError(
+                    f"Database user already exists: {expected_user}"
+                )
+        else:
+            expected_db = request.existing_db_name
+            expected_user = request.existing_db_user
+            progress("作成済みMySQLデータベースの接続情報を確認中")
 
         remote_root = normalize_remote_root(request.remote_root)
         try:
@@ -227,33 +258,68 @@ class WordPressSetupEngine:
             progress("XServerのWP-CLIを確認中")
             wp_bin = _run_remote(ssh_client, "command -v wp").splitlines()[0]
 
-        progress("MySQLデータベースを作成中")
-        database = api.create_database(request.db_name_suffix, memo="Docker XServer Sync")
-        try:
-            progress("MySQLユーザーを作成中")
-            user = api.create_database_user(
-                request.db_user_suffix,
-                request.db_password,
-                memo="Docker XServer Sync",
+        if uses_api:
+            assert api is not None
+            progress("MySQLデータベースを作成中")
+            database = api.create_database(
+                request.db_name_suffix, memo="Docker XServer Sync"
             )
-        except Exception as exc:
-            raise WordPressSetupError(
-                f"{exc}\n\nCreated database was not deleted automatically: {database.db_name}"
-            ) from exc
-        try:
-            api.grant_database(user.db_user, database.db_name)
-        except Exception as exc:
-            raise WordPressSetupError(
-                f"{exc}\n\nCreated resources were not deleted automatically: "
-                f"database {database.db_name}, user {user.db_user}"
-            ) from exc
+            try:
+                progress("MySQLユーザーを作成中")
+                user = api.create_database_user(
+                    request.db_user_suffix,
+                    request.db_password,
+                    memo="Docker XServer Sync",
+                )
+            except Exception as exc:
+                raise WordPressSetupError(
+                    f"{exc}\n\nCreated database was not deleted automatically: "
+                    f"{database.db_name}"
+                ) from exc
+            try:
+                api.grant_database(user.db_user, database.db_name)
+            except Exception as exc:
+                raise WordPressSetupError(
+                    f"{exc}\n\nCreated resources were not deleted automatically: "
+                    f"database {database.db_name}, user {user.db_user}"
+                ) from exc
+            db_name = database.db_name
+            db_user = user.db_user
+        else:
+            db_name = expected_db
+            db_user = expected_user
 
         token = uuid.uuid4().hex
         work_dir = f"/home/{ssh_username}/.dxsync/setup/{token}"
         sql_remote = f"{work_dir}/database.sql"
         cnf_remote = f"{work_dir}/mysql.cnf"
+        import_started = False
         try:
             _mkdir_private(sftp, work_dir, base=f"/home/{ssh_username}")
+            cnf = (
+                "[client]\n"
+                f"host={_mysql_option_value(request.db_host)}\n"
+                f"user={_mysql_option_value(db_user)}\n"
+                f"password={_mysql_option_value(request.db_password)}\n"
+                "default-character-set=utf8mb4\n"
+            ).encode("utf-8")
+            _upload_bytes(sftp, cnf_remote, cnf)
+
+            preflight_command = (
+                f"{shlex.quote(mysql_bin)} --defaults-extra-file={shlex.quote(cnf_remote)} "
+                f"-Nse 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = "
+                f"DATABASE()' {shlex.quote(db_name)}"
+            )
+            progress("対象データベースが空であることを確認中")
+            existing_table_count = int(
+                _run_remote(ssh_client, preflight_command) or "0"
+            )
+            if existing_table_count:
+                raise WordPressSetupError(
+                    f"指定したDBは空ではありません（{existing_table_count}テーブル）。"
+                    "SQLをインポートせずに停止しました"
+                )
+
             progress("SQLダンプを暗号化通信で転送中")
             with request.sql_dump.expanduser().resolve().open("rb") as reader, sftp.open(
                 sql_remote, "wb"
@@ -261,26 +327,19 @@ class WordPressSetupEngine:
                 while chunk := reader.read(1024 * 1024):
                     writer.write(chunk)
             sftp.chmod(sql_remote, 0o600)
-            cnf = (
-                "[client]\n"
-                f"host={_mysql_option_value(request.db_host)}\n"
-                f"user={_mysql_option_value(user.db_user)}\n"
-                f"password={_mysql_option_value(request.db_password)}\n"
-                "default-character-set=utf8mb4\n"
-            ).encode("utf-8")
-            _upload_bytes(sftp, cnf_remote, cnf)
 
             import_command = (
                 f"{shlex.quote(mysql_bin)} --defaults-extra-file={shlex.quote(cnf_remote)} "
-                f"{shlex.quote(database.db_name)} < {shlex.quote(sql_remote)}"
+                f"{shlex.quote(db_name)} < {shlex.quote(sql_remote)}"
             )
             progress("SQLを新規データベースへインポート中")
+            import_started = True
             _run_remote(ssh_client, import_command)
 
             count_command = (
                 f"{shlex.quote(mysql_bin)} --defaults-extra-file={shlex.quote(cnf_remote)} "
                 f"-Nse 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = "
-                f"DATABASE()' {shlex.quote(database.db_name)}"
+                f"DATABASE()' {shlex.quote(db_name)}"
             )
             count_output = _run_remote(ssh_client, count_command)
             table_count = int(count_output.strip() or "0")
@@ -298,8 +357,8 @@ class WordPressSetupEngine:
                 include_paths=request.include_paths,
             )
             config = generate_wp_config(
-                db_name=database.db_name,
-                db_user=user.db_user,
+                db_name=db_name,
+                db_user=db_user,
                 db_password=request.db_password,
                 db_host=request.db_host,
                 table_prefix=request.table_prefix,
@@ -334,8 +393,8 @@ class WordPressSetupEngine:
                 sftp.remove(f"{remote_root}/index.html")
             progress("初回セットアップが完了しました")
             return WordPressSetupResult(
-                db_name=database.db_name,
-                db_user=user.db_user,
+                db_name=db_name,
+                db_user=db_user,
                 transferred_files=len(transfer.files) + 1,
                 transferred_bytes=transfer.total_bytes + len(config),
                 table_count=table_count,
@@ -346,10 +405,22 @@ class WordPressSetupEngine:
                 detail = str(exc)
             else:
                 detail = str(exc)
+            if uses_api:
+                recovery = (
+                    "Created resources were not deleted automatically: "
+                    f"database {db_name}, user {db_user}. "
+                )
+            else:
+                recovery = (
+                    f"作成済みDB {db_name} は削除・初期化していません。"
+                )
+                if import_started:
+                    recovery += "SQLが途中まで入っている可能性があります。"
+                else:
+                    recovery += "SQLインポートは開始していません。"
             raise WordPressSetupError(
-                f"{detail}\n\nCreated resources were not deleted automatically: "
-                f"database {database.db_name}, user {user.db_user}. "
-                "Files may already exist in the remote root; inspect them before retrying."
+                f"{detail}\n\n{recovery}Files may already exist in the remote root; "
+                "inspect them before retrying."
             ) from exc
         finally:
             for path in (cnf_remote, sql_remote):

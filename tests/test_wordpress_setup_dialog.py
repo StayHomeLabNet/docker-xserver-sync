@@ -47,6 +47,9 @@ def test_wordpress_setup_wizard_builds_request_without_persisting_secrets(
     wizard = WordPressSetupWizard(project, mapping)
     wizard.sql_edit.setText(str(sql))
     wizard.db_host_edit.setText("mysql.example.xserver.jp")
+    wizard.database_mode_combo.setCurrentIndex(
+        wizard.database_mode_combo.findData("api")
+    )
     wizard.api_key_edit.setText("xs_secret")
     wizard._refresh_file_selection()
 
@@ -67,4 +70,46 @@ def test_wordpress_setup_wizard_builds_request_without_persisting_secrets(
     selected = wizard.request_value().include_paths
     assert "index.php" in selected
     assert not any(path.startswith("wp-content/") for path in selected)
+    wizard.close()
+
+
+def test_wordpress_setup_wizard_supports_existing_database_without_api(
+    tmp_path: Path,
+) -> None:
+    app()
+    for directory in ("wp-admin", "wp-includes", "wp-content"):
+        (tmp_path / directory).mkdir()
+    (tmp_path / "wp-load.php").write_text("<?php", encoding="utf-8")
+    sql = tmp_path / "site.sql"
+    sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
+    mapping = SyncMapping.create(
+        "WordPress",
+        str(tmp_path),
+        "/home/sample/example.com/public_html",
+    )
+    project = Project.create(
+        name="Example",
+        site_type=SiteType.WORDPRESS,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference="/tmp/test.key",
+        mappings=(mapping,),
+    )
+    wizard = WordPressSetupWizard(project, mapping)
+    wizard.sql_edit.setText(str(sql))
+    wizard.db_host_edit.setText("mysql.example.xserver.jp")
+    wizard.existing_db_name_edit.setText("sample_wordpress")
+    wizard.existing_db_user_edit.setText("sample_wp_user")
+
+    value = wizard.request_value()
+
+    assert not wizard.uses_xserver_api
+    assert wizard.api_key == ""
+    assert value.database_mode == "existing"
+    assert value.existing_db_name == "sample_wordpress"
+    assert value.existing_db_user == "sample_wp_user"
+    assert not wizard.api_key_edit.isEnabled()
+    assert wizard.existing_db_name_edit.isEnabled()
     wizard.close()

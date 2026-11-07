@@ -622,8 +622,8 @@ class WordPressSetupWorker(QObject):
         *,
         project: Project,
         request: WordPressSetupRequest,
-        api_key: str,
-        servername: str,
+        api_key: str | None,
+        servername: str | None,
         passphrase: str | None,
     ) -> None:
         super().__init__()
@@ -648,9 +648,13 @@ class WordPressSetupWorker(QObject):
             )
             result = WordPressSetupEngine().setup(
                 request=self.request,
-                api=XServerApiClient(
-                    api_key=self.api_key,
-                    servername=self.servername,
+                api=(
+                    XServerApiClient(
+                        api_key=self.api_key,
+                        servername=self.servername or "",
+                    )
+                    if self.api_key
+                    else None
                 ),
                 ssh_client=client,
                 sftp=sftp,
@@ -1235,8 +1239,8 @@ class MainWindow(QMainWindow):
         if wizard.exec() != QDialog.Accepted:
             return
         request = wizard.request_value()
-        api_key = wizard.api_key
-        servername = wizard.servername
+        api_key = wizard.api_key or None
+        servername = wizard.servername if wizard.uses_xserver_api else None
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
         self.wordpress_setup_button.setEnabled(False)

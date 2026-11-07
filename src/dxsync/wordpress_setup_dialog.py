@@ -5,6 +5,7 @@ import string
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -121,8 +122,16 @@ class WordPressSetupWizard(QWizard):
     def _add_database_page(self) -> None:
         page = QWizardPage()
         page.setTitle("3. XServerのMySQL")
-        page.setSubTitle("XServer APIで新しいDBとユーザーを作成します。")
+        page.setSubTitle(
+            "APIで新規作成するか、サーバーパネルで作成済みの空DBを使用します。"
+        )
         form = QFormLayout(page)
+        self.database_mode_combo = QComboBox()
+        self.database_mode_combo.addItem("作成済みDBを使用（APIキー不要）", "existing")
+        self.database_mode_combo.addItem("XServer APIで新規作成", "api")
+        self.database_mode_combo.currentIndexChanged.connect(
+            self._database_mode_changed
+        )
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("xs_...（保存しません）")
@@ -135,9 +144,17 @@ class WordPressSetupWizard(QWizard):
         self.servername_edit.setPlaceholderText("サーバーID.xsrv.jp（API用初期ドメイン）")
         self.db_host_edit = QLineEdit()
         self.db_host_edit.setPlaceholderText("例: mysql1234.xserver.jp")
-        suffix = self.project.domain.split(".", 1)[0].replace("-", "_")[:16] or "wordpress"
+        suffix = (
+            self.project.domain.split(".", 1)[0].replace("-", "_")[:16]
+            or "wordpress"
+        )
         self.db_suffix_edit = QLineEdit(suffix)
         self.user_suffix_edit = QLineEdit((suffix + "_user")[:32])
+        server_id = initial_domain.split(".", 1)[0]
+        self.existing_db_name_edit = QLineEdit(f"{server_id}_{suffix}")
+        self.existing_db_name_edit.setPlaceholderText("例: xs123456_wordpress")
+        self.existing_db_user_edit = QLineEdit(f"{server_id}_{suffix}_user")
+        self.existing_db_user_edit.setPlaceholderText("例: xs123456_wp_user")
         self.db_password_edit = QLineEdit(_password())
         self.db_password_edit.setEchoMode(QLineEdit.Password)
         reveal = QPushButton("表示/非表示")
@@ -145,20 +162,38 @@ class WordPressSetupWizard(QWizard):
         password_row = QHBoxLayout()
         password_row.addWidget(self.db_password_edit, 1)
         password_row.addWidget(reveal)
+        form.addRow("DBの準備方法", self.database_mode_combo)
         form.addRow("XServer APIキー", self.api_key_edit)
-        form.addRow("対象サーバー", self.servername_edit)
+        form.addRow("API対象サーバー", self.servername_edit)
         form.addRow("MySQLホスト", self.db_host_edit)
         form.addRow("DB名サフィックス", self.db_suffix_edit)
         form.addRow("DBユーザーサフィックス", self.user_suffix_edit)
+        form.addRow("作成済みDB名", self.existing_db_name_edit)
+        form.addRow("作成済みDBユーザー", self.existing_db_user_edit)
         form.addRow("DBパスワード", password_row)
         hint = QLabel(
-            "APIキーは対象サーバーを限定し、MySQLの読み書き権限だけを"
-            "付与することを推奨します。APIキーとDBパスワードは今回の実行中だけ保持します。"
+            "作成済みDBを使う場合は、先にXServerのサーバーパネルでDBと"
+            "MySQLユーザーを作成してアクセス権を付与してください。"
+            "アプリは接続と空DBを確認し、既存テーブルがあれば停止します。"
+            "APIキーとDBパスワードは保存しません。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #57606a;")
         form.addRow("", hint)
+        self._database_mode_changed()
         self.addPage(page)
+
+    def _database_mode_changed(self) -> None:
+        uses_api = self.uses_xserver_api
+        for editor in (
+            self.api_key_edit,
+            self.servername_edit,
+            self.db_suffix_edit,
+            self.user_suffix_edit,
+        ):
+            editor.setEnabled(uses_api)
+        self.existing_db_name_edit.setEnabled(not uses_api)
+        self.existing_db_user_edit.setEnabled(not uses_api)
 
     def _add_url_page(self) -> None:
         page = QWizardPage()
@@ -194,13 +229,13 @@ class WordPressSetupWizard(QWizard):
         self.confirm_domain_edit.setPlaceholderText(self.project.domain)
         form.addRow("対象ドメインを再入力", self.confirm_domain_edit)
         layout.addLayout(form)
-        caution = QLabel(
+        self.caution_label = QLabel(
             "新しいDBとDBユーザーを作成し、SQLとWordPressファイルを配置します。"
             "途中失敗時に作成済みDBを自動削除はしません。"
         )
-        caution.setWordWrap(True)
-        caution.setStyleSheet("color: #cf222e;")
-        layout.addWidget(caution)
+        self.caution_label.setWordWrap(True)
+        self.caution_label.setStyleSheet("color: #cf222e;")
+        layout.addWidget(self.caution_label)
         self.addPage(page)
 
     def _browse_root(self) -> None:
@@ -231,6 +266,28 @@ class WordPressSetupWizard(QWizard):
         if not self._all_candidates:
             self._refresh_file_selection()
         server_id = self.servername_edit.text().strip().split(".", 1)[0]
+        if self.uses_xserver_api:
+            database_summary = (
+                "DB準備: XServer APIで新規作成\n"
+                f"作成DB: {server_id}_{self.db_suffix_edit.text().strip()}\n"
+                f"作成DBユーザー: {server_id}_{self.user_suffix_edit.text().strip()}"
+            )
+        else:
+            database_summary = (
+                "DB準備: サーバーパネルで作成済みの空DBを使用\n"
+                f"使用DB: {self.existing_db_name_edit.text().strip()}\n"
+                f"使用DBユーザー: {self.existing_db_user_edit.text().strip()}"
+            )
+        if self.uses_xserver_api:
+            self.caution_label.setText(
+                "新しいDBとDBユーザーを作成し、SQLとWordPressファイルを配置します。"
+                "途中失敗時に作成済みDBを自動削除はしません。"
+            )
+        else:
+            self.caution_label.setText(
+                "指定した作成済みDBが空であることを確認してからSQLを投入します。"
+                "既存テーブルがある場合はインポート前に停止します。"
+            )
         selected_content = self.file_tree.selected_file_paths()
         self.summary_label.setText(
             f"WordPress: {self.local_root_edit.text().strip()}\n"
@@ -239,8 +296,7 @@ class WordPressSetupWizard(QWizard):
             f"公開URL: {self.new_url_edit.text().strip()}\n"
             f"転送ファイル: {len(self._mandatory_paths) + len(selected_content)} "
             f"(必須コア {len(self._mandatory_paths)} / wp-content {len(selected_content)})\n"
-            f"作成DB: {server_id}_{self.db_suffix_edit.text().strip()}\n"
-            f"作成DBユーザー: {server_id}_{self.user_suffix_edit.text().strip()}"
+            f"{database_summary}"
         )
 
     def _refresh_file_selection(self) -> None:
@@ -300,6 +356,9 @@ class WordPressSetupWizard(QWizard):
             db_user_suffix=self.user_suffix_edit.text().strip(),
             db_password=self.db_password_edit.text(),
             table_prefix=self.prefix_edit.text().strip(),
+            database_mode=str(self.database_mode_combo.currentData()),
+            existing_db_name=self.existing_db_name_edit.text().strip(),
+            existing_db_user=self.existing_db_user_edit.text().strip(),
             include_paths=tuple(
                 sorted(
                     self._mandatory_paths
@@ -312,7 +371,7 @@ class WordPressSetupWizard(QWizard):
         if self.confirm_domain_edit.text().strip() != self.project.domain:
             QMessageBox.warning(self, "ドメインを確認", "対象ドメインが一致しません。")
             return
-        if not self.api_key_edit.text().strip():
+        if self.uses_xserver_api and not self.api_key_edit.text().strip():
             QMessageBox.warning(self, "APIキーを確認", "XServer APIキーを入力してください。")
             return
         try:
@@ -324,8 +383,12 @@ class WordPressSetupWizard(QWizard):
 
     @property
     def api_key(self) -> str:
-        return self.api_key_edit.text().strip()
+        return self.api_key_edit.text().strip() if self.uses_xserver_api else ""
 
     @property
     def servername(self) -> str:
         return self.servername_edit.text().strip()
+
+    @property
+    def uses_xserver_api(self) -> bool:
+        return self.database_mode_combo.currentData() == "api"
