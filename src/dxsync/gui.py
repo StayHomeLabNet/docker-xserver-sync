@@ -69,6 +69,7 @@ from .auto_sync import (
     save_auto_sync_preferences,
 )
 from .backup import BackupResult, RemoteBackupEngine
+from .cancellation import CancellationToken, OperationCancelled
 from .deployment import (
     DeploymentAuthorization,
     DeploymentResult,
@@ -398,6 +399,7 @@ class DeployWorker(QObject):
     blocked = Signal(object)
     failed = Signal(str)
     progress = Signal(int, int, str)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -408,6 +410,7 @@ class DeployWorker(QObject):
         passphrase: str | None,
         authorization: DeploymentAuthorization,
         health_check_path: str | None = None,
+        resume: bool = False,
     ) -> None:
         super().__init__()
         self.stored = stored
@@ -416,6 +419,11 @@ class DeployWorker(QObject):
         self.passphrase = passphrase
         self.authorization = authorization
         self.health_check_path = health_check_path
+        self.resume = resume
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
@@ -442,6 +450,7 @@ class DeployWorker(QObject):
                 project=self.project,
                 mapping=self.mapping,
                 sftp=sftp,
+                allow_resume=self.resume,
             )
             if not revalidation.valid:
                 self.blocked.emit(revalidation)
@@ -455,6 +464,7 @@ class DeployWorker(QObject):
                 file_mode=self.mapping.file_mode,
                 directory_mode=self.mapping.directory_mode,
                 progress_callback=self.progress.emit,
+                cancellation_token=self.cancellation_token,
             )
             if self.health_check_path is not None:
                 result = replace(
@@ -465,6 +475,8 @@ class DeployWorker(QObject):
                     ),
                 )
             self.completed.emit(result)
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -478,6 +490,7 @@ class ForceOverwriteWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
     progress = Signal(int, int, str)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -492,6 +505,10 @@ class ForceOverwriteWorker(QObject):
         self.mapping = mapping
         self.passphrase = passphrase
         self.selected_paths = selected_paths
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
@@ -517,8 +534,11 @@ class ForceOverwriteWorker(QObject):
                 file_mode=self.mapping.file_mode,
                 directory_mode=self.mapping.directory_mode,
                 progress_callback=self.progress.emit,
+                cancellation_token=self.cancellation_token,
             )
             self.completed.emit(result)
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -622,6 +642,8 @@ class WordPressSetupWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
     progress = Signal(object)
+    checkpoint = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -638,6 +660,10 @@ class WordPressSetupWorker(QObject):
         self.api_key = api_key
         self.servername = servername
         self.passphrase = passphrase
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
@@ -673,6 +699,8 @@ class WordPressSetupWorker(QObject):
                 sftp=sftp,
                 ssh_username=self.project.ssh_username,
                 progress_callback=self.progress.emit,
+                checkpoint_callback=self.checkpoint.emit,
+                cancellation_token=self.cancellation_token,
             )
             self.progress.emit(
                 WordPressSetupProgress(
@@ -693,6 +721,8 @@ class WordPressSetupWorker(QObject):
                 domain=self.project.domain, path="/wp-login.php"
             )
             self.completed.emit((result, homepage, login))
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -737,6 +767,8 @@ class MainWindow(QMainWindow):
         self._approved_delete_paths: tuple[str, ...] = ()
         self._restore_backup_id: str | None = None
         self._current_operation_id: str | None = None
+        self._current_operation_details: dict = {}
+        self._close_when_idle = False
         self._auto_sync_active = False
         self._wordpress_setup_active = False
         self._wordpress_progress_event: WordPressSetupProgress | None = None
@@ -808,6 +840,12 @@ class MainWindow(QMainWindow):
         )
         self.wordpress_setup_button.clicked.connect(self._start_wordpress_setup)
         setup_layout.addWidget(self.wordpress_setup_button)
+        self.wordpress_resume_button = QPushButton("中断したセットアップを再開…")
+        self.wordpress_resume_button.setToolTip(
+            "配置済みファイルとDBを検査し、URL置換以降を再開します"
+        )
+        self.wordpress_resume_button.clicked.connect(self._resume_wordpress_setup)
+        setup_layout.addWidget(self.wordpress_resume_button)
         self.laravel_setup_button = QPushButton("セットアップ手順を確認…")
         self.laravel_setup_button.setToolTip(
             "LaravelをXServerへ初回配置するための手順と注意事項を表示します"
@@ -913,10 +951,20 @@ class MainWindow(QMainWindow):
         self.summary = QLabel("フォルダを選択して検査してください。")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
+        progress_layout = QHBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
-        layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.progress_bar, 1)
+        self.stop_button = QPushButton("処理を停止")
+        self.stop_button.setVisible(False)
+        self.stop_button.clicked.connect(self._request_operation_cancel)
+        progress_layout.addWidget(self.stop_button)
+        self.resume_button = QPushButton("中断した処理を再開…")
+        self.resume_button.clicked.connect(self._resume_operation)
+        self.resume_button.setVisible(False)
+        progress_layout.addWidget(self.resume_button)
+        layout.addLayout(progress_layout)
 
         self.table_model = FileTableModel()
         table = QTableView()
@@ -1217,6 +1265,9 @@ class MainWindow(QMainWindow):
             and self._selected_mapping() is not None
         )
         self._update_setup_panel()
+        resumable = self._latest_resumable_operation()
+        self.resume_button.setVisible(idle and resumable is not None)
+        self.resume_button.setEnabled(idle and resumable is not None)
 
     def _update_setup_panel(self) -> None:
         project = self._current_project
@@ -1228,6 +1279,8 @@ class MainWindow(QMainWindow):
         self.setup_panel.setVisible(is_wordpress or is_laravel)
         self.wordpress_setup_button.setVisible(is_wordpress)
         self.wordpress_setup_button.setEnabled(idle and is_wordpress)
+        self.wordpress_resume_button.setVisible(is_wordpress)
+        self.wordpress_resume_button.setEnabled(idle and is_wordpress)
         self.laravel_setup_button.setVisible(is_laravel)
         self.laravel_setup_button.setEnabled(idle and is_laravel)
         if is_wordpress:
@@ -1316,6 +1369,13 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _start_wordpress_setup(self) -> None:
+        self._open_wordpress_setup(False)
+
+    @Slot()
+    def _resume_wordpress_setup(self) -> None:
+        self._open_wordpress_setup(True)
+
+    def _open_wordpress_setup(self, resume_existing: bool) -> None:
         if self._thread is not None or not self._require_runtime_paths_confirmation():
             return
         project = self._current_project
@@ -1327,7 +1387,9 @@ class MainWindow(QMainWindow):
                 "WordPressの保存済みプロジェクトを選択してください。",
             )
             return
-        wizard = WordPressSetupWizard(project, mapping, self)
+        wizard = WordPressSetupWizard(
+            project, mapping, self, resume_existing=resume_existing
+        )
         if wizard.exec() != QDialog.Accepted:
             return
         request = wizard.request_value()
@@ -1351,7 +1413,21 @@ class MainWindow(QMainWindow):
         )
         self._wordpress_progress_timer.start()
         self._refresh_wordpress_progress()
-        self._begin_operation("wordpress_setup")
+        self._begin_operation(
+            "wordpress_setup",
+            details={
+                "resumable": True,
+                "resume_existing": request.resume_existing,
+                "database_mode": request.database_mode,
+                "database": request.existing_db_name,
+                "database_user": request.existing_db_user,
+                "db_host": request.db_host,
+                "old_url": request.old_url,
+                "new_url": request.new_url,
+                "php_cli_version": request.php_cli_version,
+                "remote_root": request.remote_root,
+            },
+        )
         thread = QThread(self)
         worker = WordPressSetupWorker(
             project=project,
@@ -1363,15 +1439,20 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._wordpress_setup_progress)
+        worker.checkpoint.connect(self._update_operation_checkpoint)
         worker.completed.connect(self._wordpress_setup_completed)
         worker.failed.connect(self._wordpress_setup_failed)
+        worker.cancelled.connect(self._wordpress_setup_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
         self._wordpress_setup_active = True
         self._set_auto_sync_controls_locked(True)
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot(object)
@@ -1531,6 +1612,15 @@ class MainWindow(QMainWindow):
         self.summary.setText("WordPress初回セットアップを完了できませんでした。")
         QMessageBox.critical(self, "WordPressセットアップエラー", message)
 
+    @Slot(str)
+    def _wordpress_setup_cancelled(self, message: str) -> None:
+        self._stop_wordpress_progress()
+        self._finish_operation("cancelled", error=message)
+        self.progress_bar.setVisible(False)
+        self.summary.setText(
+            "WordPressセットアップを安全な区切りで停止しました。再開できます。"
+        )
+
     @Slot()
     def _edit_project(self) -> None:
         if self._current_project is None:
@@ -1571,28 +1661,184 @@ class MainWindow(QMainWindow):
         if dialog.selected_backup_id:
             self._start_restore(dialog.selected_backup_id)
 
-    def _begin_operation(self, kind: str) -> None:
+    def _latest_resumable_operation(self):
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            return None
+        for operation in self.store.list_operations(project.project_id, limit=100):
+            if (
+                operation.mapping_id == mapping.mapping_id
+                and operation.status in {"cancelled", "failed", "interrupted"}
+                and operation.details.get("resumable") is True
+                and operation.kind in {"deployment", "wordpress_setup", "force_overwrite"}
+            ):
+                return operation
+        return None
+
+    @Slot()
+    def _request_operation_cancel(self) -> None:
+        if self._thread is None or self._worker is None:
+            return
+        cancel = getattr(self._worker, "cancel", None)
+        if not callable(cancel):
+            QMessageBox.information(
+                self,
+                "停止できない処理",
+                "この処理は安全な中断に対応していません。",
+            )
+            return
+        if QMessageBox.question(
+            self,
+            "処理を停止",
+            "安全な区切りで処理を停止しますか？\n"
+            "サーバーコマンドの実行中は、完了後の区切りまで待ちます。",
+        ) != QMessageBox.Yes:
+            return
+        cancel()
+        self.stop_button.setEnabled(False)
+        self.stop_button.setText("停止を要求済み…")
+        self.summary.setText("停止要求を受け付けました。安全な区切りまで待っています…")
+
+    @Slot()
+    def _resume_operation(self) -> None:
+        operation = self._latest_resumable_operation()
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if operation is None or project is None or mapping is None:
+            return
+        if operation.kind == "wordpress_setup":
+            self._open_wordpress_setup(True)
+            return
+        if operation.kind == "deployment":
+            stored = self.store.get_plan(str(operation.details.get("plan_id", "")))
+            if stored is None or stored.status not in {"ready", "expired"}:
+                QMessageBox.warning(
+                    self, "再開できません", "保存済みの同期計画またはステージングが見つかりません。"
+                )
+                return
+            backup_id = operation.details.get("backup_id")
+            backup = self.store.get_backup(str(backup_id)) if backup_id else None
+            self._backup_skipped = bool(operation.details.get("backup_skipped"))
+            self._approved_delete_paths = tuple(operation.details.get("delete_paths", []))
+            counts = stored.plan.counts()
+            upload_bytes = sum(
+                change.local.size or 0
+                for change in stored.plan.changes
+                if change.change_type in {ChangeType.ADD, ChangeType.UPDATE}
+                and change.local is not None
+            )
+            approval = DeploymentApprovalDialog(
+                domain=project.domain,
+                remote_root=mapping.remote_root,
+                add_count=counts[ChangeType.ADD],
+                update_count=counts[ChangeType.UPDATE],
+                upload_bytes=upload_bytes,
+                backup_id=backup.backup_id if backup else None,
+                backup_skipped=self._backup_skipped,
+                delete_count=len(self._approved_delete_paths),
+                parent=self,
+            )
+            if approval.exec() == QDialog.Accepted:
+                self._run_deployment(
+                    project,
+                    mapping,
+                    stored,
+                    backup,
+                    approval.selected_health_check_path(),
+                    resume=True,
+                )
+            return
+        selected = tuple(operation.details.get("selected_paths", []))
+        completed = set(operation.details.get("completed_paths", []))
+        remaining = tuple(path for path in selected if path not in completed)
+        if not remaining:
+            QMessageBox.information(
+                self, "再開不要", "保存された対象ファイルはすべて完了しています。"
+            )
+            return
+        approval = ForceOverwriteApprovalDialog(
+            domain=project.domain,
+            remote_root=mapping.remote_root,
+            file_paths=remaining,
+            parent=self,
+        )
+        if approval.exec() != QDialog.Accepted:
+            return
+        remaining = approval.selected_file_paths()
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self._update_action_buttons()
+        self.progress_bar.setRange(0, max(len(remaining), 1))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("無条件上書きを再開 %v/%m")
+        self.progress_bar.setVisible(True)
+        self.summary.setText("無条件上書きを未完了ファイルから再開中…")
+        self._begin_operation(
+            "force_overwrite",
+            details={
+                "resumable": True,
+                "selected_paths": list(remaining),
+                "resumed_from": operation.operation_id,
+            },
+        )
+        thread = QThread(self)
+        worker = ForceOverwriteWorker(
+            project=project,
+            mapping=mapping,
+            passphrase=self.passphrase_edit.text() or None,
+            selected_paths=remaining,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._force_overwrite_progress)
+        worker.completed.connect(self._force_overwrite_completed)
+        worker.failed.connect(self._force_overwrite_failed)
+        worker.cancelled.connect(self._force_overwrite_cancelled)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
+        thread.start()
+
+    def _begin_operation(self, kind: str, details: dict | None = None) -> None:
         mapping = self._selected_mapping()
         if self._current_project is None or mapping is None:
             self._current_operation_id = None
             return
+        operation_details = {
+            "mode": "write"
+            if kind in {
+                "backup",
+                "deployment",
+                "force_overwrite",
+                "restore",
+                "wordpress_setup",
+            }
+            else "read_only"
+        }
+        operation_details.update(details or {})
         operation = self.store.start_operation(
             project_id=self._current_project.project_id,
             mapping_id=mapping.mapping_id,
             kind=kind,
-            details={
-                "mode": "write"
-                if kind in {
-                    "backup",
-                    "deployment",
-                    "force_overwrite",
-                    "restore",
-                    "wordpress_setup",
-                }
-                else "read_only"
-            },
+            details=operation_details,
         )
         self._current_operation_id = operation.operation_id
+        self._current_operation_details = operation_details
+
+    def _update_operation_checkpoint(self, checkpoint: dict) -> None:
+        if self._current_operation_id is None:
+            return
+        self._current_operation_details["checkpoint"] = dict(checkpoint)
+        self._current_operation_details["resumable"] = True
+        self.store.update_operation_details(
+            self._current_operation_id, self._current_operation_details
+        )
 
     def _finish_operation(
         self,
@@ -1603,13 +1849,16 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._current_operation_id is None:
             return
+        merged_details = dict(self._current_operation_details)
+        merged_details.update(details or {})
         self.store.finish_operation(
             self._current_operation_id,
             status=status,
-            details=details,
+            details=merged_details,
             error=error,
         )
         self._current_operation_id = None
+        self._current_operation_details = {}
 
     @Slot()
     def _browse(self) -> None:
@@ -2032,6 +2281,8 @@ class MainWindow(QMainWindow):
         stored: StoredPlan,
         backup: BackupRecord | None,
         health_check_path: str | None,
+        *,
+        resume: bool = False,
     ) -> None:
         counts = stored.plan.counts()
 
@@ -2050,7 +2301,19 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("承認済み同期 %v/%m")
         self.progress_bar.setVisible(True)
-        self._begin_operation("deployment")
+        self._current_plan_id = stored.plan.plan_id
+        self._begin_operation(
+            "deployment",
+            details={
+                "resumable": True,
+                "plan_id": stored.plan.plan_id,
+                "backup_id": backup.backup_id if backup is not None else None,
+                "backup_skipped": self._backup_skipped,
+                "delete_paths": list(self._approved_delete_paths),
+                "health_check_path": health_check_path,
+                "resumed": resume,
+            },
+        )
         thread = QThread(self)
         worker = DeployWorker(
             stored=stored,
@@ -2066,19 +2329,24 @@ class MainWindow(QMainWindow):
                 delete_paths=self._approved_delete_paths,
             ),
             health_check_path=health_check_path,
+            resume=resume,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.completed.connect(self._deployment_completed)
         worker.blocked.connect(self._deployment_blocked)
         worker.failed.connect(self._deployment_failed)
+        worker.cancelled.connect(self._deployment_cancelled)
         worker.progress.connect(self._deployment_progress)
         worker.completed.connect(thread.quit)
         worker.blocked.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot()
@@ -2136,7 +2404,13 @@ class MainWindow(QMainWindow):
         self.summary.setText(
             "無条件上書き中… 差分照合・バックアップ・転送後ハッシュ検証は行いません。"
         )
-        self._begin_operation("force_overwrite")
+        self._begin_operation(
+            "force_overwrite",
+            details={
+                "resumable": True,
+                "selected_paths": list(selected_paths),
+            },
+        )
         thread = QThread(self)
         worker = ForceOverwriteWorker(
             project=project,
@@ -2149,11 +2423,15 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._force_overwrite_progress)
         worker.completed.connect(self._force_overwrite_completed)
         worker.failed.connect(self._force_overwrite_failed)
+        worker.cancelled.connect(self._force_overwrite_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot()
@@ -2603,14 +2881,25 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _deployment_failed(self, message: str) -> None:
         self.progress_bar.setVisible(False)
-        if self._current_plan_id:
-            self.store.set_plan_status(self._current_plan_id, "invalid")
         self._finish_operation("failed", error=message)
-        self._current_plan_id = None
         self._reset_write_state()
-        cleanup_stale_staging(self.store, self.staging_parent)
-        self.summary.setText("同期に失敗しました。適用済みファイルは可能な限り復元されました。")
+        self.summary.setText(
+            "同期に失敗しました。適用済みファイルは可能な限り復元され、"
+            "計画は再開用に保存されています。"
+        )
         QMessageBox.critical(self, "同期エラー", message)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
+
+    @Slot(str)
+    def _deployment_cancelled(self, message: str) -> None:
+        self.progress_bar.setVisible(False)
+        self._finish_operation("cancelled", error=message)
+        self._reset_write_state()
+        self.summary.setText(
+            "承認付き同期を安全に停止しました。"
+            "ステージング計画を再検証して再開できます。"
+        )
         if self._auto_sync_active:
             self._stop_auto_sync()
 
@@ -2630,6 +2919,14 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(current)
         self.progress_bar.setFormat(f"無条件上書き {current}/{total}")
         self.summary.setText(f"無条件上書き中… {current}/{total}  {path}")
+        completed = list(self._current_operation_details.get("completed_paths", []))
+        if path not in completed:
+            completed.append(path)
+            self._current_operation_details["completed_paths"] = completed
+            if self._current_operation_id:
+                self.store.update_operation_details(
+                    self._current_operation_id, self._current_operation_details
+                )
 
     @Slot(object)
     def _force_overwrite_completed(self, result: ForceOverwriteResult) -> None:
@@ -2660,6 +2957,16 @@ class MainWindow(QMainWindow):
             "無条件上書きに失敗しました。このモードはバックアップとロールバックを行いません。"
         )
         QMessageBox.critical(self, "無条件上書きエラー", message)
+
+    @Slot(str)
+    def _force_overwrite_cancelled(self, message: str) -> None:
+        self.progress_bar.setVisible(False)
+        self._finish_operation("cancelled", error=message)
+        self._reset_write_state()
+        self.summary.setText(
+            "無条件上書きをファイル境界で停止しました。"
+            "完了済みファイルを除いて再開できます。"
+        )
 
     @Slot(object)
     def _recovery_scan_completed(self, result: RecoveryAnalysisResult) -> None:
@@ -2728,6 +3035,9 @@ class MainWindow(QMainWindow):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self.stop_button.setVisible(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("処理を停止")
         self._refresh_ready_plan()
         if self._auto_sync_active and self._auto_sync_stage in {
             "approval",
@@ -2736,6 +3046,37 @@ class MainWindow(QMainWindow):
             "deployment",
         }:
             QTimer.singleShot(0, self._continue_auto_sync)
+        if self._close_when_idle:
+            self._close_when_idle = False
+            QTimer.singleShot(0, self.close)
+
+    def closeEvent(self, event) -> None:
+        if self._thread is None:
+            event.accept()
+            return
+        cancel = getattr(self._worker, "cancel", None)
+        if not callable(cancel):
+            QMessageBox.warning(
+                self,
+                "処理中です",
+                "実行中の処理が完了するまでアプリを閉じられません。",
+            )
+            event.ignore()
+            return
+        answer = QMessageBox.question(
+            self,
+            "処理を停止して終了",
+            "実行中の処理を安全な区切りで停止し、その後アプリを終了しますか？\n"
+            "次回起動後に再開できます。",
+        )
+        if answer != QMessageBox.Yes:
+            event.ignore()
+            return
+        cancel()
+        self._close_when_idle = True
+        self.stop_button.setEnabled(False)
+        self.stop_button.setText("停止後に終了…")
+        event.ignore()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

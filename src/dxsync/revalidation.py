@@ -29,14 +29,16 @@ class PlanRevalidator:
         mapping: SyncMapping,
         sftp: RemoteFileSystem,
         now: datetime | None = None,
+        allow_resume: bool = False,
     ) -> RevalidationResult:
         current_time = now or datetime.now(timezone.utc)
         reasons: list[str] = []
         if runtime_issue := custom_runtime_paths_issue(project, mapping):
             reasons.append(runtime_issue.message)
-        if stored.status != "ready":
+        allowed_statuses = {"ready", "expired"} if allow_resume else {"ready"}
+        if stored.status not in allowed_statuses:
             reasons.append(f"Plan status is {stored.status}, not ready")
-        if stored.plan.expires_at <= current_time:
+        if stored.plan.expires_at <= current_time and not allow_resume:
             reasons.append("Plan has expired")
         expected_config = project_config_sha256(project, mapping)
         if not stored.plan.config_sha256 or stored.plan.config_sha256 != expected_config:

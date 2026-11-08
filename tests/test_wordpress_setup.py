@@ -49,6 +49,30 @@ def test_validate_setup_request_accepts_wordpress_and_safe_sql(tmp_path: Path) -
     validate_setup_request(request(tmp_path, sql))
 
 
+def test_resume_validation_does_not_require_sql_dump(tmp_path: Path) -> None:
+    make_wordpress(tmp_path)
+    value = replace(
+        request(tmp_path, tmp_path / "missing.sql"),
+        resume_existing=True,
+        database_mode="existing",
+        existing_db_name="sample_wp",
+        existing_db_user="sample_wp_user",
+    )
+
+    validate_setup_request(value)
+
+
+def test_resume_validation_rejects_api_database_mode(tmp_path: Path) -> None:
+    make_wordpress(tmp_path)
+    value = replace(
+        request(tmp_path, tmp_path / "missing.sql"),
+        resume_existing=True,
+    )
+
+    with pytest.raises(WordPressSetupError, match="作成済みDB"):
+        validate_setup_request(value)
+
+
 def test_validate_setup_request_rejects_unsupported_php_cli_version(
     tmp_path: Path,
 ) -> None:

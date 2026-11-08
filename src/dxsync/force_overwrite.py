@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Protocol
 
 from .models import normalize_relative_path
+from .cancellation import CancellationToken
 from .rules import PathRules
 from .validation import normalize_remote_root
 
@@ -130,8 +131,11 @@ class ForceOverwriteEngine:
         directory_mode: int = 0o755,
         progress_callback: Callable[[int, int, str], None] | None = None,
         file_started_callback: Callable[[int, int, str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> ForceOverwriteResult:
         resolved_root = local_root.expanduser().resolve()
+        cancel = cancellation_token or CancellationToken()
+        cancel.raise_if_cancelled()
         normalized_root = normalize_remote_root(remote_root)
         if not _exists(sftp, normalized_root):
             raise ForceOverwriteError(f"Remote root does not exist: {normalized_root}")
@@ -156,6 +160,7 @@ class ForceOverwriteEngine:
         total = len(files)
         token = uuid.uuid4().hex[:12]
         for index, local_path in enumerate(files, start=1):
+            cancel.raise_if_cancelled()
             relative = local_path.relative_to(resolved_root).as_posix()
             if file_started_callback is not None:
                 file_started_callback(index - 1, total, relative)
@@ -174,6 +179,7 @@ class ForceOverwriteEngine:
             try:
                 with local_path.open("rb") as reader, sftp.open(temporary, "wb") as writer:
                     while chunk := reader.read(1024 * 1024):
+                        cancel.raise_if_cancelled()
                         writer.write(chunk)
                         size += len(chunk)
                 sftp.chmod(temporary, file_mode)

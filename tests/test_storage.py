@@ -169,6 +169,13 @@ def test_operation_journal_and_backup_history(tmp_path: Path) -> None:
         details={"mode": "read_only"},
     )
     assert operation.status == "running"
+    assert store.update_operation_details(
+        operation.operation_id,
+        {"mode": "read_only", "checkpoint": {"stage": "scanned"}},
+    )
+    updated = store.get_operation(operation.operation_id)
+    assert updated is not None
+    assert updated.details["checkpoint"] == {"stage": "scanned"}
     assert store.finish_operation(
         operation.operation_id,
         status="succeeded",

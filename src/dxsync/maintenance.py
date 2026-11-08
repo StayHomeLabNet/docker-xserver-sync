@@ -19,8 +19,17 @@ def cleanup_stale_staging(store: ProjectStore, staging_parent: Path) -> CleanupR
     parent.mkdir(parents=True, exist_ok=True)
     removed: list[Path] = []
     skipped: list[str] = []
+    resumable_plan_ids = {
+        str(operation.details.get("plan_id"))
+        for operation in store.list_operations(limit=10_000)
+        if operation.status in {"cancelled", "failed", "interrupted"}
+        and operation.details.get("resumable") is True
+        and operation.details.get("plan_id")
+    }
     stale = store.list_plans({"expired", "superseded", "invalid", "used"})
     for stored in stale:
+        if stored.plan.plan_id in resumable_plan_ids:
+            continue
         if not stored.staging_path:
             continue
         candidate = Path(stored.staging_path)

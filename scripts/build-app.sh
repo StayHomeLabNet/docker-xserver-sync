@@ -13,12 +13,13 @@ UV_PROJECT_ENVIRONMENT="$build_venv" uv sync --python 3.12 --extra dev --extra g
 
 "$build_venv/bin/python" -m nuitka \
   --standalone \
+  --disable-ccache \
   --macos-create-app-bundle \
   --macos-app-mode=gui \
   --macos-app-name="Docker XServer Sync" \
-  --macos-app-version="0.1.9" \
+  --macos-app-version="0.2.0" \
   --product-name="Docker XServer Sync" \
-  --product-version="0.1.9" \
+  --product-version="0.2.0" \
   --output-filename="Docker XServer Sync" \
   --macos-app-icon=none \
   --enable-plugin=pyside6 \

@@ -8,6 +8,8 @@ Dockerへbind mountしたローカルのPHPサイトを、ドライランと承�
 
 URL置換に使うWP-CLI用PHPはウィザードでPHP 8.0〜8.5から選択でき、既定はPHP 8.3です。XServerの「PHP Ver.切替」と同じバージョンを選びます。アプリはバージョン別CLIパスを明示し、DB作成・SQL投入・ファイル転送より前にPHPとWP-CLIを事前検査します。
 
+承認付き同期、無条件上書き、WordPressセットアップは「処理を停止」から安全な区切りで停止できます。停止、エラー、アプリ終了後の操作はローカルの操作履歴とチェックポイントから再開できます。再開時に承認付き同期はローカル・リモート・ステージングを再検証し、再度の明示承認を求めます。WordPressはDB投入、ファイル配置、URL置換の進捗を保存し、配置済み状態を検査して完了済み工程を繰り返しません。DBパスワード、APIキー、SSHパスフレーズは再開情報に保存しません。
+
 初回セットアップ欄は、選択中の保存済みプロジェクトのサイト種類に応じて表示します。WordPressでは専用ウィザード、Laravelでは初回配置の手順と手動確認事項を表示し、独自PHPまたは未保存の手動設定では表示しません。Laravel専用の自動配置、`.env`生成、`artisan migrate`、キャッシュ生成はまだ実行しません。
 
 `.gitignore`、`.github/`、`compose.yaml`、`docker-compose.yaml`、`Dockerfile`、プロジェクト直下の`README*`・`docs/`・`tests/`、IDE設定、`.env`、秘密鍵、`node_modules/`などは既定で転送対象から除外します。WordPress新規セットアップではコアを必須転送し、`wp-content/`配下はウィザードで選択できます。
@@ -84,7 +86,7 @@ pwsh -File scripts/build-app.ps1
 pwsh -File scripts/build-app.ps1 -BuildInstaller
 ```
 
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.9.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.2.0.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
 
 ## Linuxアプリのビルド
 

@@ -36,7 +36,14 @@ def _password() -> str:
 
 
 class WordPressSetupWizard(QWizard):
-    def __init__(self, project: Project, mapping: SyncMapping, parent=None) -> None:
+    def __init__(
+        self,
+        project: Project,
+        mapping: SyncMapping,
+        parent=None,
+        *,
+        resume_existing: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.project = project
         self.mapping = mapping
@@ -55,6 +62,9 @@ class WordPressSetupWizard(QWizard):
         self._add_confirmation_page()
         self._configure_input_widths()
         self.currentIdChanged.connect(self._page_changed)
+        if resume_existing:
+            self.resume_existing_check.setChecked(True)
+            self.setWindowTitle("WordPressセットアップを再開")
 
     def _configure_input_widths(self) -> None:
         for editor in self.findChildren(QLineEdit):
@@ -65,6 +75,15 @@ class WordPressSetupWizard(QWizard):
         page.setTitle("1. ローカルWordPress")
         page.setSubTitle("WordPressファイルとDocker DBから出力したSQLを選びます。")
         form = QFormLayout(page)
+        self.resume_existing_check = QCheckBox(
+            "中断・エラー後の配置済みWordPressから再開する"
+        )
+        self.resume_existing_check.setToolTip(
+            "DBテーブル、WordPressコア、wp-config.phpを検査し、"
+            "SQLインポートとファイル転送を繰り返さずURL置換から再開します"
+        )
+        self.resume_existing_check.toggled.connect(self._resume_mode_changed)
+        form.addRow("実行モード", self.resume_existing_check)
         self.local_root_edit = QLineEdit(self.mapping.local_root)
         root_row = QHBoxLayout()
         root_row.addWidget(self.local_root_edit, 1)
@@ -89,6 +108,21 @@ class WordPressSetupWizard(QWizard):
         note.setStyleSheet("color: #57606a;")
         form.addRow("", note)
         self.addPage(page)
+
+    def _resume_mode_changed(self, enabled: bool) -> None:
+        self.sql_edit.setEnabled(not enabled)
+        if enabled:
+            self.database_mode_combo.setCurrentIndex(
+                self.database_mode_combo.findData("existing")
+            )
+            self.database_mode_combo.setEnabled(False)
+            self.caution_label.setText(
+                "配置済みのDBとWordPressファイルを読み取り検査し、"
+                "SQLインポートとファイル転送は行わずURL置換以降を再開します。"
+            )
+        else:
+            self.database_mode_combo.setEnabled(True)
+        self._database_mode_changed()
 
     def _add_selection_page(self) -> None:
         page = QWizardPage()
@@ -199,6 +233,14 @@ class WordPressSetupWizard(QWizard):
             self.user_suffix_edit,
         ):
             editor.setEnabled(uses_api)
+        if self.resume_existing_check.isChecked():
+            for editor in (
+                self.api_key_edit,
+                self.servername_edit,
+                self.db_suffix_edit,
+                self.user_suffix_edit,
+            ):
+                editor.setEnabled(False)
         self.existing_db_name_edit.setEnabled(not uses_api)
         self.existing_db_user_edit.setEnabled(not uses_api)
         self.existing_db_prepared_check.setVisible(not uses_api)
@@ -295,11 +337,11 @@ class WordPressSetupWizard(QWizard):
         self.db_password_edit.setEchoMode(mode)
 
     def _page_changed(self, page_id: int) -> None:
-        if page_id == self.selection_page_id:
+        if page_id == self.selection_page_id and not self.resume_existing_check.isChecked():
             self._refresh_file_selection()
         if page_id != self.pageIds()[-1]:
             return
-        if not self._all_candidates:
+        if not self._all_candidates and not self.resume_existing_check.isChecked():
             self._refresh_file_selection()
         server_id = self.servername_edit.text().strip().split(".", 1)[0]
         if self.uses_xserver_api:
@@ -314,7 +356,12 @@ class WordPressSetupWizard(QWizard):
                 f"使用DB: {self.existing_db_name_edit.text().strip()}\n"
                 f"使用DBユーザー: {self.existing_db_user_edit.text().strip()}"
             )
-        if self.uses_xserver_api:
+        if self.resume_existing_check.isChecked():
+            self.caution_label.setText(
+                "配置済みのDBとWordPressファイルを検査し、"
+                "SQLインポートとファイル転送をスキップしてURL置換以降を再開します。"
+            )
+        elif self.uses_xserver_api:
             self.caution_label.setText(
                 "新しいDBとDBユーザーを作成し、SQLとWordPressファイルを配置します。"
                 "途中失敗時に作成済みDBを自動削除はしません。"
@@ -325,13 +372,18 @@ class WordPressSetupWizard(QWizard):
                 "既存テーブルがある場合はインポート前に停止します。"
             )
         selected_content = self.file_tree.selected_file_paths()
+        transfer_summary = (
+            "転送ファイル: 転送済みを検査してスキップ"
+            if self.resume_existing_check.isChecked()
+            else f"転送ファイル: {len(self._mandatory_paths) + len(selected_content)} "
+            f"(必須コア {len(self._mandatory_paths)} / wp-content {len(selected_content)})"
+        )
         self.summary_label.setText(
             f"WordPress: {self.local_root_edit.text().strip()}\n"
             f"SQL: {self.sql_edit.text().strip()}\n"
             f"転送先: {self.mapping.remote_root}\n"
             f"公開URL: {self.new_url_edit.text().strip()}\n"
-            f"転送ファイル: {len(self._mandatory_paths) + len(selected_content)} "
-            f"(必須コア {len(self._mandatory_paths)} / wp-content {len(selected_content)})\n"
+            f"{transfer_summary}\n"
             f"{database_summary}"
         )
 
@@ -378,7 +430,11 @@ class WordPressSetupWizard(QWizard):
         )
 
     def request_value(self) -> WordPressSetupRequest:
-        if not self._all_candidates and self.local_root_edit.text().strip():
+        if (
+            not self.resume_existing_check.isChecked()
+            and not self._all_candidates
+            and self.local_root_edit.text().strip()
+        ):
             self._refresh_file_selection()
         return WordPressSetupRequest(
             local_root=Path(self.local_root_edit.text().strip()),
@@ -396,12 +452,17 @@ class WordPressSetupWizard(QWizard):
             existing_db_name=self.existing_db_name_edit.text().strip(),
             existing_db_user=self.existing_db_user_edit.text().strip(),
             php_cli_version=str(self.php_cli_version_combo.currentData()),
-            include_paths=tuple(
-                sorted(
-                    self._mandatory_paths
-                    + self.file_tree.selected_file_paths()
+            include_paths=(
+                None
+                if self.resume_existing_check.isChecked()
+                else tuple(
+                    sorted(
+                        self._mandatory_paths
+                        + self.file_tree.selected_file_paths()
+                    )
                 )
             ),
+            resume_existing=self.resume_existing_check.isChecked(),
         )
 
     def accept(self) -> None:

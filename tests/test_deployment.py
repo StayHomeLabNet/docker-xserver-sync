@@ -12,6 +12,7 @@ from dxsync.deployment import (
     DeploymentAuthorization,
     RemoteDeploymentEngine,
 )
+from dxsync.cancellation import CancellationToken, OperationCancelled
 from dxsync.models import ChangeType, EntryKind, FileChange, FileRecord, SyncPlan, utc_now
 
 
@@ -180,6 +181,28 @@ def test_deploy_reports_file_progress(tmp_path: Path) -> None:
 
     assert (1, 2) in [(current, total) for current, total, _ in progress]
     assert progress[-1][:2] == (2, 2)
+
+
+def test_deploy_cancelled_before_upload_leaves_remote_unchanged(tmp_path: Path) -> None:
+    sftp = MemorySftp()
+    stage(tmp_path, "one.php", b"one")
+    plan = make_plan(
+        (FileChange("one.php", ChangeType.ADD, record("one.php", b"one"), None),)
+    )
+    token = CancellationToken()
+    token.cancel()
+
+    with pytest.raises(OperationCancelled):
+        RemoteDeploymentEngine().deploy(
+            sftp=sftp,
+            plan=plan,
+            staging_root=tmp_path,
+            remote_root="/home/user/site",
+            authorization=authorize(plan),
+            cancellation_token=token,
+        )
+
+    assert not sftp.files
 
 
 def test_deploy_allows_explicit_backup_skip_but_not_deletion(tmp_path: Path) -> None:

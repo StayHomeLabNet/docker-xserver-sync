@@ -594,6 +594,29 @@ class ProjectStore:
             )
         return cursor.rowcount > 0
 
+    def update_operation_details(self, operation_id: str, details: dict) -> bool:
+        """Persist a resumable checkpoint without changing operation status."""
+        self.initialize()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE operations SET details_json = ? WHERE operation_id = ?",
+                (
+                    json.dumps(details, ensure_ascii=False, sort_keys=True),
+                    operation_id,
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def get_operation(self, operation_id: str) -> OperationRecord | None:
+        return next(
+            (
+                operation
+                for operation in self.list_operations(limit=10_000)
+                if operation.operation_id == operation_id
+            ),
+            None,
+        )
+
     def recover_interrupted_operations(self) -> tuple[OperationRecord, ...]:
         """Mark operations left running by a previous process as interrupted."""
         running = tuple(

@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Protocol
 
 from .health import HealthCheckResult
+from .cancellation import CancellationToken
 from .models import ChangeType, FileChange, SyncPlan
 from .validation import normalize_remote_root
 
@@ -166,8 +167,11 @@ class RemoteDeploymentEngine:
         file_mode: int = 0o644,
         directory_mode: int = 0o755,
         progress_callback: Callable[[int, int, str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> DeploymentResult:
         normalized_root = normalize_remote_root(remote_root)
+        cancel = cancellation_token or CancellationToken()
+        cancel.raise_if_cancelled()
         authorization.consume(plan_id=plan.plan_id, remote_root=normalized_root)
         if not _exists(sftp, normalized_root):
             raise DeployError(f"Remote root does not exist: {normalized_root}")
@@ -186,6 +190,7 @@ class RemoteDeploymentEngine:
         total_changes = len(upload_changes) + len(authorization.delete_paths)
         try:
             for index, change in enumerate(upload_changes, start=1):
+                cancel.raise_if_cancelled()
                 if change.local is None or not change.local.sha256:
                     raise DeployError(f"Missing approved local hash: {change.relative_path}")
                 local_path = staging_root / Path(change.relative_path)
@@ -231,6 +236,7 @@ class RemoteDeploymentEngine:
                 size = 0
                 with local_path.open("rb") as reader, sftp.open(new_temporary, "wb") as writer:
                     while chunk := reader.read(1024 * 1024):
+                        cancel.raise_if_cancelled()
                         writer.write(chunk)
                         digest.update(chunk)
                         size += len(chunk)
@@ -269,6 +275,9 @@ class RemoteDeploymentEngine:
             self._clean_prepared(sftp, prepared, created_directories)
             raise DeployError("Deletion approval contains files outside the plan")
         for delete_index, relative in enumerate(sorted(requested_deletions), start=1):
+            if cancel.cancelled:
+                self._clean_prepared(sftp, prepared, created_directories)
+                cancel.raise_if_cancelled()
             change = remote_only[relative]
             if change.remote is None or not change.remote.sha256:
                 self._clean_prepared(sftp, prepared, created_directories)
@@ -297,6 +306,7 @@ class RemoteDeploymentEngine:
         applied_deletions: list[_PreparedDeletion] = []
         try:
             for publish_index, item in enumerate(prepared, start=1):
+                cancel.raise_if_cancelled()
                 if item.change.change_type is ChangeType.UPDATE:
                     assert item.old_temporary is not None
                     current_hash, _ = _hash_remote(sftp, item.destination)
@@ -321,6 +331,7 @@ class RemoteDeploymentEngine:
                         f"公開切り替え: {item.change.relative_path}",
                     )
             for delete_index, item in enumerate(prepared_deletions, start=1):
+                cancel.raise_if_cancelled()
                 assert item.change.remote is not None
                 current_hash, _ = _hash_remote(sftp, item.destination)
                 if current_hash != item.change.remote.sha256:
