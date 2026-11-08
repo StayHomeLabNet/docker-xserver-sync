@@ -18,4 +18,6 @@
 
 ```text
 1a5907565a88c14c983b370b63ce3b22df099c1faee00d4e21b2d40553c1e572  Docker XServer Sync-macOS-arm64.zip
+a1cbf52efbb8f407caf043671c442fd27accdf4bd1aa40f8e65a89dac648b3a6  Docker XServer Sync-Windows-x64.zip
+9abb135f7cd390b28a16a6a4d03ac00144eb9b42456f9ca71eaad0c74e467920  Docker-XServer-Sync-Setup-v0.2.1.exe
 ```
