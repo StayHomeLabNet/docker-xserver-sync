@@ -67,6 +67,8 @@ def test_wordpress_setup_wizard_builds_request_without_persisting_secrets(
     assert value.remote_root == mapping.remote_root
     assert wizard.servername == "sample.xsrv.jp"
     assert wizard.api_key == "xs_secret"
+    assert value.php_cli_version == "8.3"
+    assert "PHP 8.3" in wizard.php_cli_version_combo.currentText()
     assert "index.php" in value.include_paths
     assert "wp-content/plugins/example/plugin.php" in value.include_paths
     assert "wp-content/plugins/example/README.md" in value.include_paths

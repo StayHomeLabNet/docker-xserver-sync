@@ -49,6 +49,19 @@ def test_validate_setup_request_accepts_wordpress_and_safe_sql(tmp_path: Path) -
     validate_setup_request(request(tmp_path, sql))
 
 
+def test_validate_setup_request_rejects_unsupported_php_cli_version(
+    tmp_path: Path,
+) -> None:
+    make_wordpress(tmp_path)
+    sql = tmp_path / "site.sql"
+    sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
+
+    with pytest.raises(WordPressSetupError, match="WP-CLI用PHP"):
+        validate_setup_request(
+            replace(request(tmp_path, sql), php_cli_version="5.4")
+        )
+
+
 @pytest.mark.parametrize(
     "statement",
     ("CREATE DATABASE other;", "DROP DATABASE other;", "USE other;"),
@@ -213,6 +226,8 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
             self.commands.append(command)
             if "command -v mysql" in command:
                 output = b"/usr/bin/mysql\n"
+            elif "test -x /usr/bin/php8.3" in command:
+                output = b"8.3.29"
             elif "command -v wp" in command:
                 output = b"/usr/local/bin/wp\n"
             elif "information_schema.tables" in command:
@@ -266,7 +281,14 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
     assert result.url_replaced
     assert ("grant", "sample_wp_user", "sample_wp") in api.calls
     assert "/home/sample/example.com/public_html/wp-config.php" in sftp.files
-    assert any("search-replace" in command for command in client.commands)
+    assert any(
+        command.startswith("/usr/bin/php8.3 /usr/local/bin/wp search-replace")
+        for command in client.commands
+    )
+    assert any(
+        command == "/usr/bin/php8.3 /usr/local/bin/wp --info"
+        for command in client.commands
+    )
     assert not any(path.endswith("database.sql") for path in sftp.files)
     assert transfer_arguments["include_paths"] == setup_request.include_paths
     assert all(item.total_steps == 10 for item in progress)

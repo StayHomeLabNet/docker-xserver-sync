@@ -6,6 +6,8 @@ Dockerへbind mountしたローカルのPHPサイトを、ドライランと承�
 
 初回セットアップウィザードの最小版を実装済みです。WordPressプロジェクトを選び、画面上部の「WordPress初回セットアップ」にある「セットアップを開始…」を押します。「プロジェクト」メニューの「WordPressをXServerへ新規セットアップ…」からも開けます。MySQLは、XServer APIでDBとユーザーを新規作成する方法と、サーバーパネルで作成済みの空DBをAPIキーなしで使用する方法を選べます。現在はDocker DBの自動ダンプ前のため、SQLファイルの事前出力が必要です。
 
+URL置換に使うWP-CLI用PHPはウィザードでPHP 8.0〜8.5から選択でき、既定はPHP 8.3です。XServerの「PHP Ver.切替」と同じバージョンを選びます。アプリはバージョン別CLIパスを明示し、DB作成・SQL投入・ファイル転送より前にPHPとWP-CLIを事前検査します。
+
 初回セットアップ欄は、選択中の保存済みプロジェクトのサイト種類に応じて表示します。WordPressでは専用ウィザード、Laravelでは初回配置の手順と手動確認事項を表示し、独自PHPまたは未保存の手動設定では表示しません。Laravel専用の自動配置、`.env`生成、`artisan migrate`、キャッシュ生成はまだ実行しません。
 
 `.gitignore`、`.github/`、`compose.yaml`、`docker-compose.yaml`、`Dockerfile`、プロジェクト直下の`README*`・`docs/`・`tests/`、IDE設定、`.env`、秘密鍵、`node_modules/`などは既定で転送対象から除外します。WordPress新規セットアップではコアを必須転送し、`wp-content/`配下はウィザードで選択できます。
@@ -82,7 +84,7 @@ pwsh -File scripts/build-app.ps1
 pwsh -File scripts/build-app.ps1 -BuildInstaller
 ```
 
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.8.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.1.9.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
 
 ## Linuxアプリのビルド
 

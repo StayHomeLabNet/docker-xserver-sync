@@ -52,6 +52,7 @@ class WordPressSetupRequest:
     database_mode: str = "api"
     existing_db_name: str = ""
     existing_db_user: str = ""
+    php_cli_version: str = "8.3"
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,8 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
         raise WordPressSetupError("Invalid database host")
     if not _TABLE_PREFIX_RE.fullmatch(request.table_prefix):
         raise WordPressSetupError("Invalid WordPress table prefix")
+    if not re.fullmatch(r"8\.[0-5]", request.php_cli_version):
+        raise WordPressSetupError("WP-CLI用PHPバージョンが正しくありません")
     if request.include_paths is not None and not request.include_paths:
         raise WordPressSetupError("At least one WordPress file must be selected")
     for label, value in (("old URL", request.old_url), ("new URL", request.new_url)):
@@ -290,9 +293,24 @@ class WordPressSetupEngine:
             ssh_client, "command -v mysql || command -v mariadb"
         ).splitlines()[0]
         wp_bin = ""
+        php_bin = f"/usr/bin/php{request.php_cli_version}"
         if request.old_url.rstrip("/") != request.new_url.rstrip("/"):
-            report(3, "XServerのWP-CLIを確認中")
+            report(3, f"XServerのPHP {request.php_cli_version}とWP-CLIを確認中")
+            php_version = _run_remote(
+                ssh_client,
+                f"test -x {shlex.quote(php_bin)} && "
+                f"{shlex.quote(php_bin)} -r 'echo PHP_VERSION;'",
+            )
+            if not php_version.startswith(request.php_cli_version + "."):
+                raise WordPressSetupError(
+                    f"WP-CLI用PHPの確認に失敗しました: "
+                    f"指定 {request.php_cli_version}, 検出 {php_version or '不明'}"
+                )
             wp_bin = _run_remote(ssh_client, "command -v wp").splitlines()[0]
+            _run_remote(
+                ssh_client,
+                f"{shlex.quote(php_bin)} {shlex.quote(wp_bin)} --info",
+            )
 
         if uses_api:
             assert api is not None
@@ -331,7 +349,9 @@ class WordPressSetupEngine:
         sql_remote = f"{work_dir}/database.sql"
         cnf_remote = f"{work_dir}/mysql.cnf"
         import_started = False
+        import_completed = False
         files_transfer_started = False
+        files_transfer_completed = False
         try:
             _mkdir_private(sftp, work_dir, base=f"/home/{ssh_username}")
             cnf = (
@@ -399,6 +419,7 @@ class WordPressSetupEngine:
             table_count = int(count_output.strip() or "0")
             if table_count < 1:
                 raise WordPressSetupError("SQL import completed but no tables were found")
+            import_completed = True
 
             report(8, "WordPressファイルを転送する準備中")
             files_transfer_started = True
@@ -450,12 +471,14 @@ class WordPressSetupEngine:
                 rename(config_temp, destination)
             else:
                 sftp.rename(config_temp, destination)
+            files_transfer_completed = True
 
             url_replaced = request.old_url.rstrip("/") != request.new_url.rstrip("/")
             if url_replaced:
                 report(9, "WordPressのURLをシリアライズ対応で置換中")
                 search_command = " ".join(
                     (
+                        shlex.quote(php_bin),
                         shlex.quote(wp_bin),
                         "search-replace",
                         shlex.quote(request.old_url.rstrip("/")),
@@ -493,11 +516,18 @@ class WordPressSetupEngine:
                 recovery = (
                     f"作成済みDB {db_name} は削除・初期化していません。"
                 )
-                if import_started:
+                if import_completed:
+                    recovery += "SQLインポートは完了しています。"
+                elif import_started:
                     recovery += "SQLが途中まで入っている可能性があります。"
                 else:
                     recovery += "SQLインポートは開始していません。"
-            if files_transfer_started:
+            if files_transfer_completed:
+                recovery += (
+                    "WordPressファイルとwp-config.phpの配置は"
+                    "完了しています。"
+                )
+            elif files_transfer_started:
                 recovery += (
                     "WordPressファイルが公開先へ一部配置された可能性があります。"
                     "再実行前に公開先を確認してください。"

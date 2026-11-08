@@ -227,12 +227,24 @@ class WordPressSetupWizard(QWizard):
         self.old_url_edit = QLineEdit("http://localhost")
         self.new_url_edit = QLineEdit(f"https://{self.project.domain}")
         self.prefix_edit = QLineEdit("wp_")
+        self.php_cli_version_combo = QComboBox()
+        for version in ("8.5", "8.4", "8.3", "8.2", "8.1", "8.0"):
+            label = f"PHP {version}"
+            if version == "8.3":
+                label += "（推奨）"
+            self.php_cli_version_combo.addItem(label, version)
+        self.php_cli_version_combo.setCurrentIndex(
+            self.php_cli_version_combo.findData("8.3")
+        )
         form.addRow("ローカルURL", self.old_url_edit)
         form.addRow("XServerのURL", self.new_url_edit)
         form.addRow("テーブル接頭辞", self.prefix_edit)
+        form.addRow("WP-CLI用PHP", self.php_cli_version_combo)
         warning = QLabel(
             "URLが異なる場合、XServerのSSH環境でWP-CLIが使えなければ"
-            "セットアップを停止します。単純なSQL文字列置換は行いません。"
+            "セットアップを停止します。WP-CLI用PHPは、"
+            "XServerの「PHP Ver.切替」で対象ドメインに設定した"
+            "バージョンと合わせてください。単純なSQL文字列置換は行いません。"
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #9a6700;")
@@ -383,6 +395,7 @@ class WordPressSetupWizard(QWizard):
             database_mode=str(self.database_mode_combo.currentData()),
             existing_db_name=self.existing_db_name_edit.text().strip(),
             existing_db_user=self.existing_db_user_edit.text().strip(),
+            php_cli_version=str(self.php_cli_version_combo.currentData()),
             include_paths=tuple(
                 sorted(
                     self._mandatory_paths
