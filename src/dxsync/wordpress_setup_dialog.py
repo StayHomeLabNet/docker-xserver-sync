@@ -80,7 +80,7 @@ class WordPressSetupWizard(QWizard):
         )
         self.resume_existing_check.setToolTip(
             "DBテーブル、WordPressコア、wp-config.phpを検査し、"
-            "SQLインポートとファイル転送を繰り返さずURL置換から再開します"
+            "完了済みの工程を繰り返さず再開します"
         )
         self.resume_existing_check.toggled.connect(self._resume_mode_changed)
         form.addRow("実行モード", self.resume_existing_check)
@@ -96,21 +96,22 @@ class WordPressSetupWizard(QWizard):
         self.sql_edit.setPlaceholderText("mysqldumpで出力した.sqlファイル")
         sql_row = QHBoxLayout()
         sql_row.addWidget(self.sql_edit, 1)
-        sql_button = QPushButton("SQLを選択…")
-        sql_button.clicked.connect(self._browse_sql)
-        sql_row.addWidget(sql_button)
+        self.sql_button = QPushButton("SQLを選択…")
+        self.sql_button.clicked.connect(self._browse_sql)
+        sql_row.addWidget(self.sql_button)
         form.addRow("SQLダンプ", sql_row)
-        note = QLabel(
+        self.sql_note = QLabel(
             "現在の版ではSQLダンプを選択します。"
             "Docker DBの自動検出とダンプは次の実装単位で追加します。"
         )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #57606a;")
-        form.addRow("", note)
+        self.sql_note.setWordWrap(True)
+        self.sql_note.setStyleSheet("color: #57606a;")
+        form.addRow("", self.sql_note)
         self.addPage(page)
 
     def _resume_mode_changed(self, enabled: bool) -> None:
-        self.sql_edit.setEnabled(not enabled)
+        self.sql_edit.setEnabled(True)
+        self.sql_button.setEnabled(True)
         if enabled:
             self.database_mode_combo.setCurrentIndex(
                 self.database_mode_combo.findData("existing")
@@ -119,11 +120,19 @@ class WordPressSetupWizard(QWizard):
             self.remote_wp_config_check.setChecked(True)
             self.caution_label.setText(
                 "配置済みのDBとWordPressファイルを読み取り検査し、"
-                "SQLインポートとファイル転送は行わずURL置換以降を再開します。"
+                "完了済みの工程を飛ばして再開します。"
+            )
+            self.sql_note.setText(
+                "再開時のSQLダンプは任意です。DBが空と確認された"
+                "場合だけ復旧に使用し、既存テーブルがあれば読み込みません。"
             )
         else:
             self.database_mode_combo.setEnabled(True)
             self.remote_wp_config_check.setChecked(False)
+            self.sql_note.setText(
+                "現在の版ではSQLダンプを選択します。"
+                "Docker DBの自動検出とダンプは次の実装単位で追加します。"
+            )
         self._database_mode_changed()
 
     def _add_selection_page(self) -> None:
@@ -393,7 +402,8 @@ class WordPressSetupWizard(QWizard):
         if self.resume_existing_check.isChecked():
             self.caution_label.setText(
                 "配置済みのDBとWordPressファイルを検査し、"
-                "SQLインポートとファイル転送をスキップしてURL置換以降を再開します。"
+                "完了済みの工程をスキップします。"
+                "DBが空でSQLが選択済みの場合だけ復旧します。"
             )
         elif self.uses_xserver_api:
             self.caution_label.setText(
@@ -500,6 +510,10 @@ class WordPressSetupWizard(QWizard):
             use_remote_wp_config=(
                 self.resume_existing_check.isChecked()
                 and self.remote_wp_config_check.isChecked()
+            ),
+            import_sql_if_database_empty=(
+                self.resume_existing_check.isChecked()
+                and bool(self.sql_edit.text().strip())
             ),
         )
 

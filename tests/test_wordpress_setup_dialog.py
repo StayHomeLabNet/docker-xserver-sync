@@ -177,7 +177,14 @@ def test_resume_defaults_to_remote_wp_config(tmp_path: Path) -> None:
     assert not wizard.existing_db_name_edit.isEnabled()
     assert not wizard.existing_db_user_edit.isEnabled()
     assert not wizard.db_password_edit.isEnabled()
+    assert wizard.sql_edit.isEnabled()
+    assert "DBが空" in wizard.sql_note.text()
     assert "DBパスワードをアプリへ読み出さず" in (
         wizard.database_instructions.text()
     )
+
+    sql = tmp_path / "site.sql"
+    sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
+    wizard.sql_edit.setText(str(sql))
+    assert wizard.request_value().import_sql_if_database_empty
     wizard.close()

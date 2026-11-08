@@ -1419,6 +1419,9 @@ class MainWindow(QMainWindow):
                 "resumable": True,
                 "resume_existing": request.resume_existing,
                 "use_remote_wp_config": request.use_remote_wp_config,
+                "import_sql_if_database_empty": (
+                    request.import_sql_if_database_empty
+                ),
                 "database_mode": request.database_mode,
                 "database": request.existing_db_name,
                 "database_user": request.existing_db_user,

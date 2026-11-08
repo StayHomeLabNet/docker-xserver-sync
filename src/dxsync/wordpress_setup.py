@@ -56,6 +56,7 @@ class WordPressSetupRequest:
     php_cli_version: str = "8.3"
     resume_existing: bool = False
     use_remote_wp_config: bool = False
+    import_sql_if_database_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,20 @@ _FULL_DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _TABLE_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
+def _validate_sql_dump(path: Path) -> None:
+    dump = path.expanduser().resolve()
+    if not dump.is_file() or dump.stat().st_size == 0:
+        raise WordPressSetupError("A non-empty SQL dump file is required")
+    dangerous_sql = re.compile(rb"^\s*(?:CREATE|DROP)\s+DATABASE\b|^\s*USE\s+", re.I)
+    with dump.open("rb") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if dangerous_sql.search(line):
+                raise WordPressSetupError(
+                    "SQL dump contains a forbidden database-level statement "
+                    f"at line {line_number}"
+                )
+
+
 def validate_setup_request(request: WordPressSetupRequest) -> None:
     root = request.local_root.expanduser().resolve()
     if not root.is_dir():
@@ -80,17 +95,8 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
     for required in ("wp-admin", "wp-includes", "wp-content", "wp-load.php"):
         if not (root / required).exists():
             raise WordPressSetupError(f"WordPress file or directory is missing: {required}")
-    if not request.resume_existing:
-        dump = request.sql_dump.expanduser().resolve()
-        if not dump.is_file() or dump.stat().st_size == 0:
-            raise WordPressSetupError("A non-empty SQL dump file is required")
-        dangerous_sql = re.compile(rb"^\s*(?:CREATE|DROP)\s+DATABASE\b|^\s*USE\s+", re.I)
-        with dump.open("rb") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if dangerous_sql.search(line):
-                    raise WordPressSetupError(
-                        f"SQL dump contains a forbidden database-level statement at line {line_number}"
-                    )
+    if not request.resume_existing or request.import_sql_if_database_empty:
+        _validate_sql_dump(request.sql_dump)
     normalize_remote_root(request.remote_root)
     if not request.domain.strip() or "/" in request.domain:
         raise WordPressSetupError("Invalid target domain")
@@ -100,6 +106,8 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
         raise WordPressSetupError("再開時は作成済みDBの完全な名前を指定してください")
     if request.use_remote_wp_config and not request.resume_existing:
         raise WordPressSetupError("wp-config.phpのDB接続情報は再開時だけ使用できます")
+    if request.import_sql_if_database_empty and not request.resume_existing:
+        raise WordPressSetupError("DBが空の場合のSQL復旧は再開時だけ使用できます")
     if request.database_mode == "api":
         for label, value in (
             ("database suffix", request.db_name_suffix),
@@ -412,6 +420,34 @@ class WordPressSetupEngine:
         config_file_count = 0
         try:
             _mkdir_private(sftp, work_dir, base=f"/home/{ssh_username}")
+
+            def transfer_sql_dump() -> None:
+                sql_path = request.sql_dump.expanduser().resolve()
+                sql_size = sql_path.stat().st_size
+                sql_transferred = 0
+                report(
+                    6,
+                    "SQLダンプを暗号化通信で転送中",
+                    current=0,
+                    total=sql_size,
+                    unit="bytes",
+                )
+                with sql_path.open("rb") as reader, sftp.open(
+                    sql_remote, "wb"
+                ) as writer:
+                    while chunk := reader.read(1024 * 1024):
+                        cancel.raise_if_cancelled()
+                        writer.write(chunk)
+                        sql_transferred += len(chunk)
+                        report(
+                            6,
+                            "SQLダンプを暗号化通信で転送中",
+                            current=sql_transferred,
+                            total=sql_size,
+                            unit="bytes",
+                        )
+                sftp.chmod(sql_remote, 0o600)
+
             if uses_remote_config:
                 report(5, "wp-config.phpを使って対象DBを確認中")
                 preflight_command = " ".join(
@@ -459,10 +495,51 @@ class WordPressSetupEngine:
                     except OSError:
                         missing_remote.append(PurePosixPath(path).name)
                 if existing_table_count < 1:
-                    raise WordPressSetupError(
-                        "再開に必要な配置済みWordPressを確認できません。"
-                        f" DBテーブル: {existing_table_count}, "
-                        f"不足: {', '.join(missing_remote) or 'なし'}"
+                    if not request.import_sql_if_database_empty:
+                        raise WordPressSetupError(
+                            "配置先のDBは空です（DBテーブル: 0）。"
+                            "再開ウィザードで元のSQLダンプを選択すると、"
+                            "DBが空であることを再確認してから復旧します。"
+                            f" WordPressファイル不足: "
+                            f"{', '.join(missing_remote) or 'なし'}"
+                        )
+                    cancel.raise_if_cancelled()
+                    transfer_sql_dump()
+                    if uses_remote_config:
+                        import_command = " ".join(
+                            (
+                                shlex.quote(php_bin),
+                                shlex.quote(wp_bin),
+                                "db import",
+                                shlex.quote(sql_remote),
+                                "--path=" + shlex.quote(remote_root),
+                            )
+                        )
+                    else:
+                        import_command = (
+                            f"{shlex.quote(mysql_bin)} "
+                            f"--defaults-extra-file={shlex.quote(cnf_remote)} "
+                            f"{shlex.quote(db_name)} < {shlex.quote(sql_remote)}"
+                        )
+                    report(7, "空のDBへSQLを復旧中")
+                    import_started = True
+                    _run_remote(ssh_client, import_command)
+                    existing_table_count = int(
+                        _run_remote(ssh_client, preflight_command) or "0"
+                    )
+                    if existing_table_count < 1:
+                        raise WordPressSetupError(
+                            "SQL復旧後もDBテーブルを確認できません"
+                        )
+                    import_completed = True
+                    checkpoint(
+                        {
+                            "stage": "sql_imported",
+                            "database": db_name,
+                            "database_user": db_user,
+                            "table_count": existing_table_count,
+                            "resume_existing": True,
+                        }
                     )
                 table_count = existing_table_count
                 import_completed = True
@@ -487,30 +564,7 @@ class WordPressSetupEngine:
 
             if not request.resume_existing:
                 cancel.raise_if_cancelled()
-                sql_size = request.sql_dump.expanduser().resolve().stat().st_size
-                sql_transferred = 0
-                report(
-                    6,
-                    "SQLダンプを暗号化通信で転送中",
-                    current=0,
-                    total=sql_size,
-                    unit="bytes",
-                )
-                with request.sql_dump.expanduser().resolve().open("rb") as reader, sftp.open(
-                    sql_remote, "wb"
-                ) as writer:
-                    while chunk := reader.read(1024 * 1024):
-                        cancel.raise_if_cancelled()
-                        writer.write(chunk)
-                        sql_transferred += len(chunk)
-                        report(
-                            6,
-                            "SQLダンプを暗号化通信で転送中",
-                            current=sql_transferred,
-                            total=sql_size,
-                            unit="bytes",
-                        )
-                sftp.chmod(sql_remote, 0o600)
+                transfer_sql_dump()
 
                 import_command = (
                     f"{shlex.quote(mysql_bin)} --defaults-extra-file={shlex.quote(cnf_remote)} "
