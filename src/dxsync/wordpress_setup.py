@@ -55,6 +55,7 @@ class WordPressSetupRequest:
     existing_db_user: str = ""
     php_cli_version: str = "8.3"
     resume_existing: bool = False
+    use_remote_wp_config: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,8 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
         raise WordPressSetupError("DBの準備方法が正しくありません")
     if request.resume_existing and request.database_mode != "existing":
         raise WordPressSetupError("再開時は作成済みDBの完全な名前を指定してください")
+    if request.use_remote_wp_config and not request.resume_existing:
+        raise WordPressSetupError("wp-config.phpのDB接続情報は再開時だけ使用できます")
     if request.database_mode == "api":
         for label, value in (
             ("database suffix", request.db_name_suffix),
@@ -106,7 +109,7 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
                 raise WordPressSetupError(
                     f"Invalid {label}; use letters, numbers, and underscores"
                 )
-    else:
+    elif not request.use_remote_wp_config:
         for label, value in (
             ("作成済みDB名", request.existing_db_name),
             ("作成済みDBユーザー", request.existing_db_user),
@@ -116,11 +119,14 @@ def validate_setup_request(request: WordPressSetupRequest) -> None:
                     f"{label}が正しくありません。"
                     "サーバーパネルに表示された完全な名前を入力してください"
                 )
-    if len(request.db_password) < 8:
+    if not request.use_remote_wp_config and len(request.db_password) < 8:
         raise WordPressSetupError("Database password must contain at least 8 characters")
     if "\n" in request.db_password or "\r" in request.db_password:
         raise WordPressSetupError("Database password contains a forbidden newline")
-    if not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]{1,5})?", request.db_host):
+    if (
+        not request.use_remote_wp_config
+        and not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]{1,5})?", request.db_host)
+    ):
         raise WordPressSetupError("Invalid database host")
     if not _TABLE_PREFIX_RE.fullmatch(request.table_prefix):
         raise WordPressSetupError("Invalid WordPress table prefix")
@@ -298,14 +304,27 @@ class WordPressSetupEngine:
                 "Remote root is not empty; setup stopped: " + ", ".join(unexpected[:10])
             )
 
-        report(3, "XServerのMySQLコマンドを確認中")
+        uses_remote_config = request.resume_existing and request.use_remote_wp_config
+        if uses_remote_config and "wp-config.php" not in entries:
+            raise WordPressSetupError(
+                "公開先にwp-config.phpがありません。"
+                "「配置済みwp-config.phpのDB接続情報を使用」を解除し、"
+                "XServerのDB接続情報を入力してください"
+            )
+
         cancel.raise_if_cancelled()
-        mysql_bin = _run_remote(
-            ssh_client, "command -v mysql || command -v mariadb"
-        ).splitlines()[0]
+        mysql_bin = ""
+        if not uses_remote_config:
+            report(3, "XServerのMySQLコマンドを確認中")
+            mysql_bin = _run_remote(
+                ssh_client, "command -v mysql || command -v mariadb"
+            ).splitlines()[0]
         wp_bin = ""
         php_bin = f"/usr/bin/php{request.php_cli_version}"
-        if request.old_url.rstrip("/") != request.new_url.rstrip("/"):
+        if (
+            request.old_url.rstrip("/") != request.new_url.rstrip("/")
+            or uses_remote_config
+        ):
             report(3, f"XServerのPHP {request.php_cli_version}とWP-CLIを確認中")
             php_version = _run_remote(
                 ssh_client,
@@ -350,6 +369,24 @@ class WordPressSetupEngine:
                 ) from exc
             db_name = database.db_name
             db_user = user.db_user
+        elif uses_remote_config:
+            report(4, "配置済みwp-config.phpのDB接続情報を確認中")
+            config_command = (
+                f"{shlex.quote(php_bin)} {shlex.quote(wp_bin)} config get {{name}} "
+                f"--type=constant --path={shlex.quote(remote_root)}"
+            )
+            db_name = _run_remote(
+                ssh_client, config_command.format(name="DB_NAME")
+            ).strip()
+            db_user = _run_remote(
+                ssh_client, config_command.format(name="DB_USER")
+            ).strip()
+            if not _FULL_DB_NAME_RE.fullmatch(db_name) or not _FULL_DB_NAME_RE.fullmatch(
+                db_user
+            ):
+                raise WordPressSetupError(
+                    "wp-config.phpからDB名またはDBユーザーを確認できません"
+                )
         else:
             db_name = expected_db
             db_user = expected_user
@@ -371,23 +408,40 @@ class WordPressSetupEngine:
         import_completed = False
         files_transfer_started = False
         files_transfer_completed = False
+        config_size = 0
+        config_file_count = 0
         try:
             _mkdir_private(sftp, work_dir, base=f"/home/{ssh_username}")
-            cnf = (
-                "[client]\n"
-                f"host={_mysql_option_value(request.db_host)}\n"
-                f"user={_mysql_option_value(db_user)}\n"
-                f"password={_mysql_option_value(request.db_password)}\n"
-                "default-character-set=utf8mb4\n"
-            ).encode("utf-8")
-            _upload_bytes(sftp, cnf_remote, cnf)
-
-            preflight_command = (
-                f"{shlex.quote(mysql_bin)} --defaults-extra-file={shlex.quote(cnf_remote)} "
-                f"-Nse 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = "
-                f"DATABASE()' {shlex.quote(db_name)}"
-            )
-            report(5, "対象データベースが空であることを確認中")
+            if uses_remote_config:
+                report(5, "wp-config.phpを使って対象DBを確認中")
+                preflight_command = " ".join(
+                    (
+                        shlex.quote(php_bin),
+                        shlex.quote(wp_bin),
+                        "db query",
+                        shlex.quote(
+                            "SELECT COUNT(*) FROM information_schema.tables "
+                            "WHERE table_schema = DATABASE()"
+                        ),
+                        "--skip-column-names",
+                        "--path=" + shlex.quote(remote_root),
+                    )
+                )
+            else:
+                cnf = (
+                    "[client]\n"
+                    f"host={_mysql_option_value(request.db_host)}\n"
+                    f"user={_mysql_option_value(db_user)}\n"
+                    f"password={_mysql_option_value(request.db_password)}\n"
+                    "default-character-set=utf8mb4\n"
+                ).encode("utf-8")
+                _upload_bytes(sftp, cnf_remote, cnf)
+                preflight_command = (
+                    f"{shlex.quote(mysql_bin)} --defaults-extra-file={shlex.quote(cnf_remote)} "
+                    f"-Nse 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = "
+                    f"DATABASE()' {shlex.quote(db_name)}"
+                )
+                report(5, "対象データベースが空であることを確認中")
             existing_table_count = int(
                 _run_remote(ssh_client, preflight_command) or "0"
             )
@@ -527,6 +581,8 @@ class WordPressSetupEngine:
                     db_host=request.db_host,
                     table_prefix=request.table_prefix,
                 )
+                config_size = len(config)
+                config_file_count = 1
                 config_temp = f"{remote_root}/wp-config.php.dxsync-{token}.tmp"
                 _upload_bytes(sftp, config_temp, config, 0o600)
                 destination = f"{remote_root}/wp-config.php"
@@ -552,7 +608,14 @@ class WordPressSetupEngine:
                 files_transfer_started = True
 
                 def resumed_file_started(current: int, total: int, path: str) -> None:
-                    report(8, "WordPressファイルを再転送中", current=current, total=total, unit="files", detail=path)
+                    report(
+                        8,
+                        "WordPressファイルを再転送中",
+                        current=current,
+                        total=total,
+                        unit="files",
+                        detail=path,
+                    )
 
                 transfer = ForceOverwriteEngine().overwrite(
                     sftp=sftp,
@@ -565,22 +628,27 @@ class WordPressSetupEngine:
                     progress_callback=resumed_file_started,
                     file_started_callback=resumed_file_started,
                 )
-                report(9, "wp-config.phpを生成・配置中")
-                config = generate_wp_config(
-                    db_name=db_name,
-                    db_user=db_user,
-                    db_password=request.db_password,
-                    db_host=request.db_host,
-                    table_prefix=request.table_prefix,
-                )
-                config_temp = f"{remote_root}/wp-config.php.dxsync-{token}.tmp"
-                _upload_bytes(sftp, config_temp, config, 0o600)
-                destination = f"{remote_root}/wp-config.php"
-                rename = getattr(sftp, "posix_rename", None)
-                if callable(rename):
-                    rename(config_temp, destination)
+                if uses_remote_config:
+                    report(9, "配置済みwp-config.phpを保持中")
                 else:
-                    sftp.rename(config_temp, destination)
+                    report(9, "wp-config.phpを生成・配置中")
+                    config = generate_wp_config(
+                        db_name=db_name,
+                        db_user=db_user,
+                        db_password=request.db_password,
+                        db_host=request.db_host,
+                        table_prefix=request.table_prefix,
+                    )
+                    config_size = len(config)
+                    config_file_count = 1
+                    config_temp = f"{remote_root}/wp-config.php.dxsync-{token}.tmp"
+                    _upload_bytes(sftp, config_temp, config, 0o600)
+                    destination = f"{remote_root}/wp-config.php"
+                    rename = getattr(sftp, "posix_rename", None)
+                    if callable(rename):
+                        rename(config_temp, destination)
+                    else:
+                        sftp.rename(config_temp, destination)
                 files_transfer_completed = True
                 checkpoint(
                     {
@@ -629,8 +697,16 @@ class WordPressSetupEngine:
             return WordPressSetupResult(
                 db_name=db_name,
                 db_user=db_user,
-                transferred_files=(0 if transfer is None else len(transfer.files) + 1),
-                transferred_bytes=(0 if transfer is None else transfer.total_bytes + len(config)),
+                transferred_files=(
+                    0
+                    if transfer is None
+                    else len(transfer.files) + config_file_count
+                ),
+                transferred_bytes=(
+                    0
+                    if transfer is None
+                    else transfer.total_bytes + config_size
+                ),
                 table_count=table_count,
                 url_replaced=url_replaced,
             )

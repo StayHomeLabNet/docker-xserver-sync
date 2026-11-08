@@ -144,3 +144,40 @@ def test_wordpress_setup_wizard_supports_existing_database_without_api(
     assert "アクセス権" in warnings[-1]
     assert wizard.result() == 0
     wizard.close()
+
+
+def test_resume_defaults_to_remote_wp_config(tmp_path: Path) -> None:
+    app()
+    for directory in ("wp-admin", "wp-includes", "wp-content"):
+        (tmp_path / directory).mkdir()
+    (tmp_path / "wp-load.php").write_text("<?php", encoding="utf-8")
+    mapping = SyncMapping.create(
+        "WordPress",
+        str(tmp_path),
+        "/home/sample/example.com/public_html",
+    )
+    project = Project.create(
+        name="Example",
+        site_type=SiteType.WORDPRESS,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference="/tmp/test.key",
+        mappings=(mapping,),
+    )
+
+    wizard = WordPressSetupWizard(
+        project, mapping, resume_existing=True
+    )
+    value = wizard.request_value()
+
+    assert value.resume_existing
+    assert value.use_remote_wp_config
+    assert not wizard.existing_db_name_edit.isEnabled()
+    assert not wizard.existing_db_user_edit.isEnabled()
+    assert not wizard.db_password_edit.isEnabled()
+    assert "DBパスワードをアプリへ読み出さず" in (
+        wizard.database_instructions.text()
+    )
+    wizard.close()

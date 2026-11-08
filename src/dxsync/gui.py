@@ -1418,6 +1418,7 @@ class MainWindow(QMainWindow):
             details={
                 "resumable": True,
                 "resume_existing": request.resume_existing,
+                "use_remote_wp_config": request.use_remote_wp_config,
                 "database_mode": request.database_mode,
                 "database": request.existing_db_name,
                 "database_user": request.existing_db_user,

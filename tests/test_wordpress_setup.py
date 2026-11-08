@@ -73,6 +73,24 @@ def test_resume_validation_rejects_api_database_mode(tmp_path: Path) -> None:
         validate_setup_request(value)
 
 
+def test_resume_validation_accepts_remote_wp_config_without_db_credentials(
+    tmp_path: Path,
+) -> None:
+    make_wordpress(tmp_path)
+    value = replace(
+        request(tmp_path, tmp_path / "missing.sql"),
+        resume_existing=True,
+        use_remote_wp_config=True,
+        database_mode="existing",
+        existing_db_name="",
+        existing_db_user="",
+        db_password="",
+        db_host="",
+    )
+
+    validate_setup_request(value)
+
+
 def test_validate_setup_request_rejects_unsupported_php_cli_version(
     tmp_path: Path,
 ) -> None:
@@ -402,6 +420,153 @@ def test_setup_engine_uses_existing_empty_database_without_api(
     assert result.db_user == "sample_user"
     assert result.table_count == 3
     assert any("sample_existing" in command for command in commands)
+
+
+def test_resume_uses_remote_wp_config_without_exporting_password(
+    tmp_path: Path, monkeypatch
+) -> None:
+    make_wordpress(tmp_path)
+    commands: list[str] = []
+
+    def fake_run_remote(_client, command: str) -> str:
+        commands.append(command)
+        if "test -x /usr/bin/php8.3" in command:
+            return "8.3.29"
+        if "command -v wp" in command:
+            return "/usr/local/bin/wp"
+        if "config get DB_NAME" in command:
+            return "sample_existing"
+        if "config get DB_USER" in command:
+            return "sample_user"
+        if "db query" in command and "information_schema.tables" in command:
+            return "12"
+        return ""
+
+    class Item:
+        filename = "wp-config.php"
+
+    class Sftp:
+        def listdir_attr(self, _path):
+            return [Item()]
+
+        def stat(self, _path):
+            return object()
+
+        def remove(self, _path):
+            pass
+
+        def rmdir(self, _path):
+            pass
+
+    monkeypatch.setattr("dxsync.wordpress_setup._run_remote", fake_run_remote)
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._mkdir_private", lambda *_args, **_kwargs: None
+    )
+    setup_request = replace(
+        request(tmp_path, tmp_path / "missing.sql"),
+        resume_existing=True,
+        use_remote_wp_config=True,
+        database_mode="existing",
+        existing_db_name="",
+        existing_db_user="",
+        db_password="",
+        db_host="",
+    )
+
+    result = WordPressSetupEngine().setup(
+        request=setup_request,
+        api=None,
+        ssh_client=object(),
+        sftp=Sftp(),
+        ssh_username="sample",
+    )
+
+    assert result.db_name == "sample_existing"
+    assert result.db_user == "sample_user"
+    assert result.table_count == 12
+    assert not any("command -v mysql" in command for command in commands)
+    assert any("config get DB_NAME" in command for command in commands)
+    assert any("db query" in command for command in commands)
+
+
+def test_resume_partial_transfer_preserves_remote_wp_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    make_wordpress(tmp_path)
+    commands: list[str] = []
+    messages: list[str] = []
+
+    def fake_run_remote(_client, command: str) -> str:
+        commands.append(command)
+        if "test -x /usr/bin/php8.3" in command:
+            return "8.3.29"
+        if "command -v wp" in command:
+            return "/usr/local/bin/wp"
+        if "config get DB_NAME" in command:
+            return "sample_existing"
+        if "config get DB_USER" in command:
+            return "sample_user"
+        if "db query" in command:
+            return "12"
+        return ""
+
+    class Item:
+        filename = "wp-config.php"
+
+    class Sftp:
+        def listdir_attr(self, _path):
+            return [Item()]
+
+        def stat(self, path):
+            if path.endswith("/wp-load.php"):
+                raise FileNotFoundError(path)
+            return object()
+
+        def remove(self, _path):
+            pass
+
+        def rmdir(self, _path):
+            pass
+
+    monkeypatch.setattr("dxsync.wordpress_setup._run_remote", fake_run_remote)
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._mkdir_private", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup._upload_bytes",
+        lambda *_args, **_kwargs: pytest.fail("wp-config.php must not be replaced"),
+    )
+    monkeypatch.setattr(
+        "dxsync.wordpress_setup.ForceOverwriteEngine.overwrite",
+        lambda *_args, **_kwargs: ForceOverwriteResult(
+            remote_root="/home/sample/example.com/public_html",
+            files=("wp-load.php",),
+            total_bytes=5,
+        ),
+    )
+    setup_request = replace(
+        request(tmp_path, tmp_path / "missing.sql"),
+        resume_existing=True,
+        use_remote_wp_config=True,
+        database_mode="existing",
+        existing_db_name="",
+        existing_db_user="",
+        db_password="",
+        db_host="",
+    )
+
+    result = WordPressSetupEngine().setup(
+        request=setup_request,
+        api=None,
+        ssh_client=object(),
+        sftp=Sftp(),
+        ssh_username="sample",
+        progress_callback=lambda value: messages.append(value.message),
+    )
+
+    assert result.transferred_files == 1
+    assert result.transferred_bytes == 5
+    assert "配置済みwp-config.phpを保持中" in messages
 
 
 def test_setup_engine_rejects_existing_database_with_tables(

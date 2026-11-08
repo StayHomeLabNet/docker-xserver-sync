@@ -116,12 +116,14 @@ class WordPressSetupWizard(QWizard):
                 self.database_mode_combo.findData("existing")
             )
             self.database_mode_combo.setEnabled(False)
+            self.remote_wp_config_check.setChecked(True)
             self.caution_label.setText(
                 "配置済みのDBとWordPressファイルを読み取り検査し、"
                 "SQLインポートとファイル転送は行わずURL置換以降を再開します。"
             )
         else:
             self.database_mode_combo.setEnabled(True)
+            self.remote_wp_config_check.setChecked(False)
         self._database_mode_changed()
 
     def _add_selection_page(self) -> None:
@@ -172,6 +174,14 @@ class WordPressSetupWizard(QWizard):
         self.database_mode_combo.currentIndexChanged.connect(
             self._database_mode_changed
         )
+        self.remote_wp_config_check = QCheckBox(
+            "配置済みwp-config.phpのDB接続情報を使用（推奨）"
+        )
+        self.remote_wp_config_check.setToolTip(
+            "DBパスワードをアプリへ読み出さず、"
+            "XServer内でWP-CLIがwp-config.phpを使ってDBに接続します"
+        )
+        self.remote_wp_config_check.toggled.connect(self._database_mode_changed)
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("xs_...（保存しません）")
@@ -202,6 +212,7 @@ class WordPressSetupWizard(QWizard):
         password_row.addWidget(self.db_password_edit, 1)
         password_row.addWidget(reveal)
         form.addRow("DBの準備方法", self.database_mode_combo)
+        form.addRow("再開時のDB接続", self.remote_wp_config_check)
         form.addRow("XServer APIキー", self.api_key_edit)
         form.addRow("API対象サーバー", self.servername_edit)
         form.addRow("MySQLホスト", self.db_host_edit)
@@ -226,6 +237,13 @@ class WordPressSetupWizard(QWizard):
 
     def _database_mode_changed(self) -> None:
         uses_api = self.uses_xserver_api
+        uses_remote_config = (
+            self.resume_existing_check.isChecked()
+            and self.remote_wp_config_check.isChecked()
+        )
+        self.remote_wp_config_check.setVisible(
+            self.resume_existing_check.isChecked()
+        )
         for editor in (
             self.api_key_edit,
             self.servername_edit,
@@ -241,14 +259,25 @@ class WordPressSetupWizard(QWizard):
                 self.user_suffix_edit,
             ):
                 editor.setEnabled(False)
-        self.existing_db_name_edit.setEnabled(not uses_api)
-        self.existing_db_user_edit.setEnabled(not uses_api)
-        self.existing_db_prepared_check.setVisible(not uses_api)
+        self.existing_db_name_edit.setEnabled(not uses_api and not uses_remote_config)
+        self.existing_db_user_edit.setEnabled(not uses_api and not uses_remote_config)
+        self.db_host_edit.setEnabled(not uses_remote_config)
+        self.db_password_edit.setEnabled(not uses_remote_config)
+        self.existing_db_prepared_check.setVisible(
+            not uses_api and not uses_remote_config
+        )
         if uses_api:
             self.database_instructions.setText(
                 "この方式では、アプリがXServer APIを使って新しいDBと"
                 "MySQLユーザーを作成し、アクセス権を付与します。"
                 "APIキーとDBパスワードは保存しません。"
+            )
+        elif uses_remote_config:
+            self.database_instructions.setText(
+                "公開先のwp-config.phpに設定済みのDB接続情報を、"
+                "XServer内でWP-CLIが使用します。\n"
+                "DBパスワードをアプリへ読み出さず、"
+                "DB名・ユーザー・パスワードの再入力は不要です。"
             )
         else:
             self.database_instructions.setText(
@@ -349,6 +378,11 @@ class WordPressSetupWizard(QWizard):
                 "DB準備: XServer APIで新規作成\n"
                 f"作成DB: {server_id}_{self.db_suffix_edit.text().strip()}\n"
                 f"作成DBユーザー: {server_id}_{self.user_suffix_edit.text().strip()}"
+            )
+        elif self.remote_wp_config_check.isChecked():
+            database_summary = (
+                "DB接続: 配置済みwp-config.phpをXServer内で使用\n"
+                "DBパスワード: アプリへ読み出さない"
             )
         else:
             database_summary = (
@@ -463,6 +497,10 @@ class WordPressSetupWizard(QWizard):
                 )
             ),
             resume_existing=self.resume_existing_check.isChecked(),
+            use_remote_wp_config=(
+                self.resume_existing_check.isChecked()
+                and self.remote_wp_config_check.isChecked()
+            ),
         )
 
     def accept(self) -> None:
@@ -474,6 +512,7 @@ class WordPressSetupWizard(QWizard):
             return
         if (
             not self.uses_xserver_api
+            and not self.remote_wp_config_check.isChecked()
             and not self.existing_db_prepared_check.isChecked()
         ):
             QMessageBox.warning(
