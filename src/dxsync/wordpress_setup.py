@@ -67,6 +67,10 @@ class WordPressSetupResult:
     transferred_bytes: int
     table_count: int
     url_replaced: bool
+    public_url: str
+    detected_home_url: str
+    detected_site_url: str
+    replaced_urls: tuple[str, ...]
 
 
 _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
@@ -329,26 +333,22 @@ class WordPressSetupEngine:
             ).splitlines()[0]
         wp_bin = ""
         php_bin = f"/usr/bin/php{request.php_cli_version}"
-        if (
-            request.old_url.rstrip("/") != request.new_url.rstrip("/")
-            or uses_remote_config
-        ):
-            report(3, f"XServerのPHP {request.php_cli_version}とWP-CLIを確認中")
-            php_version = _run_remote(
-                ssh_client,
-                f"test -x {shlex.quote(php_bin)} && "
-                f"{shlex.quote(php_bin)} -r 'echo PHP_VERSION;'",
+        report(3, f"XServerのPHP {request.php_cli_version}とWP-CLIを確認中")
+        php_version = _run_remote(
+            ssh_client,
+            f"test -x {shlex.quote(php_bin)} && "
+            f"{shlex.quote(php_bin)} -r 'echo PHP_VERSION;'",
+        )
+        if not php_version.startswith(request.php_cli_version + "."):
+            raise WordPressSetupError(
+                f"WP-CLI用PHPの確認に失敗しました: "
+                f"指定 {request.php_cli_version}, 検出 {php_version or '不明'}"
             )
-            if not php_version.startswith(request.php_cli_version + "."):
-                raise WordPressSetupError(
-                    f"WP-CLI用PHPの確認に失敗しました: "
-                    f"指定 {request.php_cli_version}, 検出 {php_version or '不明'}"
-                )
-            wp_bin = _run_remote(ssh_client, "command -v wp").splitlines()[0]
-            _run_remote(
-                ssh_client,
-                f"{shlex.quote(php_bin)} {shlex.quote(wp_bin)} --info",
-            )
+        wp_bin = _run_remote(ssh_client, "command -v wp").splitlines()[0]
+        _run_remote(
+            ssh_client,
+            f"{shlex.quote(php_bin)} {shlex.quote(wp_bin)} --info",
+        )
 
         if uses_api:
             assert api is not None
@@ -716,17 +716,63 @@ class WordPressSetupEngine:
                 )
                 cancel.raise_if_cancelled()
 
-            url_replaced = request.old_url.rstrip("/") != request.new_url.rstrip("/")
-            if url_replaced:
+            target_url = request.new_url.rstrip("/")
+
+            def wordpress_option(name: str) -> str:
+                return _run_remote(
+                    ssh_client,
+                    " ".join(
+                        (
+                            shlex.quote(php_bin),
+                            shlex.quote(wp_bin),
+                            "option get",
+                            shlex.quote(name),
+                            "--skip-plugins",
+                            "--skip-themes",
+                            "--path=" + shlex.quote(remote_root),
+                        )
+                    ),
+                ).strip().rstrip("/")
+
+            report(9, "DB内のWordPress URLを確認中")
+            detected_home_url = wordpress_option("home")
+            detected_site_url = wordpress_option("siteurl")
+            for label, value in (
+                ("home", detected_home_url),
+                ("siteurl", detected_site_url),
+            ):
+                parsed = urlparse(value)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    raise WordPressSetupError(
+                        f"WordPressの{label} URLをDBから確認できません: "
+                        f"{value or '空'}"
+                    )
+
+            replaced_urls = tuple(
+                sorted(
+                    {
+                        value
+                        for value in (detected_home_url, detected_site_url)
+                        if value != target_url
+                    },
+                    key=len,
+                    reverse=True,
+                )
+            )
+            for source_url in replaced_urls:
                 cancel.raise_if_cancelled()
-                report(9, "WordPressのURLをシリアライズ対応で置換中")
+                report(
+                    9,
+                    "WordPressのURLをシリアライズ対応で置換中",
+                    detail=f"{source_url} → {target_url}",
+                )
                 search_command = " ".join(
                     (
                         shlex.quote(php_bin),
                         shlex.quote(wp_bin),
                         "search-replace",
-                        shlex.quote(request.old_url.rstrip("/")),
-                        shlex.quote(request.new_url.rstrip("/")),
+                        shlex.quote(source_url),
+                        shlex.quote(target_url),
                         "--all-tables-with-prefix",
                         "--precise",
                         "--skip-columns=guid",
@@ -734,7 +780,31 @@ class WordPressSetupEngine:
                     )
                 )
                 _run_remote(ssh_client, search_command)
+            for option_name in ("home", "siteurl"):
                 cancel.raise_if_cancelled()
+                _run_remote(
+                    ssh_client,
+                    " ".join(
+                        (
+                            shlex.quote(php_bin),
+                            shlex.quote(wp_bin),
+                            "option update",
+                            option_name,
+                            shlex.quote(target_url),
+                            "--skip-plugins",
+                            "--skip-themes",
+                            "--path=" + shlex.quote(remote_root),
+                        )
+                    ),
+                )
+            verified_home_url = wordpress_option("home")
+            verified_site_url = wordpress_option("siteurl")
+            if (verified_home_url, verified_site_url) != (target_url, target_url):
+                raise WordPressSetupError(
+                    "WordPress URLの更新を検証できません: "
+                    f"home={verified_home_url}, siteurl={verified_site_url}"
+                )
+            url_replaced = bool(replaced_urls)
             checkpoint(
                 {
                     "stage": "url_replaced",
@@ -742,6 +812,9 @@ class WordPressSetupEngine:
                     "database_user": db_user,
                     "table_count": table_count,
                     "url_replaced": url_replaced,
+                    "detected_home_url": detected_home_url,
+                    "detected_site_url": detected_site_url,
+                    "public_url": target_url,
                 }
             )
 
@@ -763,6 +836,10 @@ class WordPressSetupEngine:
                 ),
                 table_count=table_count,
                 url_replaced=url_replaced,
+                public_url=target_url,
+                detected_home_url=detected_home_url,
+                detected_site_url=detected_site_url,
+                replaced_urls=replaced_urls,
             )
         except OperationCancelled:
             raise

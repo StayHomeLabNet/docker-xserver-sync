@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlparse
 
 try:
     from PySide6.QtCore import (
@@ -709,7 +710,14 @@ class WordPressSetupWorker(QObject):
                     message="HTTPSでトップページを確認中",
                 )
             )
-            homepage = perform_https_health_check(domain=self.project.domain, path="/")
+            public_url = urlparse(result.public_url)
+            health_domain = public_url.netloc
+            base_path = public_url.path.rstrip("/")
+            homepage_path = f"{base_path}/" or "/"
+            login_path = f"{base_path}/wp-login.php"
+            homepage = perform_https_health_check(
+                domain=health_domain, path=homepage_path
+            )
             self.progress.emit(
                 WordPressSetupProgress(
                     step=10,
@@ -718,7 +726,7 @@ class WordPressSetupWorker(QObject):
                 )
             )
             login = perform_https_health_check(
-                domain=self.project.domain, path="/wp-login.php"
+                domain=health_domain, path=login_path
             )
             self.completed.emit((result, homepage, login))
         except OperationCancelled as exc:
@@ -1581,6 +1589,10 @@ class MainWindow(QMainWindow):
                 "table_count": result.table_count,
                 "homepage_status": homepage.status_code,
                 "login_status": login.status_code,
+                "public_url": result.public_url,
+                "detected_home_url": result.detected_home_url,
+                "detected_site_url": result.detected_site_url,
+                "replaced_urls": list(result.replaced_urls),
             },
             error=None if health_ok else "HTTPS health check failed after setup",
         )
@@ -1595,9 +1607,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "WordPressセットアップ完了",
-                f"https://{self._current_project.domain}/\n"
-                f"https://{self._current_project.domain}/wp-login.php\n\n"
-                f"DB: {result.db_name}\nDBユーザー: {result.db_user}",
+                "WordPressセットアップは正常に完了しました。\n\n"
+                f"トップページ: {homepage.url}\n"
+                f"ログイン画面: {login.url}\n"
+                f"HTTPS確認: トップ {homepage.status_code} / "
+                f"ログイン {login.status_code}\n\n"
+                f"DB: {result.db_name}\n"
+                f"DBユーザー: {result.db_user}\n"
+                f"DBテーブル: {result.table_count}\n"
+                f"今回転送したファイル: {result.transferred_files}\n\n"
+                f"DB内で検出したhome: {result.detected_home_url}\n"
+                f"DB内で検出したsiteurl: {result.detected_site_url}\n"
+                f"最終公開URL: {result.public_url}",
             )
         else:
             self.summary.setText(
@@ -1605,9 +1626,19 @@ class MainWindow(QMainWindow):
             )
             QMessageBox.warning(
                 self,
-                "HTTPS確認が必要です",
-                f"トップ: {homepage.error or homepage.status_code}\n"
-                f"ログイン: {login.error or login.status_code}",
+                "WordPress配置完了・HTTPS確認が必要",
+                "ファイル配置とDB更新は完了しましたが、"
+                "公開URLの動作確認に失敗しました。\n\n"
+                f"トップページ: {homepage.url}\n"
+                f"結果: {homepage.error or homepage.status_code}\n\n"
+                f"ログイン画面: {login.url}\n"
+                f"結果: {login.error or login.status_code}\n\n"
+                f"DB: {result.db_name}\n"
+                f"DBユーザー: {result.db_user}\n"
+                f"DBテーブル: {result.table_count}\n"
+                f"最終公開URL: {result.public_url}\n\n"
+                "上記URL、XServerのドメイン設定、SSL設定を"
+                "確認してください。",
             )
 
     @Slot(str)

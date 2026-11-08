@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import io
+import shlex
 import stat
 from dataclasses import replace
 
@@ -19,6 +20,24 @@ from dxsync.wordpress_setup import (
 )
 from dxsync.force_overwrite import ForceOverwriteResult
 from dxsync.xserver_api import CreatedDatabase, CreatedDatabaseUser
+
+
+def wp_url_command(command: str, state: dict[str, str]) -> str | None:
+    parts = shlex.split(command)
+    if "option" not in parts:
+        return None
+    option_index = parts.index("option")
+    if parts[option_index + 1 : option_index + 3] == ["get", "home"]:
+        return state["home"]
+    if parts[option_index + 1 : option_index + 3] == ["get", "siteurl"]:
+        return state["siteurl"]
+    if parts[option_index + 1 : option_index + 3] == ["update", "home"]:
+        state["home"] = parts[option_index + 3]
+        return "Success"
+    if parts[option_index + 1 : option_index + 3] == ["update", "siteurl"]:
+        state["siteurl"] = parts[option_index + 3]
+        return "Success"
+    return None
 
 
 def make_wordpress(root: Path) -> None:
@@ -263,10 +282,17 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
     class Client:
         commands = []
         table_counts = iter((0, 12))
+        url_state = {
+            "home": "http://localhost:9999",
+            "siteurl": "http://localhost:9999",
+        }
 
         def exec_command(self, command):
             self.commands.append(command)
-            if "command -v mysql" in command:
+            url_output = wp_url_command(command, self.url_state)
+            if url_output is not None:
+                output = url_output.encode()
+            elif "command -v mysql" in command:
                 output = b"/usr/bin/mysql\n"
             elif "test -x /usr/bin/php8.3" in command:
                 output = b"8.3.29"
@@ -321,6 +347,12 @@ def test_setup_engine_creates_empty_database_imports_and_transfers(
     assert result.db_name == "sample_wp"
     assert result.table_count == 12
     assert result.url_replaced
+    assert result.detected_home_url == "http://localhost:9999"
+    assert result.public_url == "https://example.com"
+    assert any(
+        "http://localhost:9999" in command and "search-replace" in command
+        for command in client.commands
+    )
     assert ("grant", "sample_wp_user", "sample_wp") in api.calls
     assert "/home/sample/example.com/public_html/wp-config.php" in sftp.files
     assert any(
@@ -359,9 +391,17 @@ def test_setup_engine_uses_existing_empty_database_without_api(
     sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
     commands: list[str] = []
     table_counts = iter((0, 3))
+    url_state = {"home": "http://localhost", "siteurl": "http://localhost"}
 
     def fake_run_remote(_client, command: str) -> str:
         commands.append(command)
+        url_output = wp_url_command(command, url_state)
+        if url_output is not None:
+            return url_output
+        if "test -x /usr/bin/php8.3" in command:
+            return "8.3.29"
+        if "command -v wp" in command:
+            return "/usr/local/bin/wp"
         if "command -v mysql" in command:
             return "/usr/bin/mysql"
         if "information_schema.tables" in command:
@@ -427,9 +467,13 @@ def test_resume_uses_remote_wp_config_without_exporting_password(
 ) -> None:
     make_wordpress(tmp_path)
     commands: list[str] = []
+    url_state = {"home": "http://localhost", "siteurl": "http://localhost"}
 
     def fake_run_remote(_client, command: str) -> str:
         commands.append(command)
+        url_output = wp_url_command(command, url_state)
+        if url_output is not None:
+            return url_output
         if "test -x /usr/bin/php8.3" in command:
             return "8.3.29"
         if "command -v wp" in command:
@@ -497,9 +541,13 @@ def test_resume_imports_sql_only_when_remote_database_is_empty(
     sql.write_text("CREATE TABLE wp_options (id int);", encoding="utf-8")
     commands: list[str] = []
     table_counts = iter(("0", "12"))
+    url_state = {"home": "http://localhost", "siteurl": "http://localhost"}
 
     def fake_run_remote(_client, command: str) -> str:
         commands.append(command)
+        url_output = wp_url_command(command, url_state)
+        if url_output is not None:
+            return url_output
         if "test -x /usr/bin/php8.3" in command:
             return "8.3.29"
         if "command -v wp" in command:
@@ -625,9 +673,13 @@ def test_resume_partial_transfer_preserves_remote_wp_config(
     make_wordpress(tmp_path)
     commands: list[str] = []
     messages: list[str] = []
+    url_state = {"home": "http://localhost", "siteurl": "http://localhost"}
 
     def fake_run_remote(_client, command: str) -> str:
         commands.append(command)
+        url_output = wp_url_command(command, url_state)
+        if url_output is not None:
+            return url_output
         if "test -x /usr/bin/php8.3" in command:
             return "8.3.29"
         if "command -v wp" in command:
@@ -709,6 +761,10 @@ def test_setup_engine_rejects_existing_database_with_tables(
 
     def fake_run_remote(_client, command: str) -> str:
         commands.append(command)
+        if "test -x /usr/bin/php8.3" in command:
+            return "8.3.29"
+        if "command -v wp" in command:
+            return "/usr/local/bin/wp"
         if "command -v mysql" in command:
             return "/usr/bin/mysql"
         if "information_schema.tables" in command:

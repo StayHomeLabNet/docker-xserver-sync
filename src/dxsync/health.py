@@ -3,12 +3,14 @@ from __future__ import annotations
 import http.client
 from dataclasses import dataclass
 from typing import Callable, Protocol
+from urllib.parse import urljoin, urlparse
 
 
 class HttpResponse(Protocol):
     status: int
 
     def read(self, amount: int | None = None) -> bytes: ...
+    def getheader(self, name: str, default: str | None = None) -> str | None: ...
 
 
 class HttpsConnection(Protocol):
@@ -58,6 +60,17 @@ def perform_https_health_check(
         response = connection.getresponse()
         response.read(1024)
         status = int(response.status)
+        getheader = getattr(response, "getheader", None)
+        location = getheader("Location") if callable(getheader) else None
+        if 300 <= status < 400 and location:
+            redirect_url = urljoin(url, location)
+            if urlparse(redirect_url).netloc != domain:
+                return HealthCheckResult(
+                    url=url,
+                    ok=False,
+                    status_code=status,
+                    error=f"想定外のリダイレクト: {redirect_url}",
+                )
         return HealthCheckResult(
             url=url,
             ok=200 <= status < 400,

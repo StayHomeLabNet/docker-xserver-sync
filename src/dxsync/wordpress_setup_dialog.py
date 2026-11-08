@@ -302,7 +302,9 @@ class WordPressSetupWizard(QWizard):
     def _add_url_page(self) -> None:
         page = QWizardPage()
         page.setTitle("4. URLとWordPress設定")
-        page.setSubTitle("URLが変わる場合はWP-CLIで安全に置換します。")
+        page.setSubTitle(
+            "DB内のhome・siteurlを検出し、WP-CLIで安全に置換します。"
+        )
         form = QFormLayout(page)
         self.old_url_edit = QLineEdit("http://localhost")
         self.new_url_edit = QLineEdit(f"https://{self.project.domain}")
@@ -316,13 +318,17 @@ class WordPressSetupWizard(QWizard):
         self.php_cli_version_combo.setCurrentIndex(
             self.php_cli_version_combo.findData("8.3")
         )
-        form.addRow("ローカルURL", self.old_url_edit)
+        self.old_url_edit.setToolTip(
+            "参考値です。実行時はDB内のhomeとsiteurlを自動検出します"
+        )
+        form.addRow("想定ローカルURL（参考）", self.old_url_edit)
         form.addRow("XServerのURL", self.new_url_edit)
         form.addRow("テーブル接頭辞", self.prefix_edit)
         form.addRow("WP-CLI用PHP", self.php_cli_version_combo)
         warning = QLabel(
-            "URLが異なる場合、XServerのSSH環境でWP-CLIが使えなければ"
-            "セットアップを停止します。WP-CLI用PHPは、"
+            "DB内のhomeとsiteurl（例: http://localhost:9999）を実行時に"
+            "自動検出し、XServerのURLへ置換した後に再検証します。"
+            "XServerのSSH環境でWP-CLIが使えなければ停止します。WP-CLI用PHPは、"
             "XServerの「PHP Ver.切替」で対象ドメインに設定した"
             "バージョンと合わせてください。単純なSQL文字列置換は行いません。"
         )
