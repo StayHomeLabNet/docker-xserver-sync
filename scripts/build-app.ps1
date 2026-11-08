@@ -33,6 +33,7 @@ try {
         --product-name="Docker XServer Sync" `
         --product-version="0.2.0" `
         --file-version="0.2.0" `
+        --windows-icon-from-ico="$repoRoot/assets/app-icon.ico" `
         --output-filename="Docker XServer Sync.exe" `
         --enable-plugin=pyside6 `
         --include-package=dxsync `

@@ -7,6 +7,11 @@
 - アプリ終了時は実行中の処理を安全に停止してから終了
 - 停止、エラー、予期しないアプリ終了を操作履歴に保存し、選択中のプロジェクトから再開可能
 
+## アプリアイコン
+
+- ローカルからサーバーへの安全な同期と停止・再開を表す専用アイコンを追加
+- macOSのICNSとWindowsのICOを各バイナリに組み込み
+
 ## 承認付き同期
 
 - 再開用の差分計画とステージングを保持
@@ -35,5 +40,5 @@
 ## SHA-256
 
 ```text
-edc03c17523314a2f34cdf9c1216efff2914bad99dce17b9f34f02ffe47591c9  Docker XServer Sync-macOS-arm64.zip
+7d0cae5a85817e30ab459531a9f15070783910c29a3284644ec4df89a509eea2  Docker XServer Sync-macOS-arm64.zip
 ```
