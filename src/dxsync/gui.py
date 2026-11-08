@@ -1580,6 +1580,8 @@ class MainWindow(QMainWindow):
             },
             error=None if health_ok else "HTTPS health check failed after setup",
         )
+        if health_ok:
+            self._retire_resumable_operations("wordpress_setup")
         self.progress_bar.setVisible(False)
         if health_ok:
             self.summary.setText(
@@ -1675,6 +1677,23 @@ class MainWindow(QMainWindow):
             ):
                 return operation
         return None
+
+    def _retire_resumable_operations(self, kind: str) -> None:
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            return
+        for operation in self.store.list_operations(project.project_id, limit=1_000):
+            if (
+                operation.mapping_id == mapping.mapping_id
+                and operation.kind == kind
+                and operation.status in {"cancelled", "failed", "interrupted"}
+                and operation.details.get("resumable") is True
+            ):
+                details = dict(operation.details)
+                details["resumable"] = False
+                details["resolved_by_successful_resume"] = True
+                self.store.update_operation_details(operation.operation_id, details)
 
     @Slot()
     def _request_operation_cancel(self) -> None:
@@ -2833,6 +2852,7 @@ class MainWindow(QMainWindow):
             "succeeded",
             details=details,
         )
+        self._retire_resumable_operations("deployment")
         if result.health_check is not None and not result.health_check.ok:
             health_detail = result.health_check.error or "不明なエラー"
             self.summary.setText(
@@ -2940,6 +2960,7 @@ class MainWindow(QMainWindow):
                 "validation": "skipped",
             },
         )
+        self._retire_resumable_operations("force_overwrite")
         self.summary.setText(
             f"無条件上書き完了 / {len(result.files)}ファイル / "
             f"{result.total_bytes:,} bytes。リモートのみのファイルは削除していません。"
