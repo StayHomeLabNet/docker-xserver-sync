@@ -33,7 +33,7 @@
 
 ## 検証
 
-- 自動テストに成功
+- 自動テスト114件に成功
 - macOS Apple Silicon版とWindows x64版のビルド、起動、アーカイブ整合性を確認
 - Windowsインストーラーのインストール、起動、アンインストールを確認
 
@@ -41,4 +41,6 @@
 
 ```text
 7d0cae5a85817e30ab459531a9f15070783910c29a3284644ec4df89a509eea2  Docker XServer Sync-macOS-arm64.zip
+80e4e49c332651dd69fea66b03b55a35f032acd28d7b06e6799a2f29a03db839  Docker XServer Sync-Windows-x64.zip
+dd2cf1f190dd3947ec7f2fe410cf8ba757be450573493b17ed3136b69cb51684  Docker-XServer-Sync-Setup-v0.2.0.exe
 ```
