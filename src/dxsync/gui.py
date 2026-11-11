@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import sys
 import time
@@ -91,6 +92,13 @@ from .wordpress_setup import (
     WordPressSetupRequest,
 )
 from .wordpress_setup_dialog import WordPressSetupWizard
+from .laravel_setup import (
+    LARAVEL_SETUP_TOTAL_STEPS,
+    LaravelSetupEngine,
+    LaravelSetupProgress,
+    LaravelSetupRequest,
+)
+from .laravel_setup_dialog import LaravelSetupWizard
 from .xserver_api import XServerApiClient
 from .recovery import (
     RecoveryAnalysisResult,
@@ -102,7 +110,7 @@ from .revalidation import PlanRevalidator, RevalidationResult
 from .restore import RestoreAuthorization, RestoreResult, RemoteRestoreEngine
 from .rules import PathRules
 from .scanner import LocalScanner
-from .service import DryRunResult, DryRunService
+from .service import DryRunProgress, DryRunResult, DryRunService
 from .storage import BackupRecord, ProjectStore, StoredPlan
 from .secure_store import SecureStoreError
 from .settings_dialog import MASK_FIELDS, MaskSettingsDialog
@@ -737,9 +745,113 @@ class WordPressSetupWorker(QObject):
             self.api_key = ""
             self.request = None
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+
+class LaravelSetupWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+    progress = Signal(object)
+    checkpoint = Signal(object)
+    cancelled = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        project: Project,
+        request: LaravelSetupRequest,
+        api_key: str | None,
+        servername: str | None,
+        passphrase: str | None,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.request = request
+        self.api_key = api_key
+        self.servername = servername
+        self.passphrase = passphrase
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
+
+    @Slot()
+    def run(self) -> None:
+        client = None
+        sftp = None
+        try:
+            self.progress.emit(
+                LaravelSetupProgress(
+                    step=1,
+                    total_steps=LARAVEL_SETUP_TOTAL_STEPS,
+                    message="XServerへSSH接続中",
+                )
+            )
+            client, sftp = connect_sftp(
+                host=self.project.ssh_host,
+                port=self.project.ssh_port,
+                username=self.project.ssh_username,
+                private_key_path=self.project.private_key_reference,
+                host_key_fingerprint=self.project.host_key_fingerprint,
+                passphrase=self.passphrase,
+            )
+            result = LaravelSetupEngine().setup(
+                request=self.request,
+                api=(
+                    XServerApiClient(
+                        api_key=self.api_key,
+                        servername=self.servername or "",
+                    )
+                    if self.api_key
+                    else None
+                ),
+                ssh_client=client,
+                sftp=sftp,
+                ssh_username=self.project.ssh_username,
+                progress_callback=self.progress.emit,
+                checkpoint_callback=self.checkpoint.emit,
+                cancellation_token=self.cancellation_token,
+            )
+            self.progress.emit(
+                LaravelSetupProgress(
+                    step=10,
+                    total_steps=LARAVEL_SETUP_TOTAL_STEPS,
+                    message="HTTPSでサイトトップを確認中",
+                )
+            )
+            public_url = urlparse(result.public_url)
+            health_domain = public_url.netloc
+            base_path = public_url.path.rstrip("/")
+            homepage_path = f"{base_path}/" or "/"
+            homepage = perform_https_health_check(
+                domain=health_domain, path=homepage_path
+            )
+            self.completed.emit((result, homepage))
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.api_key = ""
+            self.request = None
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class MainWindow(QMainWindow):
@@ -788,6 +900,27 @@ class MainWindow(QMainWindow):
         self._wordpress_progress_timer.setInterval(1000)
         self._wordpress_progress_timer.timeout.connect(
             self._refresh_wordpress_progress
+        )
+        self._laravel_setup_active = False
+        self._laravel_progress_event: LaravelSetupProgress | None = None
+        self._laravel_progress_started_at: float | None = None
+        self._laravel_progress_phase_started_at: float | None = None
+        self._laravel_progress_last_update_at: float | None = None
+        self._laravel_progress_phase_key: tuple[object, ...] | None = None
+        self._laravel_progress_timer = QTimer(self)
+        self._laravel_progress_timer.setInterval(1000)
+        self._laravel_progress_timer.timeout.connect(
+            self._refresh_laravel_progress
+        )
+        self._dry_run_progress_event: DryRunProgress | None = None
+        self._dry_run_progress_started_at: float | None = None
+        self._dry_run_progress_phase_started_at: float | None = None
+        self._dry_run_progress_last_update_at: float | None = None
+        self._dry_run_progress_phase_key: tuple[object, ...] | None = None
+        self._dry_run_progress_timer = QTimer(self)
+        self._dry_run_progress_timer.setInterval(1000)
+        self._dry_run_progress_timer.timeout.connect(
+            self._refresh_dry_run_progress
         )
         self._auto_sync_stage: str | None = None
         self._auto_sync_preferences: AutoSyncPreferences | None = None
@@ -854,11 +987,11 @@ class MainWindow(QMainWindow):
         )
         self.wordpress_resume_button.clicked.connect(self._resume_wordpress_setup)
         setup_layout.addWidget(self.wordpress_resume_button)
-        self.laravel_setup_button = QPushButton("セットアップ手順を確認…")
+        self.laravel_setup_button = QPushButton("セットアップを開始…")
         self.laravel_setup_button.setToolTip(
-            "LaravelをXServerへ初回配置するための手順と注意事項を表示します"
+            "Laravelプロジェクトを選び、空のXServerへ初回配置します"
         )
-        self.laravel_setup_button.clicked.connect(self._show_laravel_setup_guide)
+        self.laravel_setup_button.clicked.connect(self._start_laravel_setup)
         setup_layout.addWidget(self.laravel_setup_button)
         self.setup_panel.setVisible(False)
         layout.addWidget(self.setup_panel)
@@ -1086,10 +1219,10 @@ class MainWindow(QMainWindow):
         )
         self.wordpress_setup_action.triggered.connect(self._start_wordpress_setup)
         self.laravel_setup_action = project_menu.addAction(
-            "Laravel初回セットアップ手順…"
+            "LaravelをXServerへ新規セットアップ…"
         )
         self.laravel_setup_action.triggered.connect(
-            self._show_laravel_setup_guide
+            self._start_laravel_setup
         )
 
         settings_menu = self.menuBar().addMenu("設定")
@@ -1299,7 +1432,7 @@ class MainWindow(QMainWindow):
         elif is_laravel:
             self.setup_text.setText(
                 "Laravel初回セットアップ — "
-                "ローカルDockerのLaravelを空のXServerへ配置する準備を確認します"
+                "ローカルDockerのLaravelを空のXServerへ配置します"
             )
         else:
             self.setup_text.clear()
@@ -1320,6 +1453,8 @@ class MainWindow(QMainWindow):
         if self._current_project is None:
             return None
         mapping_id = self.mapping_combo.currentData()
+        if mapping_id is None and self._current_project.mappings:
+            return self._current_project.mappings[0]
         return next(
             (mapping for mapping in self._current_project.mappings if mapping.mapping_id == mapping_id),
             None,
@@ -1374,6 +1509,86 @@ class MainWindow(QMainWindow):
             "public/storageのリンク、artisan migrateやキャッシュ生成は"
             "自動実行しません。XServer上で内容を確認して個別に実行してください。",
         )
+
+    @Slot()
+    def _start_laravel_setup(self) -> None:
+        if self._thread is not None or not self._require_runtime_paths_confirmation():
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None or project.site_type is not SiteType.LARAVEL:
+            QMessageBox.information(
+                self,
+                "Laravel新規セットアップ",
+                "Laravelの保存済みプロジェクトを選択してください。",
+            )
+            return
+        wizard = LaravelSetupWizard(project, mapping, self)
+        if wizard.exec() != QDialog.Accepted:
+            return
+        request = wizard.request_value()
+        api_key = wizard.api_key or None
+        servername = wizard.servername if wizard.uses_xserver_api else None
+
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.laravel_setup_button.setEnabled(False)
+        self._update_action_buttons()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(True)
+
+        now = time.monotonic()
+        self._laravel_progress_started_at = now
+        self._laravel_progress_phase_started_at = now
+        self._laravel_progress_last_update_at = now
+        self._laravel_progress_phase_key = None
+        self._laravel_progress_event = LaravelSetupProgress(
+            step=1,
+            total_steps=LARAVEL_SETUP_TOTAL_STEPS,
+            message="XServerへSSH接続中",
+        )
+        self._laravel_progress_timer.start()
+        self._refresh_laravel_progress()
+        self._begin_operation(
+            "laravel_setup",
+            details={
+                "database_mode": request.database_mode,
+                "database": request.existing_db_name,
+                "database_user": request.existing_db_user,
+                "db_host": request.db_host,
+                "app_url": request.app_url,
+                "php_cli_version": request.php_cli_version,
+                "remote_app_root": request.remote_app_root,
+                "remote_public_root": request.remote_public_root,
+                "migration_mode": request.migration_mode,
+            },
+        )
+        thread = QThread(self)
+        worker = LaravelSetupWorker(
+            project=project,
+            request=request,
+            api_key=api_key,
+            servername=servername,
+            passphrase=self.passphrase_edit.text() or None,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._laravel_setup_progress)
+        worker.checkpoint.connect(self._update_operation_checkpoint)
+        worker.completed.connect(self._laravel_setup_completed)
+        worker.failed.connect(self._laravel_setup_failed)
+        worker.cancelled.connect(self._laravel_setup_cancelled)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        self._laravel_setup_active = True
+        self._set_auto_sync_controls_locked(True)
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
+        thread.start()
 
     @Slot()
     def _start_wordpress_setup(self) -> None:
@@ -1576,6 +1791,70 @@ class MainWindow(QMainWindow):
         self._wordpress_progress_phase_key = None
 
     @Slot(object)
+    def _dry_run_progress(self, event: object) -> None:
+        if not isinstance(event, DryRunProgress):
+            return
+        now = time.monotonic()
+        phase_key = (event.stage, event.message, event.unit, event.total)
+        if phase_key != self._dry_run_progress_phase_key:
+            self._dry_run_progress_phase_started_at = now
+            self._dry_run_progress_phase_key = phase_key
+        self._dry_run_progress_event = event
+        self._dry_run_progress_last_update_at = now
+        self._refresh_dry_run_progress()
+
+    def _refresh_dry_run_progress(self) -> None:
+        event = self._dry_run_progress_event
+        if event is None:
+            return
+        now = time.monotonic()
+        elapsed = now - (self._dry_run_progress_started_at or now)
+        stage = f"手順 {event.stage}/{event.total_stages}"
+        details = [stage, event.message]
+        determinate = (
+            event.current is not None
+            and event.total is not None
+            and event.total > 0
+        )
+        if determinate:
+            current = min(max(event.current, 0), event.total)
+            ratio = current / event.total
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(round(ratio * 1000))
+            amount = f"{current}/{event.total}"
+            percent = f"{ratio * 100:.1f}%"
+            details.extend((amount, percent))
+            phase_elapsed = now - (self._dry_run_progress_phase_started_at or now)
+            if 0 < current < event.total and phase_elapsed >= 1:
+                eta_seconds = phase_elapsed * (event.total - current) / current
+                details.append(f"残り約 {self._format_progress_duration(eta_seconds)}")
+            elif current >= event.total:
+                details.append("この工程は完了")
+            self.progress_bar.setFormat(f"{event.message}  {amount}  {percent}")
+        else:
+            self.progress_bar.setRange(0, 0)
+            if event.current:
+                details.append(f"{event.current}フォルダ確認済み")
+            self.progress_bar.setFormat(f"{stage}  {event.message}")
+            details.append("全体数を確認中")
+
+        details.append(f"経過 {self._format_progress_duration(elapsed)}")
+        if event.detail:
+            details.append(event.detail)
+        since_update = now - (self._dry_run_progress_last_update_at or now)
+        if since_update >= 2:
+            details.append(
+                "サーバー応答待ち "
+                f"(最終更新から {self._format_progress_duration(since_update)})"
+            )
+        self.summary.setText(" / ".join(details))
+
+    def _stop_dry_run_progress(self) -> None:
+        self._dry_run_progress_timer.stop()
+        self._dry_run_progress_event = None
+        self._dry_run_progress_phase_key = None
+
+    @Slot(object)
     def _wordpress_setup_completed(self, payload: object) -> None:
         self._stop_wordpress_progress()
         result, homepage, login = payload
@@ -1604,22 +1883,32 @@ class MainWindow(QMainWindow):
                 f"WordPressセットアップ完了 / {result.transferred_files}ファイル / "
                 f"{result.table_count}テーブル。HTTPS動作確認済みです。"
             )
-            QMessageBox.information(
-                self,
-                "WordPressセットアップ完了",
-                "WordPressセットアップは正常に完了しました。\n\n"
-                f"トップページ: {homepage.url}\n"
-                f"ログイン画面: {login.url}\n"
-                f"HTTPS確認: トップ {homepage.status_code} / "
-                f"ログイン {login.status_code}\n\n"
-                f"DB: {result.db_name}\n"
-                f"DBユーザー: {result.db_user}\n"
-                f"DBテーブル: {result.table_count}\n"
-                f"今回転送したファイル: {result.transferred_files}\n\n"
-                f"DB内で検出したhome: {result.detected_home_url}\n"
-                f"DB内で検出したsiteurl: {result.detected_site_url}\n"
-                f"最終公開URL: {result.public_url}",
+            top_url = html.escape(homepage.url, quote=True)
+            login_url = html.escape(login.url, quote=True)
+            completion = QMessageBox(self)
+            completion.setIcon(QMessageBox.Information)
+            completion.setWindowTitle("WordPressセットアップ完了")
+            completion.setTextFormat(Qt.RichText)
+            completion.setText(
+                "<p><b>WordPressセットアップは正常に完了しました。</b></p>"
+                f'<p>トップページ: <a href="{top_url}">{top_url}</a><br>'
+                f'ログイン画面: <a href="{login_url}">{login_url}</a><br>'
+                f"HTTPS確認: トップ {homepage.status_code} / ログイン {login.status_code}</p>"
+                f"<p>DB: {html.escape(result.db_name)}<br>"
+                f"DBユーザー: {html.escape(result.db_user)}<br>"
+                f"DBテーブル: {result.table_count}<br>"
+                f"今回転送したファイル: {result.transferred_files}</p>"
+                f"<p>DB内で検出したhome: {html.escape(result.detected_home_url)}<br>"
+                f"DB内で検出したsiteurl: {html.escape(result.detected_site_url)}<br>"
+                f"最終公開URL: {html.escape(result.public_url)}</p>"
             )
+            completion.setStandardButtons(QMessageBox.Ok)
+            for label in completion.findChildren(QLabel):
+                label.setOpenExternalLinks(True)
+                label.setTextInteractionFlags(
+                    Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
+                )
+            completion.exec()
         else:
             self.summary.setText(
                 "ファイルとDBのセットアップは完了しましたが、HTTPS確認に失敗しました。"
@@ -1656,6 +1945,143 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.summary.setText(
             "WordPressセットアップを安全な区切りで停止しました。再開できます。"
+        )
+
+    @Slot(object)
+    def _laravel_setup_progress(self, event: object) -> None:
+        if isinstance(event, str):
+            event = LaravelSetupProgress(
+                step=1,
+                total_steps=LARAVEL_SETUP_TOTAL_STEPS,
+                message=event,
+            )
+        if not isinstance(event, LaravelSetupProgress):
+            return
+        now = time.monotonic()
+        phase_key = (event.step, event.message, event.unit, event.total)
+        if phase_key != self._laravel_progress_phase_key:
+            self._laravel_progress_phase_started_at = now
+            self._laravel_progress_phase_key = phase_key
+        self._laravel_progress_event = event
+        self._laravel_progress_last_update_at = now
+        self._refresh_laravel_progress()
+
+    def _refresh_laravel_progress(self) -> None:
+        event = self._laravel_progress_event
+        if event is None:
+            return
+        now = time.monotonic()
+        overall_elapsed = now - (self._laravel_progress_started_at or now)
+        stage = f"手順 {event.step}/{event.total_steps}"
+        elapsed_text = f"経過 {self._format_progress_duration(overall_elapsed)}"
+        details = [stage, event.message]
+
+        determinate = (
+            event.current is not None
+            and event.total is not None
+            and event.total > 0
+        )
+        if determinate:
+            assert event.current is not None and event.total is not None
+            current = min(max(event.current, 0), event.total)
+            ratio = current / event.total
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(round(ratio * 1000))
+            amount = f"{current}/{event.total}"
+            percent = f"{ratio * 100:.1f}%"
+            details.extend((amount, percent))
+            self.progress_bar.setFormat(f"{event.message}  {amount}  {percent}")
+        else:
+            self.progress_bar.setRange(0, 0)
+            details.append("処理継続中")
+            self.progress_bar.setFormat(f"{stage}  {event.message}")
+
+        details.append(elapsed_text)
+        if event.detail:
+            details.append(event.detail)
+        self.summary.setText(" / ".join(details))
+
+    def _stop_laravel_progress(self) -> None:
+        self._laravel_progress_timer.stop()
+        self._laravel_progress_event = None
+        self._laravel_progress_phase_key = None
+
+    @Slot(object)
+    def _laravel_setup_completed(self, payload: object) -> None:
+        self._stop_laravel_progress()
+        result, homepage = payload
+        health_ok = homepage.ok
+        self._finish_operation(
+            "succeeded" if health_ok else "failed",
+            details={
+                "database": result.db_name,
+                "database_user": result.db_user,
+                "app_file_count": result.transferred_app_files,
+                "public_file_count": result.transferred_public_files,
+                "homepage_status": homepage.status_code,
+                "public_url": result.public_url,
+            },
+            error=None if health_ok else "HTTPS health check failed after setup",
+        )
+        self.progress_bar.setVisible(False)
+        if health_ok:
+            self.summary.setText(
+                f"Laravelセットアップ完了 / {result.transferred_app_files + result.transferred_public_files}ファイル転送 / "
+                f"DB: {result.db_name}"
+            )
+            completion = QMessageBox(self)
+            completion.setIcon(QMessageBox.Information)
+            completion.setWindowTitle("Laravelセットアップ完了")
+            completion.setTextFormat(Qt.RichText)
+            top_url = html.escape(homepage.url, quote=True)
+            completion.setText(
+                "<p><b>Laravelセットアップは正常に完了しました。</b></p>"
+                f'<p>公開URL: <a href="{top_url}">{top_url}</a><br>'
+                f"HTTPS確認: ステータス {homepage.status_code}</p>"
+                f"<p>DB: {html.escape(result.db_name)}<br>"
+                f"DBユーザー: {html.escape(result.db_user)}<br>"
+                f"転送ファイル: 本体 {result.transferred_app_files} / 公開 {result.transferred_public_files}</p>"
+                f"<p>公開URL: {html.escape(result.public_url)}</p>"
+            )
+            completion.setStandardButtons(QMessageBox.Ok)
+            for label in completion.findChildren(QLabel):
+                label.setOpenExternalLinks(True)
+                label.setTextInteractionFlags(
+                    Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
+                )
+            completion.exec()
+        else:
+            self.summary.setText(
+                "ファイルとDBのセットアップは完了しましたが、HTTPS確認に失敗しました。"
+            )
+            QMessageBox.warning(
+                self,
+                "Laravel配置完了・HTTPS確認が必要",
+                "ファイル配置とDB初期化は完了しましたが、"
+                "公開URLの動作確認に失敗しました。\n\n"
+                f"公開URL: {homepage.url}\n"
+                f"結果: {homepage.error or homepage.status_code}\n\n"
+                f"DB: {result.db_name}\n"
+                f"DBユーザー: {result.db_user}\n"
+                f"公開URL: {result.public_url}\n\n"
+                "XServerのドメイン設定、SSL設定、.htaccess等を確認してください。",
+            )
+
+    @Slot(str)
+    def _laravel_setup_failed(self, message: str) -> None:
+        self._stop_laravel_progress()
+        self._finish_operation("failed", error=message)
+        self.progress_bar.setVisible(False)
+        self.summary.setText("Laravel初回セットアップを完了できませんでした。")
+        QMessageBox.critical(self, "Laravelセットアップエラー", message)
+
+    @Slot(str)
+    def _laravel_setup_cancelled(self, message: str) -> None:
+        self._stop_laravel_progress()
+        self._finish_operation("cancelled", error=message)
+        self.progress_bar.setVisible(False)
+        self.summary.setText(
+            "Laravelセットアップを安全な区切りで停止しました。"
         )
 
     @Slot()
@@ -1708,7 +2134,13 @@ class MainWindow(QMainWindow):
                 operation.mapping_id == mapping.mapping_id
                 and operation.status in {"cancelled", "failed", "interrupted"}
                 and operation.details.get("resumable") is True
-                and operation.kind in {"deployment", "wordpress_setup", "force_overwrite"}
+                and operation.kind in {
+                    "deployment",
+                    "wordpress_setup",
+                    "laravel_setup",
+                    "force_overwrite",
+                    "dry_run",
+                }
             ):
                 return operation
         return None
@@ -1763,6 +2195,15 @@ class MainWindow(QMainWindow):
             return
         if operation.kind == "wordpress_setup":
             self._open_wordpress_setup(True)
+            return
+        if operation.kind == "laravel_setup":
+            self._start_laravel_setup()
+            return
+        if operation.kind == "dry_run":
+            if operation.details.get("auto_sync"):
+                self._start_auto_sync()
+            else:
+                self._start_dry_run()
             return
         if operation.kind == "deployment":
             stored = self.store.get_plan(str(operation.details.get("plan_id", "")))

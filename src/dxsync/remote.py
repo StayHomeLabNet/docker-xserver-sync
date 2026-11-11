@@ -7,8 +7,9 @@ import socket
 import stat
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO, Callable, Protocol
 
+from .cancellation import CancellationToken
 from .models import EntryKind, FileRecord, ScanIssue
 from .rules import PathRules
 from .validation import normalize_remote_root
@@ -98,9 +99,15 @@ def connect_sftp(
         raise RemoteScanError(f"SSH connection failed: {exc}") from exc
 
 
-def _hash_stream(stream: BinaryIO, chunk_size: int = 1024 * 1024) -> str:
+def _hash_stream(
+    stream: BinaryIO,
+    chunk_size: int = 1024 * 1024,
+    cancellation_token: CancellationToken | None = None,
+) -> str:
     digest = hashlib.sha256()
     while chunk := stream.read(chunk_size):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         digest.update(chunk)
     return digest.hexdigest()
 
@@ -114,16 +121,31 @@ class SftpScanner:
         self._excludes = PathRules(exclude_patterns)
         self._skips = PathRules(skip_patterns)
 
-    def scan(self, sftp: RemoteFileSystem, root: str) -> RemoteScanResult:
+    def scan(
+        self,
+        sftp: RemoteFileSystem,
+        root: str,
+        *,
+        progress_callback: Callable[[int, int | None, str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> RemoteScanResult:
         normalized_root = normalize_remote_root(root)
         files: list[FileRecord] = []
         issues: list[ScanIssue] = []
         excluded_count = 0
         skipped_protected_paths: list[str] = []
         pending: list[tuple[str, str]] = [(normalized_root, "")]
+        candidates: list[tuple[str, str, Any]] = []
+        scanned_directories = 0
+        report = progress_callback or (lambda _current, _total, _detail: None)
+        report(0, None, "XServerのフォルダを列挙中")
 
         while pending:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             absolute_directory, relative_directory = pending.pop()
+            scanned_directories += 1
+            report(scanned_directories, None, relative_directory or ".")
             try:
                 entries = sorted(sftp.listdir_attr(absolute_directory), key=lambda item: item.filename)
             except OSError as exc:
@@ -155,22 +177,33 @@ class SftpScanner:
                     if self._excludes.matches(relative):
                         excluded_count += 1
                         continue
-                    try:
-                        with sftp.open(absolute, "rb") as stream:
-                            digest = _hash_stream(stream)
-                        files.append(
-                            FileRecord(
-                                relative_path=relative,
-                                kind=EntryKind.FILE,
-                                size=entry.st_size,
-                                modified_ns=(entry.st_mtime * 1_000_000_000),
-                                sha256=digest,
-                            )
-                        )
-                    except OSError as exc:
-                        issues.append(ScanIssue(relative, "unreadable", str(exc)))
+                    candidates.append((absolute, relative, entry))
                 else:
                     issues.append(ScanIssue(relative, "unsupported_type", "Unsupported remote entry type"))
+
+        total = len(candidates)
+        report(0, total, "")
+        for index, (absolute, relative, entry) in enumerate(candidates, start=1):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
+            try:
+                with sftp.open(absolute, "rb") as stream:
+                    digest = _hash_stream(
+                        stream,
+                        cancellation_token=cancellation_token,
+                    )
+                files.append(
+                    FileRecord(
+                        relative_path=relative,
+                        kind=EntryKind.FILE,
+                        size=entry.st_size,
+                        modified_ns=(entry.st_mtime * 1_000_000_000),
+                        sha256=digest,
+                    )
+                )
+            except OSError as exc:
+                issues.append(ScanIssue(relative, "unreadable", str(exc)))
+            report(index, total, relative)
 
         return RemoteScanResult(
             root=normalized_root,

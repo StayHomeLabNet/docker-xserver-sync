@@ -4,7 +4,9 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
+from .cancellation import CancellationToken
 from .models import ScanResult
 from .scanner import sha256_file
 
@@ -33,6 +35,8 @@ class StagingArea:
         scan: ScanResult,
         destination: Path,
         include_paths: set[str] | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> StagingResult:
         root = destination.resolve()
         if root.exists() and any(root.iterdir()):
@@ -46,7 +50,12 @@ class StagingArea:
             if include_paths is None
             else tuple(record for record in scan.files if record.relative_path in include_paths)
         )
-        for record in records:
+        report = progress_callback or (lambda _current, _total, _detail: None)
+        total = len(records)
+        report(0, total, "")
+        for index, record in enumerate(records, start=1):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             if record.sha256 is None:
                 raise StagingError(f"Cannot stage a file without a hash: {record.relative_path}")
             source = scan.root / Path(record.relative_path)
@@ -56,11 +65,15 @@ class StagingArea:
                 shutil.copyfile(source, target, follow_symlinks=False)
             except OSError as exc:
                 raise StagingError(f"Failed to stage {record.relative_path}: {exc}") from exc
-            staged_hash = sha256_file(target)
+            staged_hash = sha256_file(
+                target,
+                cancellation_token=cancellation_token,
+            )
             if staged_hash != record.sha256:
                 raise StagingError(f"Source changed while staging: {record.relative_path}")
             total_bytes += record.size or 0
             manifest.append(record.to_dict())
+            report(index, total, record.relative_path)
 
         manifest_path = root / ".dxsync-manifest.json"
         manifest_path.write_text(

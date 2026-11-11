@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dxsync.models import ChangeType, SiteType
-from dxsync.service import DryRunService
+from dxsync.service import DryRunProgress, DryRunService
 
 
 @dataclass
@@ -94,3 +94,37 @@ def test_custom_php_extra_runtime_directory_is_not_scanned_or_staged(tmp_path: P
     assert {change.relative_path for change in result.plan.changes} == {"index.php"}
     assert result.staging is not None
     assert not (result.staging.root / "userfiles").exists()
+
+
+def test_dry_run_reports_file_counts_for_each_phase(tmp_path: Path) -> None:
+    (tmp_path / "index.php").write_bytes(b"new")
+    progress: list[DryRunProgress] = []
+
+    DryRunService().execute(
+        site_type=SiteType.WORDPRESS,
+        mapping_id="mapping",
+        local_root=tmp_path,
+        remote_root="/remote/site",
+        sftp=FakeSftp(),
+        staging_parent=tmp_path / "staging",
+        progress_callback=progress.append,
+    )
+
+    assert any(
+        event.stage == 2
+        and event.current == event.total == 1
+        and event.detail == "index.php"
+        for event in progress
+    )
+    assert any(
+        event.stage == 3
+        and event.current == event.total == 1
+        and event.detail == "index.php"
+        for event in progress
+    )
+    assert any(
+        event.stage == 4
+        and event.current == event.total == 1
+        and event.detail == "index.php"
+        for event in progress
+    )

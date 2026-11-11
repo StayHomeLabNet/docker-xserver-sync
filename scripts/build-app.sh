@@ -9,7 +9,7 @@ build_root=$(/usr/bin/mktemp -d /private/tmp/dxsync-macos-build.XXXXXX)
 trap '/bin/rm -rf "$build_root"' EXIT
 build_venv="$build_root/venv"
 UV_PROJECT_ENVIRONMENT="$build_venv" uv sync --python 3.12 --extra dev --extra gui --extra ssh --extra build
-"$build_venv/bin/pytest"
+"$build_venv/bin/pytest" -v
 
 "$build_venv/bin/python" -m nuitka \
   --standalone \
