@@ -92,7 +92,7 @@ pwsh -File scripts/build-app.ps1
 pwsh -File scripts/build-app.ps1 -BuildInstaller
 ```
 
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.2.3.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
+完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.3.0.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
 
 ## Linuxアプリのビルド
 
