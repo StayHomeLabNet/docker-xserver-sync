@@ -1,48 +1,124 @@
-# Docker → XServer Sync
+# 🐳 Docker XServer Sync
 
-Dockerへbind mountしたローカルのPHPサイトを、ドライランと承認を経てXServerへ安全に反映するデスクトップアプリです。
+## Safe one-way deployment and setup tool from local Docker to XServer
 
-現在の最優先目標は、ローカルDocker環境のWordPressを空のXServerへ初回配置する専用セットアップ機能です。XServer APIによるMySQL作成、SQL移行、`wp-config.php`生成、安全なURL置換、HTTPS検証を一連のウィザードにまとめる方針です。詳細は[WordPress初回セットアップ仕様](docs/wordpress-first-setup.md)を参照してください。
+**Docker XServer Sync safely deploys and synchronizes local Docker-based WordPress, Laravel, and custom PHP sites to XServer production environments with dry-run verification, approval gates, and automatic backups.**
 
-初回セットアップウィザードの最小版を実装済みです。WordPressプロジェクトを選び、画面上部の「WordPress初回セットアップ」にある「セットアップを開始…」を押します。「プロジェクト」メニューの「WordPressをXServerへ新規セットアップ…」からも開けます。MySQLは、XServer APIでDBとユーザーを新規作成する方法と、サーバーパネルで作成済みの空DBをAPIキーなしで使用する方法を選べます。現在はDocker DBの自動ダンプ前のため、SQLファイルの事前出力が必要です。
+[English](README.md) | [日本語](README.ja.md)
 
-URL置換に使うWP-CLI用PHPはウィザードでPHP 8.0〜8.5から選択でき、既定はPHP 8.3です。XServerの「PHP Ver.切替」と同じバージョンを選びます。アプリはバージョン別CLIパスを明示し、DB作成・SQL投入・ファイル転送より前にPHPとWP-CLIを事前検査します。
+[Features](#features) ・ [Install](#install) ・ [Quick Start](#quick-start) ・ [Laravel Setup](#laravel-setup) ・ [WordPress Setup](#wordpress-setup) ・ [CLI Usage](#cli-usage) ・ [Development](#development) ・ [License](#license)
 
-承認付き同期、無条件上書き、WordPressセットアップは「処理を停止」から安全な区切りで停止できます。停止、エラー、アプリ終了後の操作はローカルの操作履歴とチェックポイントから再開できます。再開時に承認付き同期はローカル・リモート・ステージングを再検証し、再度の明示承認を求めます。WordPressはDB投入、ファイル配置、URL置換の進捗を保存し、配置済み状態を検査して完了済み工程を繰り返しません。配置済みの`wp-config.php`がある場合は、再開時にそのDB接続情報をXServer内のWP-CLIが使用し、パスワードをアプリへ読み出しません。DBパスワード、APIキー、SSHパスフレーズは再開情報に保存しません。
+![version](https://img.shields.io/badge/version-0.3.0-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
+![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
+![python](https://img.shields.io/badge/python-3.12-blue)
+![docker](https://img.shields.io/badge/docker-supported-brightgreen)
+![xserver](https://img.shields.io/badge/target-XServer-lightgrey)
 
-再開検査でDBが0テーブルの場合は、再開ウィザードで元のSQLダンプを選択できます。選択したSQLはDBが空であることを再確認できた場合だけインポートし、既存テーブルが1つでもあれば読み込みません。
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20StayHomeLabNet-ff5e5b?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/stayhomelabnet)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20StayHomeLabNet-ffdd00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/stayhomelabnet)
 
-URL移行はDB内のWordPress `home`と`siteurl`をWP-CLIで実測し、ポート番号を含む元URL全体をXServerのURLへシリアライズ対応で置換します。更新後に両設定値を再取得して一致を検証します。完了画面には実際の公開URL、ログインURL、HTTPS確認結果、DB・テーブル・転送情報を表示します。想定外ドメインやポートへのリダイレクトは成功扱いしません。
+**If Docker XServer Sync is useful to you, please consider supporting the project.**
 
-読み取り専用ドライランと自動同期内のドライランは、SSH接続、ローカル読み取り、XServer読み取り、差分・承認用ファイル準備の進捗を表示します。対象数の確定後は処理数、全体数、割合、推定残り時間、現在のパスを表示します。処理は安全な区切りで停止でき、停止後またはアプリの再起動後に「中断した処理を再開」から再実行できます。
+---
 
-初回セットアップ欄は、選択中の保存済みプロジェクトのサイト種類に応じて表示します。WordPressでは専用ウィザード、Laravelでは初回配置の手順と手動確認事項を表示し、独自PHPまたは未保存の手動設定では表示しません。Laravel専用の自動配置、`.env`生成、`artisan migrate`、キャッシュ生成はまだ実行しません。
+Docker XServer Sync is a cross-platform desktop application designed to safely deploy and synchronize local PHP projects running in Docker (WordPress, Laravel, and custom PHP applications) to XServer shared hosting. Built with safety-first principles, it protects against accidental overwrites, destructive deletions, and unexpected downtime.
 
-`.gitignore`、`.github/`、`compose.yaml`、`docker-compose.yaml`、`Dockerfile`、プロジェクト直下の`README*`・`docs/`・`tests/`、IDE設定、`.env`、秘密鍵、`node_modules/`などは既定で転送対象から除外します。WordPress新規セットアップではコアを必須転送し、`wp-content/`配下はウィザードで選択できます。
+## Features
 
-読み取り専用ドライラン、承認前再検証、リモートバックアップ、承認付き同期、安全な復元エンジンを実装済みです。WordPress、Laravel、独自PHPのプリセット、複数プロジェクト・複数パスマッピング、ローカル・SFTP走査、ホスト鍵照合、15分間の差分計画、対象ファイルのステージング、操作履歴・バックアップ履歴を利用できます。独自PHPでは本番で書き込まれるディレクトリをマッピングごとに明示確認し、未確認のプロジェクトは同期できません。同期では全対象を一時名へ転送・SHA-256検証した後に公開名へ切り替え、途中失敗時は適用済みファイルをロールバックします。リモートのみのファイルは初期状態では削除されず、候補を個別選択・バックアップ・最終再承認した場合だけ削除されます。
+- **Safe One-Way Synchronization**:
+  - Strict SSH host key fingerprint verification (SHA-256)
+  - Read-only dry-runs that never modify the remote server
+  - 15-minute diff staging plan
+  - Automatic pre-deployment remote backups
+  - Atomic two-stage deployment: upload to temporary filenames, verify SHA-256 digests, and switch into place (with automatic rollback on failure)
+  - Protection rules for production-generated directories (e.g. `uploads`, `storage`)
+  - Post-deployment automated HTTPS health checks
+- **Laravel Initial Setup Wizard**:
+  - Architecture-recommended separation: Application files (`app/`, `vendor/`) are placed outside public document root (`/home/{user}/{domain}_app`), while public assets (`public/`) are placed in `public_html`
+  - Automatic rewrite of `public_html/index.php` paths (`vendor/autoload.php` and `bootstrap/app.php`)
+  - Automatic `.env` generation with production settings and database credentials
+  - Remote Artisan commands executed via SSH (`key:generate`, `migrate`, `storage:link`, `config:cache`, `route:cache`, `view:cache`)
+  - Database provisioning via XServer API or connecting to a pre-existing database
+- **WordPress Initial Setup Wizard**:
+  - Automated MySQL database and user creation via XServer API, or connection to pre-existing empty databases
+  - Safe, serialized-data-aware domain and URL replacement via remote WP-CLI
+  - PHP version compatibility check (PHP 8.0 - 8.5)
+- **Progress Tracking & Resumption**:
+  - Real-time display of processed file counts, percentage, ETA, and current file paths
+  - Safe interruption at file boundaries with checkpoint resumption after app restart
+- **Cross-Platform Support**:
+  - macOS (Apple Silicon arm64), Windows (x64 installer & zip), Linux (Ubuntu x64)
 
-初回配置などのため、バックアップの明示的なスキップと、差分・バックアップ・転送後ハッシュ照合を行わない「無条件上書き」も利用できます。確認画面でフォルダーまたはファイル単位の上書き対象を選択でき、「すべてチェック」「すべてチェック解除」も利用できます。無条件上書きでも、SSHホスト鍵、除外パターン、本番書き込み先の保護、明示承認は維持され、未選択ファイルとリモートのみのファイルは削除されません。
+## Install
 
-「安全同期を自動実行」では、読み取り専用ドライラン後に変更内容と事前設定を一度だけ統合確認し、承認後は再検証、バックアップ、承認付き同期、HTTPSヘルスチェックを自動継続します。自動実行設定はプロジェクト単位で「設定」メニューから保存でき、最終確認の対象ドメイン再入力だけを省略することもできます。統合確認と明示承認は省略しません。REMOTE_ONLYは自動削除せず、安全上限・再検証・バックアップのいずれかに失敗した場合は停止します。
+Download the latest release from [GitHub Releases](https://github.com/StayHomeLabNet/docker-xserver-sync/releases/latest).
 
-## 開発環境
+### macOS
+1. Download `Docker XServer Sync-macOS-arm64.zip`.
+2. Extract and move `Docker XServer Sync.app` to your `/Applications` folder.
 
-Python 3.12以上と[uv](https://docs.astral.sh/uv/)を使用します。
+### Windows
+- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v0.3.0.exe`.
+- **Portable**: Extract `Docker XServer Sync-Windows-x64.zip` and run `Docker XServer Sync.exe`.
+
+### Linux
+Extract `Docker XServer Sync-Linux-x64.tar.gz` and run the executable.
+
+---
+
+## Quick Start
+
+1. Launch the application and click **New Project**.
+2. Select your site type (WordPress, Laravel, or Custom PHP) and configure local roots and XServer SSH connection details.
+3. Follow the safe deployment pipeline:
+   - **Read-Only Dry Run**: Compares local files against XServer and generates a diff plan.
+   - **Revalidate Plan**: Verifies that remote and local files have not drifted before deployment.
+   - **Create Backup**: Creates a remote backup archive of target files on XServer.
+   - **Approved Sync**: Review changes and target domain before executing atomic deployment.
+4. Optionally enable **Auto Sync** in settings to execute the full pipeline with a single confirmation click after dry-run.
+
+---
+
+## Laravel Setup
+
+To deploy a local Docker Laravel project to a fresh XServer domain:
+
+1. Select a project with site type set to **Laravel**.
+2. In the setup panel, click **Start Setup…**.
+3. **Wizard Configuration**:
+   - **Database**: Select whether to create a new database via XServer API or connect to an existing database.
+   - **Remote Paths**:
+     - Application Root: `/home/{user}/{domain}_app` (outside public web space)
+     - Document Root: `/home/{user}/{domain}/public_html` (web root)
+   - **App Configuration**: Enter App Name, App URL, and choose migration mode (`php artisan migrate` or SQL dump).
+4. Run the wizard: files are deployed, `index.php` paths are adjusted, `.env` is generated, Artisan commands are executed, and HTTPS health checks verify the live site.
+
+---
+
+## WordPress Setup
+
+To deploy a local Docker WordPress project to a fresh XServer domain:
+
+1. Select a project with site type set to **WordPress**.
+2. In the setup panel, click **Start Setup…**.
+3. Choose database provisioning mode (XServer API or pre-existing database), and specify your local SQL dump and `wp-content` options.
+4. Select the remote PHP version (PHP 8.0 - 8.5; default: 8.3).
+5. The wizard automatically transfers files, imports database tables, performs serialized URL replacement via WP-CLI, and validates HTTPS access.
+
+---
+
+## CLI Usage
+
+You can also use the `dxsync` command-line tool for local scanning and remote dry-runs:
 
 ```bash
-uv sync --extra dev
-uv run pytest
-uv run dxsync scan --site wordpress --root /path/to/site
-uv sync --extra gui
-uv run dxsync-gui
-```
+# Scan local directory
+dxsync scan --site wordpress --root /path/to/site
 
-XServerとの読み取り専用ドライラン:
-
-```bash
-uv sync --extra ssh
-uv run dxsync dry-run \
+# Read-only dry run against XServer
+dxsync dry-run \
   --site wordpress \
   --root /path/to/site \
   --host SERVER_ID.xsrv.jp \
@@ -53,54 +129,31 @@ uv run dxsync dry-run \
   --ask-passphrase
 ```
 
-`dry-run`はSFTPの一覧取得とファイル読み取りだけを行います。リモートにディレクトリ、ロック、一時ファイルを作成しません。
+---
 
-GUIで実際に同期する場合は、「読み取り専用ドライラン」→「計画を再検証」→「バックアップを作成」→「承認付き同期」の順に進みます。バックアップは再検証成功後だけ作成でき、同期の最終確認では転送先・変更内容・バックアップの3項目と対象ドメインの再入力が必須です。「安全性確認」では異常終了後の残存一時ファイルを読み取り専用で検出できます。既存ファイルを含むバックアップは、履歴画面から外部変更チェックと再承認を経て復元できます。
+## Development
 
-GUIの一般プロジェクト設定はOS標準のアプリデータ領域にSQLiteで保存されます。接続先の確認コードはOS資格情報ストアへ分離して保存し、利用できない場合は同期を禁止します。旧バージョンのSQLite内にある確認コードは起動時に移行し、移行成功後に元の列を空にしてデータベースを再構成します。ただし、ストレージ媒体やOSバックアップ上の過去データまでの完全消去は保証しません。秘密鍵のファイルパスは保存しますが、秘密鍵の内容とパスフレーズは保存しません。
-
-メニューバーの「設定」では、SSHホスト、ユーザー、リモートルート、確認コード、秘密鍵パスの起動時マスクを項目別に選べます。保存するのはマスク有無だけです。画面上の「接続情報のマスクを一時解除」で現在の表示を切り替えられ、「ヘルプ」→「バージョン情報」で実行中のバージョンを確認できます。
-
-リモート側の読み取り専用マニフェストがある場合は、ローカルとの差分計画をJSONで出力できます。
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv run dxsync plan \
-  --site wordpress \
-  --root /path/to/site \
-  --remote-manifest remote.json
+# Install dependencies
+uv sync --extra dev --extra gui --extra ssh --extra build
+
+# Run unit tests (130 passing tests)
+uv run pytest
+
+# Launch GUI
+uv run dxsync-gui
 ```
 
-製品全体の方針は[製品仕様](docs/product-spec.md)を参照してください。
-初回の入力項目は[初回設定ガイド](docs/setup-guide.md)を参照してください。
+### Building Application Packages
 
-## macOSアプリのビルド
+- **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v0.3.0.exe`
+- **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
-Apple Silicon搭載Macでは次のコマンドで、テスト・コンパイル・起動確認・ZIP作成まで実行できます。
+---
 
-```bash
-zsh scripts/build-app.sh
-```
+## License
 
-ビルド環境はOneDriveのプレースホルダー化を避けるため`/private/tmp`へ作成され、完成物だけが`dist/Docker XServer Sync-macOS-arm64.zip`へ保存されます。現在のビルドは自己署名・公証前の開発版です。
-
-## Windowsアプリのビルド
-
-Windows x64環境で次を実行すると、全テスト、Nuitkaコンパイル、起動スモークテスト、ZIP作成まで行います。Inno Setup 6が導入済みの場合は`-BuildInstaller`でインストーラーとインストール後の起動・アンインストール試験も実行できます。
-
-```powershell
-pwsh -File scripts/build-app.ps1
-pwsh -File scripts/build-app.ps1 -BuildInstaller
-```
-
-完成物は`dist/Docker XServer Sync-Windows-x64.zip`と`dist/Docker-XServer-Sync-Setup-v0.3.0.exe`です。GitHubの「Build Windows app」ワークフローを手動実行することでも、Windowsランナーで同じビルドを実行できます。Windows版も現時点ではコード署名前の開発版です。
-
-## Linuxアプリのビルド
-
-Ubuntu x64環境では`patchelf`を導入したうえで、次のコマンドによりテスト、Nuitkaコンパイル、ヘッドレス起動確認、tar.gz作成まで実行できます。
-
-```bash
-bash scripts/build-app-linux.sh
-```
-
-完成物は`dist/Docker XServer Sync-Linux-x64.tar.gz`です。GitHubの「Build Linux app」ワークフローでも同じビルドを実行できます。Linux版はUbuntu x64向けで、現時点では署名前の開発版です。
-
+This project is licensed under the [MIT License](LICENSE).
