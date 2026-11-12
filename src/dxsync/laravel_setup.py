@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import posixpath
 import re
@@ -85,6 +86,36 @@ def _validate_sql_dump(path: Path) -> None:
                 )
 
 
+def detect_laravel_required_php(local_root: Path) -> str | None:
+    """Detects the minimum required PHP version from vendor/composer/platform_check.php or composer.json."""
+    root = local_root.expanduser().resolve()
+    platform_check = root / "vendor" / "composer" / "platform_check.php"
+    if platform_check.is_file():
+        try:
+            content = platform_check.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"PHP_VERSION_ID\s*>=\s*(\d+)", content)
+            if match:
+                val = int(match.group(1))
+                major = val // 10000
+                minor = (val % 10000) // 100
+                return f"{major}.{minor}"
+        except OSError:
+            pass
+
+    composer_json = root / "composer.json"
+    if composer_json.is_file():
+        try:
+            data = json.loads(composer_json.read_text(encoding="utf-8"))
+            php_req = data.get("require", {}).get("php", "")
+            match = re.search(r"[~^>=]*\s*(\d+\.\d+)", php_req)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+
+    return None
+
+
 def validate_laravel_setup_request(request: LaravelSetupRequest) -> None:
     root = request.local_root.expanduser().resolve()
     if not root.is_dir():
@@ -101,6 +132,19 @@ def validate_laravel_setup_request(request: LaravelSetupRequest) -> None:
             "Local vendor/ directory not found or autoload.php is missing. "
             "Please run 'composer install' in your Docker/local environment before setup."
         )
+
+    required_php = detect_laravel_required_php(root)
+    if required_php:
+        def _to_tuple(v: str) -> tuple[int, ...]:
+            try:
+                return tuple(int(x) for x in v.split("."))
+            except ValueError:
+                return (0,)
+        if _to_tuple(request.php_cli_version) < _to_tuple(required_php):
+            raise LaravelSetupError(
+                f"ローカルのComposer環境（platform_check.php）は PHP {required_php} 以上を要求しています。"
+                f"指定されたCLI用PHPバージョン（PHP {request.php_cli_version}）では動作しません。PHP {required_php} 以上を指定してください。"
+            )
 
     if not request.remote_app_root.strip():
         raise LaravelSetupError("Remote application root is required")

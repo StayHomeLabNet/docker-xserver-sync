@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ from dxsync.laravel_setup import (
     LaravelSetupProgress,
     LaravelSetupRequest,
     build_laravel_env,
+    detect_laravel_required_php,
     patch_laravel_index_php,
     validate_laravel_setup_request,
 )
@@ -162,6 +164,43 @@ def test_validate_laravel_setup_request(tmp_path: Path) -> None:
     )
     with pytest.raises(LaravelSetupError, match="forbidden database-level"):
         validate_laravel_setup_request(sql_req)
+
+
+def test_detect_laravel_required_php(tmp_path: Path) -> None:
+    laravel_root = tmp_path / "laravel"
+    make_laravel(laravel_root)
+    assert detect_laravel_required_php(laravel_root) is None
+
+    # Detect from platform_check.php
+    platform_dir = laravel_root / "vendor" / "composer"
+    platform_dir.mkdir(parents=True, exist_ok=True)
+    (platform_dir / "platform_check.php").write_text(
+        '<?php if (!(PHP_VERSION_ID >= 80401)) { throw new RuntimeException("..."); }',
+        encoding="utf-8",
+    )
+    assert detect_laravel_required_php(laravel_root) == "8.4"
+
+    # Incompatible php_cli_version should fail validation
+    req = LaravelSetupRequest(
+        local_root=laravel_root,
+        remote_app_root="/home/user/app",
+        remote_public_root="/home/user/public_html",
+        domain="demo.stayhomelab.net",
+        app_url="https://demo.stayhomelab.net",
+        app_name="Demo",
+        db_host="localhost",
+        database_mode="api",
+        db_name_suffix="laravel",
+        db_user_suffix="lar_user",
+        db_password="password123",
+        php_cli_version="8.3",
+    )
+    with pytest.raises(LaravelSetupError, match="PHP 8.4 以上を要求しています"):
+        validate_laravel_setup_request(req)
+
+    # Compatible php_cli_version succeeds
+    req_84 = replace(req, php_cli_version="8.4")
+    validate_laravel_setup_request(req_84)
 
 
 def test_laravel_setup_engine(tmp_path: Path) -> None:

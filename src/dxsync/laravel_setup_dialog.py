@@ -23,6 +23,7 @@ from .models import Project, SyncMapping
 from .laravel_setup import (
     LaravelSetupError,
     LaravelSetupRequest,
+    detect_laravel_required_php,
     validate_laravel_setup_request,
 )
 
@@ -257,15 +258,24 @@ class LaravelSetupWizard(QWizard):
         self.app_url_edit = QLineEdit(f"https://{self.project.domain}")
         form.addRow("APP_URL（公開URL）", self.app_url_edit)
 
+        root = Path(self.mapping.local_root).expanduser().resolve()
+        detected_php = detect_laravel_required_php(root)
         self.php_cli_version_combo = QComboBox()
-        for version in ("8.4", "8.3", "8.2"):
+        for version in ("8.5", "8.4", "8.3", "8.2", "8.1"):
             label = f"PHP {version}"
-            if version == "8.3":
+            if detected_php and version == detected_php:
+                label += "（検出: 推奨）"
+            elif not detected_php and version == "8.3":
                 label += "（推奨）"
             self.php_cli_version_combo.addItem(label, version)
-        self.php_cli_version_combo.setCurrentIndex(
-            self.php_cli_version_combo.findData("8.3")
+        target_default = (
+            detected_php
+            if detected_php in ("8.5", "8.4", "8.3", "8.2", "8.1")
+            else "8.3"
         )
+        idx = self.php_cli_version_combo.findData(target_default)
+        if idx >= 0:
+            self.php_cli_version_combo.setCurrentIndex(idx)
         form.addRow("CLI用PHPバージョン", self.php_cli_version_combo)
 
         note = QLabel(
@@ -444,6 +454,25 @@ class LaravelSetupWizard(QWizard):
             if not self.app_url_edit.text().strip():
                 QMessageBox.warning(self, "エラー", "公開URL（APP_URL）を入力してください。")
                 return False
+            root = Path(self.mapping.local_root).expanduser().resolve()
+            detected = detect_laravel_required_php(root)
+            if detected:
+                selected = self.php_cli_version_combo.currentData()
+
+                def _to_tuple(v: str) -> tuple[int, ...]:
+                    try:
+                        return tuple(int(x) for x in v.split("."))
+                    except ValueError:
+                        return (0,)
+
+                if _to_tuple(selected) < _to_tuple(detected):
+                    QMessageBox.warning(
+                        self,
+                        "PHPバージョン不一致",
+                        f"ローカルのComposer環境（platform_check.php）は PHP {detected} 以上を要求しています。\n\n"
+                        f"CLI用PHPバージョンには PHP {detected} 以上を選択し、XServerの「PHP Ver.切替」も合わせてください。",
+                    )
+                    return False
 
         # Page 5: Confirmation
         elif current == page_ids[4]:
