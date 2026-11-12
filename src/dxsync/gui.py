@@ -487,7 +487,10 @@ class DeployWorker(QObject):
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            msg = str(exc).strip()
+            if not msg or msg.lower() == "failure":
+                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
+            self.failed.emit(msg)
         finally:
             if sftp is not None:
                 sftp.close()
@@ -549,7 +552,10 @@ class ForceOverwriteWorker(QObject):
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            msg = str(exc).strip()
+            if not msg or msg.lower() == "failure":
+                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
+            self.failed.emit(msg)
         finally:
             if sftp is not None:
                 sftp.close()
@@ -740,7 +746,10 @@ class WordPressSetupWorker(QObject):
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            msg = str(exc).strip()
+            if not msg or msg.lower() == "failure":
+                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
+            self.failed.emit(msg)
         finally:
             self.api_key = ""
             self.request = None
@@ -838,7 +847,10 @@ class LaravelSetupWorker(QObject):
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            msg = str(exc).strip()
+            if not msg or msg.lower() == "failure":
+                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
+            self.failed.emit(msg)
         finally:
             self.api_key = ""
             self.request = None

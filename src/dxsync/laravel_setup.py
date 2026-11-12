@@ -267,13 +267,76 @@ def _run_remote(ssh_client: Any, command: str) -> str:
     return out
 
 
+def _scan_remote_files(ssh_client: Any, php_bin: str, remote_root: str) -> dict[str, int]:
+    """Scans the remote directory using a fast remote PHP script to return {rel_path: size}.
+
+    If the remote directory does not exist or scanning fails, returns an empty dictionary.
+    """
+    php_code = (
+        "$dir = $argv[1];"
+        "if (!is_dir($dir)) exit(0);"
+        "$iter = new RecursiveIteratorIterator("
+        "new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),"
+        "RecursiveIteratorIterator::LEAVES_ONLY);"
+        "$len = strlen($dir);"
+        "foreach ($iter as $file) {"
+        "if ($file->isFile()) {"
+        "$rel = ltrim(substr($file->getPathname(), $len), '/');"
+        "echo $rel . \"\\t\" . $file->getSize() . \"\\n\";"
+        "}"
+        "}"
+    )
+    cmd = f"{shlex.quote(php_bin)} -r {shlex.quote(php_code)} -- {shlex.quote(remote_root)}"
+    try:
+        _, stdout, stderr = ssh_client.exec_command(cmd)
+        exit_status = stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            return {}
+        result: dict[str, int] = {}
+        for line in stdout.read().decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                try:
+                    result[parts[0]] = int(parts[1])
+                except ValueError:
+                    pass
+        return result
+    except Exception:
+        return {}
+
+
 def _upload_file(sftp: Any, local_path: Path, remote_path: str) -> int:
     remote_dir = posixpath.dirname(remote_path)
     _ensure_remote_dir(sftp, remote_dir)
     tmp_path = f"{remote_path}.dxsync_tmp_{os.urandom(4).hex()}"
-    sftp.put(str(local_path), tmp_path)
-    sftp.rename(tmp_path, remote_path)
-    return local_path.stat().st_size
+    try:
+        sftp.put(str(local_path), tmp_path)
+        posix_rename = getattr(sftp, "posix_rename", None)
+        if callable(posix_rename):
+            try:
+                posix_rename(tmp_path, remote_path)
+                return local_path.stat().st_size
+            except OSError:
+                pass
+        # Fallback for servers without posix-rename or if it failed
+        try:
+            sftp.remove(remote_path)
+        except OSError:
+            pass
+        sftp.rename(tmp_path, remote_path)
+        return local_path.stat().st_size
+    except Exception as exc:
+        raise LaravelSetupError(
+            f"ファイル転送に失敗しました ({local_path.name} -> {remote_path}): {exc}"
+        ) from exc
+    finally:
+        try:
+            sftp.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def _ensure_remote_dir(sftp: Any, remote_dir: str) -> None:
@@ -283,10 +346,10 @@ def _ensure_remote_dir(sftp: Any, remote_dir: str) -> None:
         current = posixpath.join(current, part)
         try:
             sftp.stat(current)
-        except OSError:
+        except Exception:
             try:
                 sftp.mkdir(current)
-            except OSError:
+            except Exception:
                 pass
 
 
@@ -395,10 +458,13 @@ class LaravelSetupEngine:
         cancel.raise_if_cancelled()
 
         # Step 4: Transfer Application Files (excluding public/)
-        report(4, "Laravel本体ファイルを転送中（public/を除く）")
+        report(4, "Laravel本体ファイルの配置状況を確認中（public/を除く）")
         local_root = request.local_root.expanduser().resolve()
         app_files_transferred = 0
         total_bytes = 0
+
+        # Scan remote application directory to check for already transferred files
+        remote_app_files = _scan_remote_files(ssh_client, php_bin, remote_app_root)
 
         # Collect files for application root
         app_candidates: list[Path] = []
@@ -422,10 +488,25 @@ class LaravelSetupEngine:
                     app_candidates.append(path)
 
         total_app_files = len(app_candidates)
+        report(4, f"Laravel本体ファイルを転送中（全{total_app_files}ファイル）")
         for i, local_file in enumerate(app_candidates, start=1):
             cancel.raise_if_cancelled()
             rel = local_file.relative_to(local_root).as_posix()
             remote_target = posixpath.join(remote_app_root, rel)
+            local_size = local_file.stat().st_size
+            if rel in remote_app_files and remote_app_files[rel] == local_size:
+                # Already present on remote with identical size
+                if i % 25 == 0 or i == total_app_files:
+                    report(
+                        4,
+                        "Laravel本体ファイルを検証・転送中",
+                        current=i,
+                        total=total_app_files,
+                        unit="files",
+                        detail=f"{rel}（配置済み）",
+                    )
+                continue
+
             bytes_sent = _upload_file(sftp, local_file, remote_target)
             app_files_transferred += 1
             total_bytes += bytes_sent
@@ -442,8 +523,9 @@ class LaravelSetupEngine:
         cancel.raise_if_cancelled()
 
         # Step 5: Transfer Public Files
-        report(5, "公開ディレクトリ（public/）のファイルを転送中")
+        report(5, "公開ディレクトリ（public/）の配置状況を確認中")
         public_files_transferred = 0
+        remote_pub_files = _scan_remote_files(ssh_client, php_bin, remote_public_root)
         local_public = local_root / "public"
         public_candidates: list[Path] = []
         for path in local_public.rglob("*"):
@@ -459,10 +541,24 @@ class LaravelSetupEngine:
                     public_candidates.append(path)
 
         total_pub_files = len(public_candidates)
+        report(5, f"公開ディレクトリ（public/）のファイルを転送中（全{total_pub_files}ファイル）")
         for i, local_file in enumerate(public_candidates, start=1):
             cancel.raise_if_cancelled()
             rel = local_file.relative_to(local_public).as_posix()
             remote_target = posixpath.join(remote_public_root, rel)
+            local_size = local_file.stat().st_size
+            if rel in remote_pub_files and remote_pub_files[rel] == local_size:
+                if i % 10 == 0 or i == total_pub_files:
+                    report(
+                        5,
+                        "公開ディレクトリのファイルを検証・転送中",
+                        current=i,
+                        total=total_pub_files,
+                        unit="files",
+                        detail=f"{rel}（配置済み）",
+                    )
+                continue
+
             bytes_sent = _upload_file(sftp, local_file, remote_target)
             public_files_transferred += 1
             total_bytes += bytes_sent
@@ -481,42 +577,52 @@ class LaravelSetupEngine:
         # Step 6: Patch public_html/index.php
         report(6, "public_html/index.php のパスを調整中")
         remote_index_php = posixpath.join(remote_public_root, "index.php")
-        with sftp.open(remote_index_php, "r") as f:
-            raw_index = f.read().decode("utf-8", errors="replace")
+        try:
+            with sftp.open(remote_index_php, "r") as f:
+                raw_index = f.read().decode("utf-8", errors="replace")
 
-        patched_index = patch_laravel_index_php(
-            raw_index,
-            remote_app_root=remote_app_root,
-            remote_public_root=remote_public_root,
-        )
-        with sftp.open(remote_index_php, "w") as f:
-            f.write(patched_index.encode("utf-8"))
+            patched_index = patch_laravel_index_php(
+                raw_index,
+                remote_app_root=remote_app_root,
+                remote_public_root=remote_public_root,
+            )
+            with sftp.open(remote_index_php, "w") as f:
+                f.write(patched_index.encode("utf-8"))
+        except Exception as exc:
+            raise LaravelSetupError(
+                f"public/index.php の調整に失敗しました ({remote_index_php}): {exc}"
+            ) from exc
 
         cancel.raise_if_cancelled()
 
         # Step 7: Generate and upload .env
         report(7, "本番用 .env を生成・配置中")
-        local_env_example = local_root / ".env.example"
-        local_env = local_root / ".env"
-        template_str = ""
-        if local_env_example.is_file():
-            template_str = local_env_example.read_text(encoding="utf-8")
-        elif local_env.is_file():
-            template_str = local_env.read_text(encoding="utf-8")
+        try:
+            local_env_example = local_root / ".env.example"
+            local_env = local_root / ".env"
+            template_str = ""
+            if local_env_example.is_file():
+                template_str = local_env_example.read_text(encoding="utf-8")
+            elif local_env.is_file():
+                template_str = local_env.read_text(encoding="utf-8")
 
-        new_env_content = build_laravel_env(
-            template_str,
-            app_name=request.app_name,
-            app_url=request.app_url,
-            db_host=request.db_host,
-            db_name=expected_db,
-            db_user=expected_user,
-            db_password=request.db_password,
-        )
-        remote_env_path = posixpath.join(remote_app_root, ".env")
-        with sftp.open(remote_env_path, "w") as f:
-            f.write(new_env_content.encode("utf-8"))
-        sftp.chmod(remote_env_path, 0o600)
+            new_env_content = build_laravel_env(
+                template_str,
+                app_name=request.app_name,
+                app_url=request.app_url,
+                db_host=request.db_host,
+                db_name=expected_db,
+                db_user=expected_user,
+                db_password=request.db_password,
+            )
+            remote_env_path = posixpath.join(remote_app_root, ".env")
+            with sftp.open(remote_env_path, "w") as f:
+                f.write(new_env_content.encode("utf-8"))
+            sftp.chmod(remote_env_path, 0o600)
+        except Exception as exc:
+            raise LaravelSetupError(
+                f".env の生成・配置に失敗しました ({remote_env_path}): {exc}"
+            ) from exc
 
         cancel.raise_if_cancelled()
 
@@ -575,12 +681,18 @@ class LaravelSetupEngine:
             ssh_client,
             f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} storage:link || true",
         )
-        # config/route/view cache
+        # config/route/view cache (graceful)
         _run_remote(
             ssh_client,
-            f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} config:cache && "
-            f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} route:cache && "
-            f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} view:cache",
+            f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} config:cache || true",
+        )
+        _run_remote(
+            ssh_client,
+            f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} route:cache || true",
+        )
+        _run_remote(
+            ssh_client,
+            f"{shlex.quote(php_bin)} {shlex.quote(artisan_path)} view:cache || true",
         )
 
         cancel.raise_if_cancelled()

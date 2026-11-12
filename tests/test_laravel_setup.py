@@ -265,3 +265,67 @@ def test_laravel_setup_engine(tmp_path: Path) -> None:
     assert result.transferred_public_files > 0
     assert result.public_url == "https://demo.stayhomelab.net"
     assert len(progress_events) > 0
+
+
+def test_upload_file_overwrites_with_posix_rename(tmp_path: Path) -> None:
+    from dxsync.laravel_setup import _upload_file
+
+    local = tmp_path / "test.txt"
+    local.write_text("hello", encoding="utf-8")
+
+    sftp = MagicMock()
+    sftp.posix_rename = MagicMock()
+
+    size = _upload_file(sftp, local, "/remote/path/test.txt")
+    assert size == 5
+    assert sftp.put.called
+    assert sftp.posix_rename.called
+
+
+def test_upload_file_fallback_rename_when_posix_rename_fails(tmp_path: Path) -> None:
+    from dxsync.laravel_setup import _upload_file
+
+    local = tmp_path / "test.txt"
+    local.write_text("hello", encoding="utf-8")
+
+    sftp = MagicMock()
+    sftp.posix_rename = MagicMock(side_effect=OSError("posix_rename unsupported"))
+
+    size = _upload_file(sftp, local, "/remote/path/test.txt")
+    assert size == 5
+    assert sftp.remove.called
+    assert sftp.rename.called
+
+
+def test_upload_file_raises_descriptive_error_on_sftp_failure(tmp_path: Path) -> None:
+    import pytest
+    from dxsync.laravel_setup import _upload_file, LaravelSetupError
+
+    local = tmp_path / "test.txt"
+    local.write_text("hello", encoding="utf-8")
+
+    sftp = MagicMock()
+    del sftp.posix_rename
+    sftp.rename.side_effect = IOError("Failure")
+
+    with pytest.raises(LaravelSetupError) as exc_info:
+        _upload_file(sftp, local, "/remote/path/test.txt")
+    assert "ファイル転送に失敗しました" in str(exc_info.value)
+    assert "Failure" in str(exc_info.value)
+
+
+def test_scan_remote_files() -> None:
+    from dxsync.laravel_setup import _scan_remote_files
+
+    ssh = MagicMock()
+    stdout = MagicMock()
+    stdout.channel.recv_exit_status.return_value = 0
+    stdout.read.return_value = b"app/Http/Kernel.php\t1024\npublic/index.php\t512\n"
+    stderr = MagicMock()
+    ssh.exec_command.return_value = (MagicMock(), stdout, stderr)
+
+    res = _scan_remote_files(ssh, "php", "/home/user/app")
+    assert res == {
+        "app/Http/Kernel.php": 1024,
+        "public/index.php": 512,
+    }
