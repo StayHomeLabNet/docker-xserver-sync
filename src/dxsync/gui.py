@@ -1780,7 +1780,7 @@ class MainWindow(QMainWindow):
                 eta_text = "完了"
             if eta_text:
                 details.append(eta_text)
-            self.progress_bar.setFormat(f"{event.message}  {amount}  {percent}")
+            self.progress_bar.setFormat(f"{amount} ({percent})")
         else:
             self.progress_bar.setRange(0, 0)
             details.append("処理継続中")
@@ -2002,7 +2002,7 @@ class MainWindow(QMainWindow):
             amount = f"{current}/{event.total}"
             percent = f"{ratio * 100:.1f}%"
             details.extend((amount, percent))
-            self.progress_bar.setFormat(f"{event.message}  {amount}  {percent}")
+            self.progress_bar.setFormat(f"{amount} ({percent})")
         else:
             self.progress_bar.setRange(0, 0)
             details.append("処理継続中")
@@ -2420,7 +2420,7 @@ class MainWindow(QMainWindow):
     def _set_auto_stage(self, step: int, label: str) -> None:
         self.progress_bar.setRange(0, 4)
         self.progress_bar.setValue(step)
-        self.progress_bar.setFormat(f"自動実行 {step}/4  {label}")
+        self.progress_bar.setFormat(f"{step}/4 (%p%)")
         self.progress_bar.setVisible(True)
         self.summary.setText(f"自動実行 {step}/4 — {label}")
 
@@ -3415,18 +3415,20 @@ class MainWindow(QMainWindow):
     def _deployment_progress(self, current: int, total: int, phase: str) -> None:
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(current)
-        prefix = "自動実行 4/4  " if self._auto_sync_active else ""
-        self.progress_bar.setFormat(f"{prefix}{phase}  {current}/{total}")
-        self.summary.setText(
-            f"{prefix}承認済み同期を実行中… {current}/{total}  {phase}"
-        )
+        ratio = current / max(total, 1)
+        percent = f"{ratio * 100:.1f}%"
+        self.progress_bar.setFormat(f"{current}/{total} ({percent})")
+        prefix = "自動実行 4/4 — " if self._auto_sync_active else ""
+        self.summary.setText(f"{prefix}承認済み同期を実行中… {phase}")
 
     @Slot(int, int, str)
     def _force_overwrite_progress(self, current: int, total: int, path: str) -> None:
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(current)
-        self.progress_bar.setFormat(f"無条件上書き {current}/{total}")
-        self.summary.setText(f"無条件上書き中… {current}/{total}  {path}")
+        ratio = current / max(total, 1)
+        percent = f"{ratio * 100:.1f}%"
+        self.progress_bar.setFormat(f"{current}/{total} ({percent})")
+        self.summary.setText(f"無条件上書き中… {path}")
         completed = list(self._current_operation_details.get("completed_paths", []))
         if path not in completed:
             completed.append(path)

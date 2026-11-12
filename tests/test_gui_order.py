@@ -287,3 +287,25 @@ def test_wordpress_completion_dialog_contains_clickable_urls(
     assert 'href="https://demo.example.com/wp-login.php"' in shown[0].text()
     assert any(label.openExternalLinks() for label in shown[0].findChildren(QLabel))
     window.close()
+
+
+def test_deployment_progress_does_not_duplicate_phase_or_prefix(
+    tmp_path: Path,
+) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window._auto_sync_active = True
+    window._deployment_progress(56, 130, "転送準備: data/backups/manual_data.json")
+
+    # The progress bar shows only current/total and percentage (clean metric)
+    assert window.progress_bar.format() == "56/130 (43.1%)"
+    assert "転送準備" not in window.progress_bar.format()
+    assert "自動実行" not in window.progress_bar.format()
+
+    # The summary label shows the full stage and phase detail
+    assert "自動実行 4/4 — 承認済み同期を実行中… 転送準備: data/backups/manual_data.json" in window.summary.text()
+    window.close()
+
