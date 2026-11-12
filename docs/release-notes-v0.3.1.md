@@ -53,8 +53,8 @@
 ## SHA-256
 
 ```text
-TBD_MACOS_SHA256  Docker XServer Sync-macOS-arm64.zip
-TBD_WIN_ZIP_SHA256  Docker XServer Sync-Windows-x64.zip
-TBD_WIN_SETUP_SHA256  Docker-XServer-Sync-Setup-v0.3.1.exe
-TBD_LINUX_SHA256  Docker XServer Sync-Linux-x64.tar.gz
+4fa47f5033a5e80e5330321a82641e1e34bee1e98eb5b89ad40a141e338b5c48  Docker XServer Sync-macOS-arm64.zip
+5c80015241a13388577add5a3e1b98f2a7333bfed8c281c935345bf6ec8b3c95  Docker XServer Sync-Windows-x64.zip
+c8a8a7bfb745b38018a802fbd664da16425eac97fd8eccbc4e9a1d003464340c  Docker-XServer-Sync-Setup-v0.3.1.exe
+9df0f84dfd49862a37494f425b493736a7e90acda16ae12dc07a754afab63f8c  Docker XServer Sync-Linux-x64.tar.gz
 ```
