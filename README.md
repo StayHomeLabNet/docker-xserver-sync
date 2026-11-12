@@ -1,14 +1,21 @@
+<div align="center">
+
 # 🐳 Docker XServer Sync
 
-## Safe one-way deployment and setup tool from local Docker to XServer
+## ローカルDockerからXServerへの安全な一方向同期・セットアップツール
 
-**Docker XServer Sync safely deploys and synchronizes local Docker-based WordPress, Laravel, and custom PHP sites to XServer production environments with dry-run verification, approval gates, and automatic backups.**
+**Docker XServer Sync は、ローカルDocker環境で稼働する WordPress / Laravel / 独自PHP サイトを、  
+読み取り専用ドライラン、承認、差分検証、事前バックアップを経てXServer本番環境へ安全に配置・同期するデスクトップアプリです。**
 
-[English](README.md) | [日本語](README.ja.md)
+[English](README.en.md) | [日本語](README.md)
 
-[Features](#features) ・ [Install](#install) ・ [Quick Start](#quick-start) ・ [Laravel Setup](#laravel-setup) ・ [WordPress Setup](#wordpress-setup) ・ [CLI Usage](#cli-usage) ・ [Development](#development) ・ [License](#license)
+<br>
 
-![version](https://img.shields.io/badge/version-0.3.0-blue)
+[機能](#機能) ・ [インストール](#インストール) ・ [クイックスタート](#クイックスタート) ・ [Laravel初回セットアップ](#laravel初回セットアップ) ・ [WordPress初回セットアップ](#wordpress初回セットアップ) ・ [CLIでの利用](#cliでの利用) ・ [開発・ビルド](#開発ビルド) ・ [ライセンス](#ライセンス)
+
+<br>
+
+![version](https://img.shields.io/badge/version-0.3.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -16,108 +23,121 @@
 ![docker](https://img.shields.io/badge/docker-supported-brightgreen)
 ![xserver](https://img.shields.io/badge/target-XServer-lightgrey)
 
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20StayHomeLabNet-ff5e5b?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/stayhomelabnet)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20StayHomeLabNet-ffdd00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/stayhomelabnet)
+<br>
 
-**If Docker XServer Sync is useful to you, please consider supporting the project.**
+<a href="https://ko-fi.com/stayhomelabnet">
+  <img src="https://img.shields.io/badge/Ko--fi-Support%20StayHomeLabNet-ff5e5b?style=for-the-badge&logo=kofi&logoColor=white" alt="Support StayHomeLabNet on Ko-fi">
+</a>
+<a href="https://buymeacoffee.com/stayhomelabnet">
+  <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20StayHomeLabNet-ffdd00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Support StayHomeLabNet on Buy Me a Coffee">
+</a>
+
+<br>
+
+**Docker XServer Sync が役に立ったら、ぜひサポートをご検討ください。**
+
+</div>
 
 ---
 
-Docker XServer Sync is a cross-platform desktop application designed to safely deploy and synchronize local PHP projects running in Docker (WordPress, Laravel, and custom PHP applications) to XServer shared hosting. Built with safety-first principles, it protects against accidental overwrites, destructive deletions, and unexpected downtime.
+Dockerへbind mountしたローカル開発環境のファイルを、安全な検証とバックアップを経てXServerへ確実に反映するためのGUIデスクトップアプリケーションです。WordPressやLaravelの新規初回セットアップから日々の同期まで、安全性を最優先にした設計となっています。
 
-## Features
+## 機能
 
-- **Safe One-Way Synchronization**:
-  - Strict SSH host key fingerprint verification (SHA-256)
-  - Read-only dry-runs that never modify the remote server
-  - 15-minute diff staging plan
-  - Automatic pre-deployment remote backups
-  - Atomic two-stage deployment: upload to temporary filenames, verify SHA-256 digests, and switch into place (with automatic rollback on failure)
-  - Protection rules for production-generated directories (e.g. `uploads`, `storage`)
-  - Post-deployment automated HTTPS health checks
-- **Laravel Initial Setup Wizard**:
-  - Architecture-recommended separation: Application files (`app/`, `vendor/`) are placed outside public document root (`/home/{user}/{domain}_app`), while public assets (`public/`) are placed in `public_html`
-  - Automatic rewrite of `public_html/index.php` paths (`vendor/autoload.php` and `bootstrap/app.php`)
-  - Automatic `.env` generation with production settings and database credentials
-  - Remote Artisan commands executed via SSH (`key:generate`, `migrate`, `storage:link`, `config:cache`, `route:cache`, `view:cache`)
-  - Database provisioning via XServer API or connecting to a pre-existing database
-- **WordPress Initial Setup Wizard**:
-  - Automated MySQL database and user creation via XServer API, or connection to pre-existing empty databases
-  - Safe, serialized-data-aware domain and URL replacement via remote WP-CLI
-  - PHP version compatibility check (PHP 8.0 - 8.5)
-- **Progress Tracking & Resumption**:
-  - Real-time display of processed file counts, percentage, ETA, and current file paths
-  - Safe interruption at file boundaries with checkpoint resumption after app restart
-- **Cross-Platform Support**:
-  - macOS (Apple Silicon arm64), Windows (x64 installer & zip), Linux (Ubuntu x64)
+- **ローカルからXServerへの安全な一方向同期**:
+  - SSHホスト鍵フィンガープリント（SHA-256）の厳密照合
+  - リモートを変更しない読み取り専用ドライラン
+  - 15分間有効な差分計画のステージング保存
+  - 本番書き込み前の自動リモートバックアップ作成
+  - 一時名転送・ハッシュ照合・アトミック切り替えによる安全同期（失敗時は自動ロールバック）
+  - 本番で生成されるユーザーデータディレクトリ（`uploads`、`storage`等）の保護
+  - 同期後の自動HTTPSヘルスチェック
+- **Laravel 初回セットアップウィザード**:
+  - アプリ本体（`app/`等）とWeb公開領域（`public_html`）のディレクトリ分離配置
+  - `public/index.php` 内の相対パス（autoload / bootstrap）自動書き換え
+  - 本番環境向け `.env` の自動生成
+  - リモートArtisanコマンド（`key:generate`, `migrate`, `storage:link`, キャッシュ最適化）の自動実行
+  - XServer APIによるDB自動作成、または作成済みDBへの接続に対応
+  - ローカルComposer環境からのPHPバージョン自動検出（PHP 8.4等対応）と互換性バリデーション
+  - 配置済みファイルの高速スキップ機能によるレジューム高速化
+- **WordPress 初回セットアップウィザード**:
+  - XServer APIによるDB/ユーザー新規作成、または事前作成済み空DBへの接続
+  - WP-CLIを利用したシリアライズ対応の安全なドメイン/URL一括置換
+  - XServer側PHPバージョンに応じたWP-CLI環境の自動照合
+- **進捗追跡と中断・再開**:
+  - ファイル数・割合（%）・推定残り時間（ETA）・現在のパスのリアルタイム表示
+  - 安全な区切りでの中断と、次回起動後のチェックポイント再開
+- **マルチプラットフォーム対応**:
+  - macOS (Apple Silicon arm64)、Windows (x64 インストーラー & zip)、Linux (Ubuntu x64)
 
-## Install
+## インストール
 
-Download the latest release from [GitHub Releases](https://github.com/StayHomeLabNet/docker-xserver-sync/releases/latest).
+[GitHub Releases](https://github.com/StayHomeLabNet/docker-xserver-sync/releases/latest) より最新版をダウンロードしてください。
 
 ### macOS
-1. Download `Docker XServer Sync-macOS-arm64.zip`.
-2. Extract and move `Docker XServer Sync.app` to your `/Applications` folder.
+1. `Docker XServer Sync-macOS-arm64.zip` をダウンロードします。
+2. 解凍して現れる `Docker XServer Sync.app` を `/Applications`（アプリケーションフォルダ）へ移動して起動します。
 
 ### Windows
-- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v0.3.0.exe`.
-- **Portable**: Extract `Docker XServer Sync-Windows-x64.zip` and run `Docker XServer Sync.exe`.
+- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v0.3.1.exe` を実行してセットアップします。
+- **ポータブル版**: `Docker XServer Sync-Windows-x64.zip` を展開し、フォルダ内の `Docker XServer Sync.exe` を起動します。
 
 ### Linux
-Extract `Docker XServer Sync-Linux-x64.tar.gz` and run the executable.
+`Docker XServer Sync-Linux-x64.tar.gz` を展開し、バイナリを実行します。
 
 ---
 
-## Quick Start
+## クイックスタート
 
-1. Launch the application and click **New Project**.
-2. Select your site type (WordPress, Laravel, or Custom PHP) and configure local roots and XServer SSH connection details.
-3. Follow the safe deployment pipeline:
-   - **Read-Only Dry Run**: Compares local files against XServer and generates a diff plan.
-   - **Revalidate Plan**: Verifies that remote and local files have not drifted before deployment.
-   - **Create Backup**: Creates a remote backup archive of target files on XServer.
-   - **Approved Sync**: Review changes and target domain before executing atomic deployment.
-4. Optionally enable **Auto Sync** in settings to execute the full pipeline with a single confirmation click after dry-run.
-
----
-
-## Laravel Setup
-
-To deploy a local Docker Laravel project to a fresh XServer domain:
-
-1. Select a project with site type set to **Laravel**.
-2. In the setup panel, click **Start Setup…**.
-3. **Wizard Configuration**:
-   - **Database**: Select whether to create a new database via XServer API or connect to an existing database.
-   - **Remote Paths**:
-     - Application Root: `/home/{user}/{domain}_app` (outside public web space)
-     - Document Root: `/home/{user}/{domain}/public_html` (web root)
-   - **App Configuration**: Enter App Name, App URL, and choose migration mode (`php artisan migrate` or SQL dump).
-4. Run the wizard: files are deployed, `index.php` paths are adjusted, `.env` is generated, Artisan commands are executed, and HTTPS health checks verify the live site.
+1. アプリを起動し、「新規プロジェクト」をクリックして設定を作成します。
+2. サイト種別（WordPress / Laravel / カスタムPHP）を選択し、ローカルフォルダとXServerの接続情報を入力します。
+3. **安全同期の手順**:
+   - **読み取り専用ドライラン**: ローカルとXServerのファイルを照合し、変更計画を作成します。
+   - **計画を再検証**: 反映直前に差分が変わっていないかを検証します。
+   - **バックアップを作成**: 対象リモートファイルのバックアップを取得します。
+   - **承認付き同期**: 変更内容とドメインを確認・承認してXServerへ反映します。
+4. 設定画面から「安全同期を自動実行」を設定することで、ドライラン後の1クリック承認のみで一連の安全手順を自動完了させることも可能です。
 
 ---
 
-## WordPress Setup
+## Laravel初回セットアップ
 
-To deploy a local Docker WordPress project to a fresh XServer domain:
+ローカルDockerのLaravelサイトをXServerへ新規配置する手順です：
 
-1. Select a project with site type set to **WordPress**.
-2. In the setup panel, click **Start Setup…**.
-3. Choose database provisioning mode (XServer API or pre-existing database), and specify your local SQL dump and `wp-content` options.
-4. Select the remote PHP version (PHP 8.0 - 8.5; default: 8.3).
-5. The wizard automatically transfers files, imports database tables, performs serialized URL replacement via WP-CLI, and validates HTTPS access.
+1. プロジェクト種別を「Laravel」にして保存したプロジェクトを選択します。
+2. 「Laravel初回セットアップ」欄の「セットアップを開始…」をクリックします。
+3. **ウィザードの入力手順**:
+   - **データベース設定**: XServer APIを利用して自動作成するか、サーバーパネルで作成済みのDB接続情報を入力します。
+   - **リモートパス設定**:
+     - 本体配置先: `/home/{user}/{domain}_app`（公開領域外）
+     - 公開配置先: `/home/{user}/{domain}/public_html`（ドキュメントルート）
+   - **PHPバージョン**: ローカルの `platform_check.php` から要求バージョン（例: PHP 8.4）が自動検出されます。
+   - **アプリケーション設定**: アプリ名、本番URL、マイグレーション方式（Artisan migrate または SQLダンプ）を選択します。
+4. 実行すると、ファイル転送、`index.php` 書き換え、`.env` 生成、Artisanコマンド実行、HTTPS疎通確認まで全自動で完了します。
 
 ---
 
-## CLI Usage
+## WordPress初回セットアップ
 
-You can also use the `dxsync` command-line tool for local scanning and remote dry-runs:
+ローカルDockerのWordPressサイトをXServerへ新規配置する手順です：
+
+1. プロジェクト種別を「WordPress」にして保存したプロジェクトを選択します。
+2. 「WordPress初回セットアップ」欄の「セットアップを開始…」をクリックします。
+3. DB作成方法（API自動作成 / 作成済みDB）を選択し、SQLダンプファイルと転送する `wp-content` コンテンツを指定します。
+4. 使用するPHPバージョン（8.0〜8.5、既定: 8.3）を選択して実行します。
+5. ファイル配置、DBインポート、WP-CLIによるURL置換、HTTPS確認が自動実行されます。
+
+---
+
+## CLIでの利用
+
+CLIコマンド `dxsync` を使ってターミナルからスキャンやドライランを実行することも可能です。
 
 ```bash
-# Scan local directory
+# ローカル走査
 dxsync scan --site wordpress --root /path/to/site
 
-# Read-only dry run against XServer
+# XServerとの読み取り専用ドライラン
 dxsync dry-run \
   --site wordpress \
   --root /path/to/site \
@@ -131,29 +151,29 @@ dxsync dry-run \
 
 ---
 
-## Development
+## 開発・ビルド
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Python 3.12以上と [uv](https://docs.astral.sh/uv/) を使用します。
 
 ```bash
-# Install dependencies
+# 依存関係のインストール
 uv sync --extra dev --extra gui --extra ssh --extra build
 
-# Run unit tests (130 passing tests)
+# ユニットテスト実行（全135件）
 uv run pytest
 
-# Launch GUI
+# GUI起動
 uv run dxsync-gui
 ```
 
-### Building Application Packages
+### パッケージのビルド
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v0.3.0.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v0.3.1.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---
 
-## License
+## ライセンス
 
-This project is licensed under the [MIT License](LICENSE).
+本プロジェクトは [MIT License](LICENSE) のもとで公開されています。
