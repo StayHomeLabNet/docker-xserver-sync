@@ -447,3 +447,21 @@ def test_main_window_show_about_includes_github_link(tmp_path: Path, monkeypatch
     assert any(label.openExternalLinks() for label in shown_boxes[0].findChildren(QLabel))
     window.close()
 
+
+def test_main_window_help_menu_has_online_manual(tmp_path: Path, monkeypatch) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    assert window.manual_action.text() == "オンラインマニュアル"
+
+    opened_urls = []
+    from PySide6.QtGui import QDesktopServices
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened_urls.append(url.toString()))
+    window._open_online_manual()
+
+    assert len(opened_urls) == 1
+    assert "StayHomeLabNet/docker-xserver-sync/blob/main/docs/manual.md" in opened_urls[0]
+    window.close()
+

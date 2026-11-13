@@ -19,10 +19,11 @@ try:
         Qt,
         QThread,
         QTimer,
+        QUrl,
         Signal,
         Slot,
     )
-    from PySide6.QtGui import QColor, QFont
+    from PySide6.QtGui import QColor, QDesktopServices, QFont
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -1269,6 +1270,8 @@ class MainWindow(QMainWindow):
         reset_action.triggered.connect(self._reset_display_settings)
 
         help_menu = self.menuBar().addMenu("ヘルプ")
+        self.manual_action = help_menu.addAction("オンラインマニュアル")
+        self.manual_action.triggered.connect(self._open_online_manual)
         about_action = help_menu.addAction("バージョン情報")
         about_action.triggered.connect(self._show_about)
 
@@ -1324,6 +1327,13 @@ class MainWindow(QMainWindow):
         self.settings.sync()
         self.mask_toggle.setChecked(False)
         self._apply_connection_masks()
+
+    @Slot()
+    def _open_online_manual(self) -> None:
+        manual_url = (
+            "https://github.com/StayHomeLabNet/docker-xserver-sync/blob/main/docs/manual.md"
+        )
+        QDesktopServices.openUrl(QUrl(manual_url))
 
     @Slot()
     def _show_about(self) -> None:
