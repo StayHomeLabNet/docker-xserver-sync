@@ -1005,6 +1005,12 @@ class MainWindow(QMainWindow):
         )
         self.laravel_setup_button.clicked.connect(self._start_laravel_setup)
         setup_layout.addWidget(self.laravel_setup_button)
+        self.laravel_resume_button = QPushButton("中断したセットアップを再開…")
+        self.laravel_resume_button.setToolTip(
+            "配置済みファイルを検査し、未完了ステップから再開します"
+        )
+        self.laravel_resume_button.clicked.connect(self._start_laravel_setup)
+        setup_layout.addWidget(self.laravel_resume_button)
         self.setup_panel.setVisible(False)
         layout.addWidget(self.setup_panel)
 
@@ -1436,6 +1442,8 @@ class MainWindow(QMainWindow):
         self.wordpress_resume_button.setEnabled(idle and is_wordpress)
         self.laravel_setup_button.setVisible(is_laravel)
         self.laravel_setup_button.setEnabled(idle and is_laravel)
+        self.laravel_resume_button.setVisible(is_laravel)
+        self.laravel_resume_button.setEnabled(idle and is_laravel)
         if is_wordpress:
             self.setup_text.setText(
                 "WordPress初回セットアップ — "
@@ -1564,6 +1572,7 @@ class MainWindow(QMainWindow):
         self._begin_operation(
             "laravel_setup",
             details={
+                "resumable": True,
                 "database_mode": request.database_mode,
                 "database": request.existing_db_name,
                 "database_user": request.existing_db_user,
@@ -2037,6 +2046,7 @@ class MainWindow(QMainWindow):
         )
         self.progress_bar.setVisible(False)
         if health_ok:
+            self._retire_resumable_operations("laravel_setup")
             self.summary.setText(
                 f"Laravelセットアップ完了 / {result.transferred_app_files + result.transferred_public_files}ファイル転送 / "
                 f"DB: {result.db_name}"
@@ -2325,6 +2335,7 @@ class MainWindow(QMainWindow):
                 "force_overwrite",
                 "restore",
                 "wordpress_setup",
+                "laravel_setup",
             }
             else "read_only"
         }

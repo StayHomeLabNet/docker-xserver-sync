@@ -45,6 +45,7 @@ def test_main_window_site_order(tmp_path: Path) -> None:
     assert window.setup_panel.isHidden()
     assert window.wordpress_setup_button.isHidden()
     assert window.laravel_setup_button.isHidden()
+    assert window.laravel_resume_button.isHidden()
     assert window.wordpress_setup_button.text() == "セットアップを開始…"
     assert window.wordpress_setup_action.text() == (
         "WordPressをXServerへ新規セットアップ…"
@@ -99,7 +100,9 @@ def test_setup_panel_follows_selected_project_site_type(tmp_path: Path) -> None:
     )
     assert not window.setup_panel.isHidden()
     assert not window.wordpress_setup_button.isHidden()
+    assert not window.wordpress_resume_button.isHidden()
     assert window.laravel_setup_button.isHidden()
+    assert window.laravel_resume_button.isHidden()
     assert window.wordpress_setup_action.isVisible()
     assert not window.laravel_setup_action.isVisible()
     assert "WordPress初回セットアップ" in window.setup_text.text()
@@ -109,7 +112,9 @@ def test_setup_panel_follows_selected_project_site_type(tmp_path: Path) -> None:
     )
     assert not window.setup_panel.isHidden()
     assert window.wordpress_setup_button.isHidden()
+    assert window.wordpress_resume_button.isHidden()
     assert not window.laravel_setup_button.isHidden()
+    assert not window.laravel_resume_button.isHidden()
     assert not window.wordpress_setup_action.isVisible()
     assert window.laravel_setup_action.isVisible()
     assert "Laravel初回セットアップ" in window.setup_text.text()
@@ -307,5 +312,55 @@ def test_deployment_progress_does_not_duplicate_phase_or_prefix(
 
     # The summary label shows the full stage and phase detail
     assert "自動実行 4/4 — 承認済み同期を実行中… 転送準備: data/backups/manual_data.json" in window.summary.text()
+    window.close()
+
+
+def test_laravel_resumable_operation_lifecycle(tmp_path: Path) -> None:
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    laravel_mapping = SyncMapping.create(
+        "Laravel",
+        str(tmp_path / "laravel"),
+        "/home/sample/laravel.example.com",
+    )
+    laravel = Project.create(
+        name="Laravel",
+        site_type=SiteType.LARAVEL,
+        domain="laravel.example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference="/tmp/test.key",
+        mappings=(laravel_mapping,),
+    )
+    store.save(laravel)
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window.project_combo.setCurrentIndex(
+        window.project_combo.findData(laravel.project_id)
+    )
+
+    # Initially no resumable operation
+    assert window._latest_resumable_operation() is None
+
+    # Simulate an interrupted laravel_setup (e.g. app was closed while running)
+    op = store.start_operation(
+        project_id=laravel.project_id,
+        mapping_id=laravel_mapping.mapping_id,
+        kind="laravel_setup",
+        details={"resumable": True, "database_mode": "create"},
+    )
+    store.recover_interrupted_operations()
+
+    resumable = window._latest_resumable_operation()
+    assert resumable is not None
+    assert resumable.operation_id == op.operation_id
+    assert resumable.kind == "laravel_setup"
+
+    # Retiring marks it not resumable
+    window._retire_resumable_operations("laravel_setup")
+    assert window._latest_resumable_operation() is None
     window.close()
 
