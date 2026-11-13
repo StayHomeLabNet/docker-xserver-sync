@@ -66,3 +66,14 @@
 ### 📚 AI Skill Definition & Documentation
 - Included official Antigravity skill definitions (`skills/docker-xserver-sync/SKILL.md` and `.gemini/skills/docker-xserver-sync/SKILL.md`).
 - Expanded user manuals (`docs/manual.md` / `docs/manual.en.md`) with comprehensive CLI and AI/MCP chapters.
+
+---
+
+## SHA-256
+
+```text
+d40741131e2cd61c89c95c240c87b798016bd7d8217545026ef4b8bce3d635aa  Docker XServer Sync-macOS-arm64.zip
+2e6c2cecd447aa22b057b15a21f4c6e9d9e63cbb42aca3045b45b4ca2526b49e  Docker XServer Sync-Windows-x64.zip
+eff2136564e5fa2afa65fdda76bb54a4906e9e2400c895a949a1f1b9ee917391  Docker-XServer-Sync-Setup-v0.4.0.exe
+9fc2cae5cbaf027790423fb8457d1f9777db8f8426822cbd65573ee58507745f  Docker XServer Sync-Linux-x64.tar.gz
+```
