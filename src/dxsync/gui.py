@@ -1327,12 +1327,21 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "Docker → XServer Sync バージョン情報",
-            f"Docker → XServer Sync\nバージョン {__version__}\n\n"
-            "接続先の確認コードはOS資格情報ストアに保存します。",
+        github_url = "https://github.com/StayHomeLabNet/docker-xserver-sync"
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("Docker → XServer Sync バージョン情報")
+        dialog.setTextFormat(Qt.RichText)
+        dialog.setText(
+            f"<h3>Docker → XServer Sync</h3>"
+            f"<p>バージョン: <b>{__version__}</b></p>"
+            f'<p>GitHub リポジトリ:<br><a href="{github_url}">{github_url}</a></p>'
+            f"<p>接続先の確認コードはOS資格情報ストアに安全に保存します。</p>"
         )
+        dialog.setStandardButtons(QMessageBox.Ok)
+        for label in dialog.findChildren(QLabel):
+            label.setOpenExternalLinks(True)
+        dialog.exec()
 
     @Slot()
     def _show_security_status(self) -> None:

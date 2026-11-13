@@ -426,3 +426,24 @@ def test_main_window_duplicate_project_flow(tmp_path: Path, monkeypatch) -> None
     assert window._current_project.project_id != project.project_id
     window.close()
 
+
+def test_main_window_show_about_includes_github_link(tmp_path: Path, monkeypatch) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    shown_boxes = []
+
+    def mock_exec(box_self):
+        shown_boxes.append(box_self)
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec", mock_exec)
+    window._show_about()
+
+    assert len(shown_boxes) == 1
+    assert "https://github.com/StayHomeLabNet/docker-xserver-sync" in shown_boxes[0].text()
+    assert any(label.openExternalLinks() for label in shown_boxes[0].findChildren(QLabel))
+    window.close()
+

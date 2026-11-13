@@ -10,7 +10,7 @@
 
 <br>
 
-[Features](#features) ・ [Install](#install) ・ [Quick Start](#quick-start) ・ [Laravel Setup](#laravel-setup) ・ [WordPress Setup](#wordpress-setup) ・ [CLI Usage](#cli-usage) ・ [Development](#development) ・ [License](#license)
+[Features](#features) ・ [Install](#install) ・ [Quick Start](#quick-start) ・ [User Manual](#user-manual) ・ [Laravel Setup](#laravel-setup) ・ [WordPress Setup](#wordpress-setup) ・ [CLI Usage](#cli-usage) ・ [Development](#development) ・ [License](#license)
 
 <br>
 
@@ -96,6 +96,17 @@ Extract `Docker XServer Sync-Linux-x64.tar.gz` and run the executable.
    - **Create Backup**: Creates a remote backup of affected files.
    - **Approved Sync**: Reviews file count and domain, then applies changes atomically.
 4. Enable **Auto-run safe sync pipeline** in Settings to run the entire sequence with a single confirmation click.
+
+---
+
+## User Manual
+
+For an exhaustive guide covering architecture, all site workflows (Custom PHP, WordPress, Laravel), pause/resume details, and troubleshooting:
+
+- 📖 **[Comprehensive User Manual (English)](docs/manual.en.md)**
+- 📖 **[詳細マニュアル (日本語版)](docs/manual.md)**
+
+---
 
 ---
 
