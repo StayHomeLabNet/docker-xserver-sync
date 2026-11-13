@@ -363,4 +363,4 @@ AI: dxsync_dry_run を実行して差分を確認後、dxsync_auto_sync を呼�
 
 ---
 
-*マニュアル発行日: 2026年11月 / バージョン v0.3.2 対応 / StayHomeLabNet*
+*マニュアル発行日: 2026年11月 / バージョン v0.4.0 対応 / StayHomeLabNet*

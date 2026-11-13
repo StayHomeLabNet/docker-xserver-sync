@@ -16,7 +16,7 @@ $buildRoot = Join-Path $env:TEMP ("dxsync-windows-build-" + [guid]::NewGuid().To
 $buildVenv = Join-Path $buildRoot "venv"
 $distDirectory = Join-Path $repoRoot "dist"
 $zipPath = Join-Path $distDirectory "Docker XServer Sync-Windows-x64.zip"
-$installerPath = Join-Path $distDirectory "Docker-XServer-Sync-Setup-v0.3.2.exe"
+$installerPath = Join-Path $distDirectory "Docker-XServer-Sync-Setup-v0.4.0.exe"
 
 New-Item -ItemType Directory -Path $buildRoot | Out-Null
 
@@ -31,8 +31,8 @@ try {
         --standalone `
         --windows-console-mode=disable `
         --product-name="Docker XServer Sync" `
-        --product-version="0.3.2" `
-        --file-version="0.3.2" `
+        --product-version="0.4.0" `
+        --file-version="0.4.0" `
         --windows-icon-from-ico="$repoRoot/assets/app-icon.ico" `
         --output-filename="Docker XServer Sync.exe" `
         --enable-plugin=pyside6 `
