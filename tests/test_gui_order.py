@@ -1,5 +1,6 @@
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -52,6 +53,16 @@ def test_main_window_site_order(tmp_path: Path) -> None:
     )
     assert not window.wordpress_setup_action.isVisible()
     assert not window.laravel_setup_action.isVisible()
+
+    # Verify project bar button order: combo -> new -> duplicate -> edit -> delete -> recovery -> history
+    pb = window.project_bar
+    assert pb.indexOf(window.project_combo) < pb.indexOf(window.new_project_button)
+    assert pb.indexOf(window.new_project_button) < pb.indexOf(window.duplicate_project_button)
+    assert pb.indexOf(window.duplicate_project_button) < pb.indexOf(window.edit_project_button)
+    assert pb.indexOf(window.edit_project_button) < pb.indexOf(window.delete_project_button)
+    assert pb.indexOf(window.delete_project_button) < pb.indexOf(window.recovery_button)
+    assert pb.indexOf(window.recovery_button) < pb.indexOf(window.history_button)
+    assert not window.duplicate_project_button.isEnabled()
     window.close()
 
 
@@ -362,5 +373,56 @@ def test_laravel_resumable_operation_lifecycle(tmp_path: Path) -> None:
     # Retiring marks it not resumable
     window._retire_resumable_operations("laravel_setup")
     assert window._latest_resumable_operation() is None
+    window.close()
+
+
+def test_main_window_duplicate_project_flow(tmp_path: Path, monkeypatch) -> None:
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    key_file = tmp_path / "id_rsa"
+    key_file.write_text("dummy key")
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    mapping = replace(
+        SyncMapping.create(
+            "site",
+            str(site_dir),
+            "/home/sample/example.com/public_html",
+        ),
+        runtime_paths_confirmed=True,
+    )
+    project = Project.create(
+        name="original.example.com",
+        site_type=SiteType.WORDPRESS,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference=str(key_file),
+        mappings=(mapping,),
+    )
+    store.save(project)
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    # The saved project is selected on startup, so duplicate is enabled
+    assert window.duplicate_project_button.isEnabled()
+
+    # When duplicate dialog executes and saves:
+    from dxsync.project_dialog import ProjectDialog
+
+    def mock_exec(dialog_self):
+        dialog_self._save()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(ProjectDialog, "exec", mock_exec)
+    window._duplicate_project()
+
+    # MainWindow should have automatically reloaded and selected the duplicated project
+    assert window._current_project is not None
+    assert window._current_project.name == "original.example.com のコピー"
+    assert window._current_project.project_id != project.project_id
     window.close()
 

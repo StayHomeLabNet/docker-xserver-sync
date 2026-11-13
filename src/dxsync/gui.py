@@ -959,22 +959,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle)
 
         project_bar = QHBoxLayout()
+        self.project_bar = project_bar
         project_bar.addWidget(QLabel("プロジェクト"))
         self.project_combo = QComboBox()
         self.project_combo.currentIndexChanged.connect(self._project_selected)
         project_bar.addWidget(self.project_combo, 1)
         self.new_project_button = QPushButton("新規…")
         self.new_project_button.clicked.connect(self._new_project)
+        self.duplicate_project_button = QPushButton("複製…")
+        self.duplicate_project_button.setToolTip("選択中のプロジェクトを複製します")
+        self.duplicate_project_button.clicked.connect(self._duplicate_project)
         self.edit_project_button = QPushButton("編集…")
         self.edit_project_button.clicked.connect(self._edit_project)
         self.delete_project_button = QPushButton("削除")
         self.delete_project_button.clicked.connect(self._delete_project)
-        self.history_button = QPushButton("履歴…")
-        self.history_button.clicked.connect(self._show_history)
         self.recovery_button = QPushButton("安全性確認")
         self.recovery_button.clicked.connect(self._start_recovery_scan)
         self.recovery_button.setEnabled(False)
+        self.history_button = QPushButton("履歴…")
+        self.history_button.clicked.connect(self._show_history)
         project_bar.addWidget(self.new_project_button)
+        project_bar.addWidget(self.duplicate_project_button)
         project_bar.addWidget(self.edit_project_button)
         project_bar.addWidget(self.delete_project_button)
         project_bar.addWidget(self.recovery_button)
@@ -1172,8 +1177,11 @@ class MainWindow(QMainWindow):
         project_id = self.project_combo.itemData(index) if index >= 0 else None
         self._current_project = self._projects.get(project_id)
         has_project = self._current_project is not None
+        self.duplicate_project_button.setEnabled(has_project)
         self.edit_project_button.setEnabled(has_project)
         self.delete_project_button.setEnabled(has_project)
+        if hasattr(self, "duplicate_project_action"):
+            self.duplicate_project_action.setEnabled(has_project)
         self.recovery_button.setEnabled(has_project and self._thread is None)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
@@ -1232,6 +1240,10 @@ class MainWindow(QMainWindow):
         project_menu = self.menuBar().addMenu("プロジェクト")
         new_action = project_menu.addAction("新しいプロジェクト…")
         new_action.triggered.connect(self._new_project)
+        self.duplicate_project_action = project_menu.addAction(
+            "現在のプロジェクトを複製…"
+        )
+        self.duplicate_project_action.triggered.connect(self._duplicate_project)
         self.wordpress_setup_action = project_menu.addAction(
             "WordPressをXServerへ新規セットアップ…"
         )
@@ -2107,6 +2119,18 @@ class MainWindow(QMainWindow):
         )
 
     @Slot()
+    def _duplicate_project(self) -> None:
+        if self._current_project is None:
+            return
+        dialog = ProjectDialog(
+            self.store,
+            duplicate_from=self._current_project,
+            parent=self,
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.saved_project is not None:
+            self._reload_projects(dialog.saved_project.project_id)
+
+    @Slot()
     def _edit_project(self) -> None:
         if self._current_project is None:
             return
@@ -2404,6 +2428,7 @@ class MainWindow(QMainWindow):
             self.key_edit,
             self.passphrase_edit,
             self.new_project_button,
+            self.duplicate_project_button,
             self.edit_project_button,
             self.delete_project_button,
             self.history_button,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -121,15 +121,23 @@ class ProjectDialog(QDialog):
         store: ProjectStore,
         project: Project | None = None,
         parent=None,
+        *,
+        duplicate_from: Project | None = None,
     ) -> None:
         super().__init__(parent)
         self.store = store
         self.original = project
+        self.duplicate_from = duplicate_from
         self.saved_project: Project | None = None
         self._original_mappings = {
             mapping.mapping_id: mapping for mapping in project.mappings
         } if project else {}
-        self.setWindowTitle("プロジェクトを編集" if project else "プロジェクトを作成")
+        if duplicate_from:
+            self.setWindowTitle("プロジェクトを複製")
+        elif project:
+            self.setWindowTitle("プロジェクトを編集")
+        else:
+            self.setWindowTitle("プロジェクトを作成")
         self.resize(960, 720)
         self.setMinimumSize(760, 560)
 
@@ -145,10 +153,19 @@ class ProjectDialog(QDialog):
         scroll.setWidget(content)
         outer_layout.addWidget(scroll, 1)
         intro_row = QHBoxLayout()
+        self.intro_row = intro_row
         intro = QLabel("分からない値は、右の「入力項目の確認方法」で場所と例を確認できます。")
         intro.setWordWrap(True)
         intro_row.addWidget(intro, 1)
+        self.duplicate_button = QPushButton("複製…")
+        self.duplicate_button.setToolTip(
+            "このプロジェクトの設定を複製して新しいプロジェクトを作成します"
+        )
+        self.duplicate_button.clicked.connect(self._duplicate_project)
+        self.duplicate_button.setVisible(bool(project))
+        intro_row.addWidget(self.duplicate_button)
         help_button = QPushButton("入力項目の確認方法")
+        self.help_button = help_button
         help_button.clicked.connect(self._show_setup_help)
         intro_row.addWidget(help_button)
         layout.addLayout(intro_row)
@@ -264,6 +281,8 @@ class ProjectDialog(QDialog):
 
         if project:
             self._load(project)
+        elif duplicate_from:
+            self._load_duplicate(duplicate_from)
         self._site_changed(self.site_combo.currentIndex())
 
     def _site_changed(self, index: int) -> None:
@@ -315,6 +334,82 @@ class ProjectDialog(QDialog):
                 mapping.protect_patterns,
                 mapping.runtime_paths_confirmed,
             )
+
+    def _generate_duplicate_name(self, base_name: str) -> str:
+        existing_names = {p.name for p in self.store.list_projects()}
+        candidate = f"{base_name} のコピー"
+        if candidate not in existing_names:
+            return candidate
+        index = 2
+        while f"{base_name} のコピー {index}" in existing_names:
+            index += 1
+        return f"{base_name} のコピー {index}"
+
+    def _load_duplicate(self, project: Project) -> None:
+        self.name_edit.setText(self._generate_duplicate_name(project.name))
+        index = self.site_combo.findData(project.site_type.value)
+        self.site_combo.setCurrentIndex(max(index, 0))
+        self.domain_edit.setText(project.domain)
+        self.host_edit.setText(project.ssh_host)
+        self.port_spin.setValue(project.ssh_port)
+        self.user_edit.setText(project.ssh_username)
+        self.fingerprint_edit.setText(project.host_key_fingerprint)
+        self.key_edit.setText(project.private_key_reference)
+        for mapping in project.mappings:
+            self._append_mapping(
+                mapping.name,
+                mapping.local_root,
+                mapping.remote_root,
+                None,
+                mapping.protect_patterns,
+                mapping.runtime_paths_confirmed,
+            )
+
+    def _build_snapshot(self) -> Project | None:
+        mappings = self._read_mappings()
+        if not mappings and self.original:
+            mappings = self.original.mappings
+        if not mappings and self.duplicate_from:
+            mappings = self.duplicate_from.mappings
+        base_name = self.name_edit.text().strip() or (
+            self.original.name
+            if self.original
+            else (self.duplicate_from.name if self.duplicate_from else "プロジェクト")
+        )
+        site_type_val = self.site_combo.currentData()
+        site_type = (
+            SiteType(site_type_val)
+            if site_type_val
+            else (self.original.site_type if self.original else SiteType.CUSTOM_PHP)
+        )
+        return Project(
+            project_id=self.original.project_id if self.original else "",
+            name=base_name,
+            site_type=site_type,
+            domain=self.domain_edit.text().strip() or (self.original.domain if self.original else ""),
+            ssh_host=self.host_edit.text().strip() or (self.original.ssh_host if self.original else ""),
+            ssh_port=self.port_spin.value(),
+            ssh_username=self.user_edit.text().strip() or (self.original.ssh_username if self.original else ""),
+            host_key_fingerprint=self.fingerprint_edit.text().strip() or (self.original.host_key_fingerprint if self.original else ""),
+            private_key_reference=self.key_edit.text().strip() or (self.original.private_key_reference if self.original else ""),
+            mappings=mappings,
+        )
+
+    @Slot()
+    def _duplicate_project(self) -> None:
+        source_project = self._build_snapshot()
+        if source_project is None:
+            source_project = self.original
+        if source_project is None:
+            return
+        dialog = ProjectDialog(
+            self.store,
+            duplicate_from=source_project,
+            parent=self.parent() or self,
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.saved_project is not None:
+            self.saved_project = dialog.saved_project
+            self.accept()
 
     def _append_mapping(
         self,
