@@ -18,6 +18,9 @@
 - **キャッシュ生成コマンドの安全化**:
   - ルーティングにクロージャ（無名関数）が含まれるプロジェクト等でもセットアップが途中で中断しないよう、キャッシュコマンドのエラーハンドリングを強化しました。
 
+- **プログレスバー・サマリーの二重表示の解消**:
+  - 承認済み同期の実行中、プログレスバー内部と上部サマリーラベルの双方にファイルパスや進捗件数が重複して描画されていた問題を解消し、サマリー欄でファイル詳細を、プログレスバーで件数とパーセントを端的に表示するように改善しました。
+
 ### ドキュメントの改善
 
 - `README.md` を日本語化し、デザインヘッダー（HTMLセンタリング・バッジ構成）を統一。
@@ -53,8 +56,8 @@
 ## SHA-256
 
 ```text
-4fa47f5033a5e80e5330321a82641e1e34bee1e98eb5b89ad40a141e338b5c48  Docker XServer Sync-macOS-arm64.zip
-5c80015241a13388577add5a3e1b98f2a7333bfed8c281c935345bf6ec8b3c95  Docker XServer Sync-Windows-x64.zip
-c8a8a7bfb745b38018a802fbd664da16425eac97fd8eccbc4e9a1d003464340c  Docker-XServer-Sync-Setup-v0.3.1.exe
-9df0f84dfd49862a37494f425b493736a7e90acda16ae12dc07a754afab63f8c  Docker XServer Sync-Linux-x64.tar.gz
+44ac59889e5e8d5503be287b9b2c109964f9af797952f7c60129e60517b915e1  Docker XServer Sync-macOS-arm64.zip
+db1195da7c9b4d30bec1a30c02370d96d55f7fe08443dec847d63a5befea713a  Docker XServer Sync-Windows-x64.zip
+c6e1f031f4ad44919503b06bfa022197a20cd804d21a96dd40cba9e072bb6efd  Docker-XServer-Sync-Setup-v0.3.1.exe
+36a461d79bd5a09d32572d96d6e237a3fe3f77bccdbd4aaa4ca46c5bd17b936b  Docker XServer Sync-Linux-x64.tar.gz
 ```
