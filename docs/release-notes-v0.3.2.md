@@ -39,4 +39,8 @@
 ## SHA-256
 
 ```text
+aab2bf8f468b6135ce92e4028ce4759bf4f2c22fb331e2e00cd745c1ee02d756  Docker XServer Sync-macOS-arm64.zip
+5582cd4bb094ce04c425dd260c20014a7f3686f0d3f732ec937c926f3613ce35  Docker XServer Sync-Windows-x64.zip
+6ae436c2647218a9cee155a729fd83119a738693658fd39cb7d714ac377114d6  Docker-XServer-Sync-Setup-v0.3.2.exe
+339838efee3c01ed7484a537e123e94f8d98b052d852ef7cd7093f9bb205eb5b  Docker XServer Sync-Linux-x64.tar.gz
 ```
