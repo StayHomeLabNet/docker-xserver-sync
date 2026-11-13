@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -18,6 +20,35 @@ from .secure_store import (
 
 
 SCHEMA_VERSION = 5
+
+
+def get_default_state_directory() -> Path:
+    override = os.environ.get("DXSYNC_STATE_DIR")
+    if override:
+        return Path(override)
+    try:
+        from PySide6.QtCore import QStandardPaths
+
+        location = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+        if location:
+            return Path(location)
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        app_data = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        base = Path(app_data) if app_data else Path.home() / "AppData" / "Roaming"
+        return base / "Docker XServer Sync"
+    elif sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Docker XServer Sync"
+    else:
+        xdg_data = os.environ.get("XDG_DATA_HOME")
+        base = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
+        return base / "Docker XServer Sync"
+
+
+def get_default_store(secure_store: HostKeySecureStore | None = None) -> ProjectStore:
+    directory = get_default_state_directory()
+    return ProjectStore(directory / "state.db", secure_store=secure_store)
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,7 @@ A complete, exhaustive operational manual for safely, swiftly, and reliably sync
 9. [Security & Credential Protection](#9-security--credential-protection)
 10. [Troubleshooting & FAQ](#10-troubleshooting--faq)
 11. [CLI (Command Line Interface) Mode](#11-cli-command-line-interface-mode)
+12. [AI & MCP Integration (Antigravity, Claude, Cursor, etc.)](#12-ai--mcp-integration-antigravity-claude-cursor-etc)
 
 ---
 
@@ -287,19 +288,66 @@ If the computer shuts down or network drops during a transfer:
 
 ## 11. CLI (Command Line Interface) Mode
 
-Supports automation in CI/CD environments and shell scripts:
+The tool provides full headless execution for CI/CD pipelines, automation scripts, and AI agents. Adding `--json` to any command yields clean structured JSON output.
 
 ```bash
-# List all configured projects
-dxsync --list-projects
+# List all configured projects (supports --json)
+dxsync project list [--json]
 
-# Run a read-only dry run for a project
-dxsync --project "example.com" --dry-run
+# Show detailed configuration and mappings for a project
+dxsync project show <project_name|domain|id> [--json]
 
-# Run safe automated synchronization
-dxsync --project "example.com" --auto-sync
+# Execute a read-only dry run (no remote modifications)
+dxsync run dry-run <project> [--mapping <mapping_name>] [--json]
+
+# Execute a safe 4-stage automated synchronization pipeline
+# Pass --yes to bypass interactive confirmation (ideal for CI and AI agents)
+dxsync run auto-sync <project> [--mapping <mapping_name>] [--yes] [--json]
+
+# Safety audit and orphaned temporary file cleanup
+dxsync run verify <project> [--cleanup] [--json]
+
+# List historical remote backups
+dxsync backup list <project> [--json]
+
+# Restore remote files from a specific backup
+dxsync backup restore <project> --backup-id <id> [--yes] [--json]
 ```
 
 ---
 
-*Manual Published: November 2026 / Version v0.3.1 / StayHomeLabNet*
+## 12. AI & MCP Integration (Antigravity, Claude, Cursor, etc.)
+
+Docker → XServer Sync implements the **Model Context Protocol (MCP)**, allowing AI assistants to safely query and operate sync tasks.
+
+### 12-1. Safety Architecture
+- **GUI-Managed Credentials**: High-risk configuration (SSH host, credentials, host key fingerprints) remains managed via the GUI and stored in the OS credential store (macOS Keychain, Windows Credential Manager).
+- **AI Scope**: AI assistants can query projects, preview differences via dry runs, trigger automated safe syncs, verify leftover `.new` artifacts, and trigger rollbacks.
+- **Atomic 4-Stage Sync**: When the AI invokes `dxsync_auto_sync`, the application performs the full pipeline: dry run -> plan revalidation -> remote backup -> atomic file deployment -> HTTPS health check.
+
+### 12-2. Launching the MCP Server
+A built-in stdio MCP server is available out of the box with zero additional dependencies:
+
+```bash
+# Launch stdio MCP server
+dxsync mcp
+```
+
+#### Configuration Example (`claude_desktop_config.json` / Cursor)
+```json
+{
+  "mcpServers": {
+    "docker-xserver-sync": {
+      "command": "dxsync",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+#### Antigravity Skill (`/docker-xserver-sync`)
+Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` in the workspace enables Antigravity CLI and IDE to invoke the skill seamlessly.
+
+---
+
+*Manual Published: November 2026 / Version v0.3.2 / StayHomeLabNet*

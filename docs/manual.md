@@ -20,6 +20,7 @@ Docker で開発した Web アプリケーション（独自 PHP、WordPress、L
 9. [セキュリティと認証情報の保護](#9-セキュリティと認証情報の保護)
 10. [トラブルシューティング & FAQ](#10-トラブルシューティング--faq)
 11. [CLI（コマンドライン）モード](#11-cliコマンドラインモード)
+12. [AI / MCP 連携と自動化（Antigravity, Claude, Cursor 等）](#12-ai--mcp-連携と自動化antigravity-claude-cursor-等)
 
 ---
 
@@ -295,19 +296,71 @@ Laravel サイトの分割配置・初回デプロイ・差分同期をサポー
 
 ## 11. CLI（コマンドライン）モード
 
-本ツールは GUI だけでなく、CI/CD パイプラインやターミナルからのスクリプト実行にも対応しています。
+本ツールは GUI だけでなく、CI/CD パイプライン、スクリプト、ターミナルからの完全ヘッドレス実行に対応しています。すべてのコマンドで `--json` オプションを付与することで、スクリプトや AI が処理しやすい構造化 JSON 出力が得られます。
 
 ```bash
-# プロジェクト一覧を表示
-dxsync --list-projects
+# プロジェクト一覧を表示（JSON形式も可能）
+dxsync project list [--json]
 
-# 指定プロジェクトのドライランを実行
-dxsync --project "example.com" --dry-run
+# プロジェクトの詳細設定やパス設定を確認
+dxsync project show <プロジェクト名|ドメイン|ID> [--json]
 
-# 指定プロジェクトの安全同期（自動実行）を実行
-dxsync --project "example.com" --auto-sync
+# 読み取り専用ドライラン（リモートへの変更なし）
+dxsync run dry-run <プロジェクト> [--mapping <マッピング名>] [--json]
+
+# 安全同期（4段階パイプライン）を実行
+# --yes で実行前プロンプトをスキップ可能（AIやCI環境向け）
+dxsync run auto-sync <プロジェクト> [--mapping <マッピング名>] [--yes] [--json]
+
+# 残留一時ファイル（.new）の検査と自動クリーンアップ
+dxsync run verify <プロジェクト> [--cleanup] [--json]
+
+# サーバー側バックアップ履歴の確認
+dxsync backup list <プロジェクト> [--json]
+
+# 指定バックアップからの復元（ロールバック）
+dxsync backup restore <プロジェクト> --backup-id <ID> [--yes] [--json]
 ```
 
 ---
 
-*マニュアル発行日: 2026年11月 / バージョン v0.3.1 対応 / StayHomeLabNet*
+## 12. AI / MCP 連携と自動化（Antigravity, Claude, Cursor 等）
+
+Docker → XServer Sync は **Model Context Protocol (MCP)** に対応しており、AI エージェントからの安全な遠隔操作が可能です。
+
+### 12-1. 安全設計の原則
+- **GUIでの安全な初期設定**: SSHホスト、ポート、秘密鍵パス、確認コードなどの機密情報は GUI で保存され、OS資格情報ストア（Keychain / Credential Manager）で保護されます。
+- **AIからの操作範囲**: AI は保存済みプロジェクトの「一覧・詳細参照」「ドライラン」「安全自動同期（auto-sync）」「安全性確認・ゴミ掃除」「バックアップ復元」のみを安全に実行できます。
+- **一発安全同期パイプライン**: AIが `dxsync_auto_sync` を呼ぶと、内部で「ドライラン走査 → 計画再検証 → 自動リモートバックアップ → アトミック転送 → HTTPSヘルスチェック」が全自動かつ安全に実行されます。
+
+### 12-2. MCP サーバーの起動と設定
+本ツールにはゼロ依存の stdio MCP サーバーが組み込まれています。
+
+```bash
+# MCPサーバーを標準入出力モードで起動
+dxsync mcp
+```
+
+#### Claude Desktop / Cursor の設定例 (`claude_desktop_config.json`)
+```json
+{
+  "mcpServers": {
+    "docker-xserver-sync": {
+      "command": "dxsync",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+#### Antigravity CLI / IDE スキル (`/docker-xserver-sync`)
+リポジトリ直下の `skills/docker-xserver-sync/` または `.gemini/skills/docker-xserver-sync/` を配置することで、Antigravity CLI や IDE から直接スキルとして認識されます。
+
+```markdown
+ユーザー: 「example.com のプロジェクトをドライランして、問題なければ同期して」
+AI: dxsync_dry_run を実行して差分を確認後、dxsync_auto_sync を呼び出して安全に同期を完了します。
+```
+
+---
+
+*マニュアル発行日: 2026年11月 / バージョン v0.3.2 対応 / StayHomeLabNet*
