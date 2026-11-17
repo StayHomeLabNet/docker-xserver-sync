@@ -60,3 +60,14 @@ Docker → XServer Sync の初の正式メジャーリリース **v1.0.0** で�
 
 ### 📄 Licensing
 - Added the root MIT `LICENSE` file.
+
+---
+
+## SHA-256
+
+```text
+97d14415034d0b1231c13564692cdb9efd801d180e82c640a0b65a5f67785b01  Docker XServer Sync-macOS-arm64.zip
+bef9dd3233a0c7e2e7d4c31f981ca138a7b50c0742e3567ae7ae5d8b38eba7cb  Docker XServer Sync-Windows-x64.zip
+1319b01a6342e3604c85a9e310293b4e2ea187946c04de08206b33923dc18823  Docker-XServer-Sync-Setup-v1.0.0.exe
+b75e9fdf3da5537b9c019475cd923b832052a4cb27e05c1071a4773ef948cf0e  Docker XServer Sync-Linux-x64.tar.gz
+```
