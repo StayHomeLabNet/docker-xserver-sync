@@ -44,3 +44,24 @@ def test_scanner_stops_at_safe_checkpoint(tmp_path: Path) -> None:
     with pytest.raises(OperationCancelled):
         LocalScanner().scan(tmp_path, cancellation_token=token)
 
+
+def test_scanner_reports_progress_before_hashing_each_file(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("alpha", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta", encoding="utf-8")
+    events: list[tuple[int, int | None, str]] = []
+
+    LocalScanner().scan(
+        tmp_path,
+        progress_callback=lambda current, total, detail: events.append((current, total, detail)),
+    )
+
+    assert events[0] == (0, None, "")
+    assert (1, None, ".") in events
+    file_events = [event for event in events if event[1] is not None]
+    assert file_events == [
+        (0, 2, "a.txt"),
+        (1, 2, "a.txt"),
+        (1, 2, "b.txt"),
+        (2, 2, "b.txt"),
+    ]
+

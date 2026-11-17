@@ -4,7 +4,7 @@
 
 ## Safe one-way deployment and setup tool from local Docker to XServer
 
-**Docker XServer Sync safely deploys and synchronizes local Docker-based WordPress, Laravel, and custom PHP sites to XServer production environments with dry-run verification, approval gates, and automatic backups.**
+**Docker XServer Sync safely deploys and synchronizes local Docker-based WordPress, Laravel, custom PHP, and static sites to XServer production environments with dry-run verification, approval gates, and automatic backups.**
 
 [English](README.en.md) | [日本語](README.md)
 
@@ -14,7 +14,7 @@
 
 <br>
 
-![version](https://img.shields.io/badge/version-0.4.0-blue)
+![version](https://img.shields.io/badge/version-1.0.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -39,14 +39,14 @@
 
 ---
 
-Docker XServer Sync is a cross-platform desktop application designed to safely deploy and synchronize local PHP projects running in Docker (WordPress, Laravel, and custom PHP applications) to XServer shared hosting. Built with safety-first principles, it protects against accidental overwrites, destructive deletions, and unexpected downtime.
+Docker XServer Sync is a cross-platform desktop application designed to safely deploy and synchronize local web projects (WordPress, Laravel, custom PHP, and static sites) to XServer shared hosting. Built with safety-first principles, it protects against accidental overwrites, destructive deletions, and unexpected downtime.
 
 ## Features
 
 - **Safe One-Way Synchronization**:
   - Strict SSH host key fingerprint verification (SHA-256)
   - Read-only dry-runs that never modify the remote server
-  - 15-minute diff staging plan
+  - Diff staging plan (valid for 15 minutes by default, configurable up to 60 minutes)
   - Automatic pre-deployment remote backups
   - Atomic two-stage deployment: upload to temporary filenames, verify SHA-256 digests, and switch into place (with automatic rollback on failure)
   - Protection rules for production-generated directories (e.g. `uploads`, `storage`)
@@ -78,7 +78,7 @@ Download the latest release from [GitHub Releases](https://github.com/StayHomeLa
 2. Extract and move `Docker XServer Sync.app` to your `/Applications` folder.
 
 ### Windows
-- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v0.4.0.exe`.
+- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v1.0.0.exe`.
 - **Portable**: Extract `Docker XServer Sync-Windows-x64.zip` and launch `Docker XServer Sync.exe`.
 
 ### Linux
@@ -89,7 +89,7 @@ Extract `Docker XServer Sync-Linux-x64.tar.gz` and run the executable.
 ## Quick Start
 
 1. Launch the app and click **New Project** to configure your site.
-2. Select the site type (WordPress / Laravel / Custom PHP) and provide your local directory and XServer connection details.
+2. Select the site type (WordPress / Laravel / Custom PHP / Static Site) and provide your local directory and XServer connection details.
 3. **Safe Synchronization Workflow**:
    - **Dry Run**: Compares local files against XServer and generates a staged diff plan.
    - **Revalidate Plan**: Verifies that remote files haven't drifted before applying changes.
@@ -101,7 +101,7 @@ Extract `Docker XServer Sync-Linux-x64.tar.gz` and run the executable.
 
 ## User Manual
 
-For an exhaustive guide covering architecture, all site workflows (Custom PHP, WordPress, Laravel), pause/resume details, and troubleshooting:
+For an exhaustive guide covering architecture, all site workflows (Custom PHP, WordPress, Laravel, Static Site), pause/resume details, and troubleshooting:
 
 - 📖 **[Comprehensive User Manual (English)](docs/manual.en.md)**
 - 📖 **[詳細マニュアル (日本語版)](docs/manual.md)**
@@ -169,7 +169,7 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 # Install dependencies
 uv sync --extra dev --extra gui --extra ssh --extra build
 
-# Run unit tests (135 passing tests)
+# Run unit tests (187 passing tests)
 uv run pytest
 
 # Launch GUI
@@ -179,7 +179,7 @@ uv run dxsync-gui
 ### Building Application Packages
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v0.4.0.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.0.0.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---

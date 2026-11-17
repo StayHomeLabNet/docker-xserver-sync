@@ -138,7 +138,7 @@ class SftpScanner:
         candidates: list[tuple[str, str, Any]] = []
         scanned_directories = 0
         report = progress_callback or (lambda _current, _total, _detail: None)
-        report(0, None, "XServerのフォルダを列挙中")
+        report(0, None, "")
 
         while pending:
             if cancellation_token is not None:
@@ -182,10 +182,12 @@ class SftpScanner:
                     issues.append(ScanIssue(relative, "unsupported_type", "Unsupported remote entry type"))
 
         total = len(candidates)
-        report(0, total, "")
+        if total == 0:
+            report(0, 0, "")
         for index, (absolute, relative, entry) in enumerate(candidates, start=1):
             if cancellation_token is not None:
                 cancellation_token.raise_if_cancelled()
+            report(index - 1, total, relative)
             try:
                 with sftp.open(absolute, "rb") as stream:
                     digest = _hash_stream(

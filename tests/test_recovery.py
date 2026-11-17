@@ -67,3 +67,28 @@ def test_recovery_analysis_compares_temporary_and_destination_hashes() -> None:
     assert by_path["index.php.dxsync-plan-abc.new"].assessment == "公開済みコピーと一致"
     assert by_path["index.php.dxsync-plan-abc.new"].destination_sha256 is not None
     assert by_path["nested/old.php.dxsync-restore-plan.old"].assessment == "公開ファイルがなく旧退避だけ存在"
+
+
+def test_recovery_scan_and_analysis_report_progress_and_cancel() -> None:
+    import pytest
+    from dxsync.cancellation import CancellationToken, OperationCancelled
+
+    events: list[tuple[int, int | None, str]] = []
+    analyze_recovery_artifacts(
+        MemorySftp(),
+        "/home/user/site",
+        progress_callback=lambda cur, tot, detail: events.append((cur, tot, detail)),
+    )
+    assert any(tot is None and cur >= 1 for cur, tot, _ in events)
+    assert any(tot == 2 and cur == 0 for cur, tot, _ in events)
+    assert any(tot == 2 and cur == 2 for cur, tot, _ in events)
+
+    cancel = CancellationToken()
+    cancel.cancel()
+    with pytest.raises(OperationCancelled):
+        scan_recovery_artifacts(
+            MemorySftp(),
+            "/home/user/site",
+            cancellation_token=cancel,
+        )
+

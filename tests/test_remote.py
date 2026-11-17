@@ -81,3 +81,22 @@ def test_fingerprint_policy_accepts_only_exact_sha256() -> None:
         pass
     else:
         raise AssertionError("A mismatched host key was accepted")
+
+
+def test_sftp_scanner_reports_progress_before_hashing_each_file() -> None:
+    events: list[tuple[int, int | None, str]] = []
+    SftpScanner().scan(
+        FakeSftp(),
+        "/home/user/site",
+        progress_callback=lambda current, total, detail: events.append((current, total, detail)),
+    )
+
+    assert events[0] == (0, None, "")
+    file_events = [event for event in events if event[1] is not None]
+    assert file_events == [
+        (0, 2, "index.php"),
+        (1, 2, "index.php"),
+        (1, 2, "uploads/photo.jpg"),
+        (2, 2, "uploads/photo.jpg"),
+    ]
+

@@ -4,9 +4,10 @@ import html
 import os
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import timedelta
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 from urllib.parse import urlparse
 
 try:
@@ -110,11 +111,18 @@ from .recovery_dialog import RecoveryAnalysisDialog
 from .revalidation import PlanRevalidator, RevalidationResult
 from .restore import RestoreAuthorization, RestoreResult, RemoteRestoreEngine
 from .rules import PathRules
+from .planner import DEFAULT_PLAN_VALIDITY_MINUTES
 from .scanner import LocalScanner
 from .service import DryRunProgress, DryRunResult, DryRunService
 from .storage import BackupRecord, ProjectStore, StoredPlan
 from .secure_store import SecureStoreError
-from .settings_dialog import MASK_FIELDS, MaskSettingsDialog
+from .settings_dialog import (
+    MASK_FIELDS,
+    MaskSettingsDialog,
+    PlanValiditySettingsDialog,
+    load_plan_validity_minutes,
+    save_plan_validity_minutes,
+)
 from .validation import custom_runtime_paths_issue
 
 
@@ -122,7 +130,88 @@ SITE_LABELS = {
     SiteType.CUSTOM_PHP: "独自 PHP",
     SiteType.WORDPRESS: "WordPress",
     SiteType.LARAVEL: "Laravel",
+    SiteType.STATIC_SITE: "静的サイト",
 }
+
+
+@dataclass(frozen=True)
+class OperationProgress:
+    stage: int
+    total_stages: int
+    message: str
+    current: int | None = None
+    total: int | None = None
+    unit: str = ""
+    detail: str = ""
+    phase_key: tuple[object, ...] | None = None
+    progress_label: str = ""
+    summary_prefix: str = ""
+    remote_wait: bool = True
+
+
+class _ThrottledProgressEmitter:
+    def __init__(
+        self,
+        emit: Callable[[object], None],
+        *,
+        min_interval: float = 0.05,
+    ) -> None:
+        self._emit = emit
+        self._min_interval = min_interval
+        self._last_emitted_at: float | None = None
+        self._last_phase_key: tuple[object, ...] | None = None
+
+    @staticmethod
+    def _classify(event: object) -> tuple[tuple[object, ...] | None, bool]:
+        if isinstance(event, DryRunProgress):
+            key = (event.stage, event.message, event.unit, event.total)
+            is_boundary = event.current is not None and (
+                event.current == 0
+                or (event.total is not None and event.current >= event.total)
+            )
+            return key, is_boundary
+        if isinstance(event, OperationProgress):
+            key = (
+                event.phase_key
+                if event.phase_key is not None
+                else (event.stage, event.message, event.unit, event.total)
+            )
+            is_boundary = event.current is not None and (
+                event.current == 0
+                or (event.total is not None and event.current >= event.total)
+            )
+            return key, is_boundary
+        if isinstance(event, (WordPressSetupProgress, LaravelSetupProgress)):
+            key = (event.step, event.message, event.unit, event.total)
+            is_boundary = event.current is not None and (
+                event.current == 0
+                or (event.total is not None and event.current >= event.total)
+            )
+            return key, is_boundary
+        return None, True
+
+    def __call__(self, event: object) -> None:
+        now = time.monotonic()
+        phase_key, is_boundary = self._classify(event)
+        if (
+            self._last_emitted_at is None
+            or phase_key != self._last_phase_key
+            or is_boundary
+            or (now - self._last_emitted_at) >= self._min_interval
+        ):
+            self._last_emitted_at = now
+            self._last_phase_key = phase_key
+            self._emit(event)
+
+
+def _format_worker_error(exc: Exception) -> str:
+    msg = str(exc).strip()
+    if not msg or msg.lower() == "failure":
+        return (
+            f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - "
+            "サーバーまたはファイルアクセスでエラーが発生しました)"
+        )
+    return msg
 
 
 def _format_size(value: int | None) -> str:
@@ -202,17 +291,52 @@ class FileTableModel(QAbstractTableModel):
 class ScanWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(self, root: Path, site_type: SiteType) -> None:
         super().__init__()
         self.root = root
         self.site_type = site_type
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
         try:
             preset = get_preset(self.site_type)
-            self.completed.emit(LocalScanner(preset.exclude_patterns).scan(self.root))
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+
+            def report(current: int, total: int | None, detail: str) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=1,
+                        total_stages=1,
+                        message=(
+                            "ローカルファイルを列挙中"
+                            if total is None
+                            else "SHA-256を計算中"
+                        ),
+                        current=current,
+                        total=total,
+                        unit="directories" if total is None else "files",
+                        detail=detail,
+                        summary_prefix="ローカル検査中…",
+                        remote_wait=False,
+                    )
+                )
+
+            self.completed.emit(
+                LocalScanner(preset.exclude_patterns).scan(
+                    self.root,
+                    progress_callback=report,
+                    cancellation_token=self.cancellation_token,
+                )
+            )
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:  # worker boundary: surface the failure in the UI
             self.failed.emit(str(exc))
 
@@ -220,6 +344,8 @@ class ScanWorker(QObject):
 class DryRunWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -238,6 +364,7 @@ class DryRunWorker(QObject):
         extra_excludes: tuple[str, ...] = (),
         extra_protected: tuple[str, ...] = (),
         config_sha256: str = "",
+        plan_validity: timedelta = timedelta(minutes=DEFAULT_PLAN_VALIDITY_MINUTES),
     ) -> None:
         super().__init__()
         self.root = root
@@ -254,12 +381,20 @@ class DryRunWorker(QObject):
         self.extra_excludes = extra_excludes
         self.extra_protected = extra_protected
         self.config_sha256 = config_sha256
+        self.plan_validity = plan_validity
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
         client = None
         sftp = None
         try:
+            self.cancellation_token.raise_if_cancelled()
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(DryRunProgress(1, 4, "XServerへSSH接続中"))
             client, sftp = connect_sftp(
                 host=self.host,
                 port=self.port,
@@ -278,20 +413,33 @@ class DryRunWorker(QObject):
                 extra_excludes=self.extra_excludes,
                 extra_protected=self.extra_protected,
                 config_sha256=self.config_sha256,
+                plan_validity=self.plan_validity,
+                progress_callback=emit_progress,
+                cancellation_token=self.cancellation_token,
             )
             self.completed.emit(result)
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:  # worker boundary: surface the failure in the UI
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class RevalidationWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -306,12 +454,25 @@ class RevalidationWorker(QObject):
         self.project = project
         self.mapping = mapping
         self.passphrase = passphrase
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
         client = None
         sftp = None
         try:
+            self.cancellation_token.raise_if_cancelled()
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(
+                OperationProgress(
+                    stage=1,
+                    total_stages=4,
+                    message="XServerへSSH接続中",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -320,26 +481,61 @@ class RevalidationWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
+
+            def report(event: DryRunProgress) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=event.stage,
+                        total_stages=event.total_stages,
+                        message=event.message,
+                        current=event.current,
+                        total=event.total,
+                        unit=event.unit,
+                        detail=event.detail,
+                        phase_key=(
+                            "revalidate",
+                            event.stage,
+                            event.message,
+                            event.unit,
+                            event.total,
+                        ),
+                        progress_label=event.message,
+                        remote_wait=event.stage == 3,
+                    )
+                )
+
             result = PlanRevalidator().revalidate(
                 stored=self.stored,
                 project=self.project,
                 mapping=self.mapping,
                 sftp=sftp,
+                progress_callback=report,
+                cancellation_token=self.cancellation_token,
             )
             self.completed.emit(result)
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class BackupWorker(QObject):
     completed = Signal(object)
     blocked = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -358,12 +554,25 @@ class BackupWorker(QObject):
         self.passphrase = passphrase
         self.backup_root = backup_root
         self.delete_paths = delete_paths
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
         client = None
         sftp = None
         try:
+            self.cancellation_token.raise_if_cancelled()
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(
+                OperationProgress(
+                    stage=1,
+                    total_stages=4,
+                    message="XServerへSSH接続中",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -372,20 +581,79 @@ class BackupWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
-            recovery = scan_recovery_artifacts(sftp, self.mapping.remote_root)
+
+            def report_recovery(current: int, total: int | None, detail: str) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=2,
+                        total_stages=4,
+                        message="残存一時ファイルを確認中",
+                        current=current,
+                        total=total,
+                        unit="directories" if total is None else "files",
+                        detail=detail,
+                    )
+                )
+
+            recovery = scan_recovery_artifacts(
+                sftp,
+                self.mapping.remote_root,
+                progress_callback=report_recovery,
+                cancellation_token=self.cancellation_token,
+            )
             if recovery.temporary_files or recovery.issues:
                 raise RuntimeError(
                     "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
                 )
+
+            def report_revalidation(event: DryRunProgress) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=3,
+                        total_stages=4,
+                        message=f"計画再検証: {event.message}",
+                        current=event.current,
+                        total=event.total,
+                        unit=event.unit,
+                        detail=event.detail,
+                        phase_key=(
+                            "backup_revalidate",
+                            event.stage,
+                            event.message,
+                            event.unit,
+                            event.total,
+                        ),
+                        progress_label=f"計画再検証: {event.message}",
+                        remote_wait=event.stage == 3,
+                    )
+                )
+
             revalidation = PlanRevalidator().revalidate(
                 stored=self.stored,
                 project=self.project,
                 mapping=self.mapping,
                 sftp=sftp,
+                progress_callback=report_revalidation,
+                cancellation_token=self.cancellation_token,
             )
             if not revalidation.valid:
                 self.blocked.emit(revalidation)
                 return
+
+            def report_backup(current: int, total: int, detail: str) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=4,
+                        total_stages=4,
+                        message="バックアップファイルを作成中",
+                        current=current,
+                        total=total,
+                        unit="files",
+                        detail=detail,
+                        phase_key=("backup", total),
+                    )
+                )
+
             result = RemoteBackupEngine().create_backup(
                 sftp=sftp,
                 plan=self.stored.plan,
@@ -393,15 +661,25 @@ class BackupWorker(QObject):
                 remote_root=self.mapping.remote_root,
                 backup_root=self.backup_root,
                 delete_paths=self.delete_paths,
+                progress_callback=report_backup,
+                cancellation_token=self.cancellation_token,
             )
             self.completed.emit(result)
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class DeployWorker(QObject):
@@ -409,6 +687,7 @@ class DeployWorker(QObject):
     blocked = Signal(object)
     failed = Signal(str)
     progress = Signal(int, int, str)
+    status_progress = Signal(object)
     cancelled = Signal(str)
 
     def __init__(
@@ -439,9 +718,19 @@ class DeployWorker(QObject):
     def run(self) -> None:
         client = None
         sftp = None
+        total_stages = 5 if self.health_check_path is not None else 4
         try:
             if not self.stored.staging_path:
                 raise RuntimeError("同期計画にステージングファイルがありません")
+            self.cancellation_token.raise_if_cancelled()
+            emit_status = _ThrottledProgressEmitter(self.status_progress.emit)
+            emit_status(
+                OperationProgress(
+                    stage=1,
+                    total_stages=total_stages,
+                    message="XServerへSSH接続中",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -450,17 +739,61 @@ class DeployWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
-            recovery = scan_recovery_artifacts(sftp, self.mapping.remote_root)
+
+            def report_recovery(current: int, total: int | None, detail: str) -> None:
+                emit_status(
+                    OperationProgress(
+                        stage=2,
+                        total_stages=total_stages,
+                        message="残存一時ファイルを確認中",
+                        current=current,
+                        total=total,
+                        unit="directories" if total is None else "files",
+                        detail=detail,
+                    )
+                )
+
+            recovery = scan_recovery_artifacts(
+                sftp,
+                self.mapping.remote_root,
+                progress_callback=report_recovery,
+                cancellation_token=self.cancellation_token,
+            )
             if recovery.temporary_files or recovery.issues:
                 raise RuntimeError(
                     "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
                 )
+
+            def report_revalidation(event: DryRunProgress) -> None:
+                emit_status(
+                    OperationProgress(
+                        stage=3,
+                        total_stages=total_stages,
+                        message=f"計画再検証: {event.message}",
+                        current=event.current,
+                        total=event.total,
+                        unit=event.unit,
+                        detail=event.detail,
+                        phase_key=(
+                            "deploy_revalidate",
+                            event.stage,
+                            event.message,
+                            event.unit,
+                            event.total,
+                        ),
+                        progress_label=f"計画再検証: {event.message}",
+                        remote_wait=event.stage == 3,
+                    )
+                )
+
             revalidation = PlanRevalidator().revalidate(
                 stored=self.stored,
                 project=self.project,
                 mapping=self.mapping,
                 sftp=sftp,
                 allow_resume=self.resume,
+                progress_callback=report_revalidation,
+                cancellation_token=self.cancellation_token,
             )
             if not revalidation.valid:
                 self.blocked.emit(revalidation)
@@ -477,6 +810,14 @@ class DeployWorker(QObject):
                 cancellation_token=self.cancellation_token,
             )
             if self.health_check_path is not None:
+                emit_status(
+                    OperationProgress(
+                        stage=5,
+                        total_stages=total_stages,
+                        message="HTTPS動作確認を実行中",
+                        detail=f"https://{self.project.domain}{self.health_check_path}",
+                    )
+                )
                 result = replace(
                     result,
                     health_check=perform_https_health_check(
@@ -488,21 +829,25 @@ class DeployWorker(QObject):
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
-            msg = str(exc).strip()
-            if not msg or msg.lower() == "failure":
-                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
-            self.failed.emit(msg)
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class ForceOverwriteWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
     progress = Signal(int, int, str)
+    status_progress = Signal(object)
     cancelled = Signal(str)
 
     def __init__(
@@ -528,6 +873,16 @@ class ForceOverwriteWorker(QObject):
         client = None
         sftp = None
         try:
+            self.cancellation_token.raise_if_cancelled()
+            emit_status = _ThrottledProgressEmitter(self.status_progress.emit)
+            emit_status(
+                OperationProgress(
+                    stage=1,
+                    total_stages=2,
+                    message="XServerへSSH接続中",
+                    summary_prefix="無条件上書き中…",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -536,6 +891,21 @@ class ForceOverwriteWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
+
+            def report_started(current: int, total: int, path: str) -> None:
+                emit_status(
+                    OperationProgress(
+                        stage=2,
+                        total_stages=2,
+                        message=f"転送中: {path}",
+                        current=current,
+                        total=total,
+                        unit="files",
+                        phase_key=("force_overwrite", total),
+                        summary_prefix="無条件上書き中…",
+                    )
+                )
+
             preset = get_preset(self.project.site_type)
             result = ForceOverwriteEngine().overwrite(
                 sftp=sftp,
@@ -547,38 +917,58 @@ class ForceOverwriteWorker(QObject):
                 file_mode=self.mapping.file_mode,
                 directory_mode=self.mapping.directory_mode,
                 progress_callback=self.progress.emit,
+                file_started_callback=report_started,
                 cancellation_token=self.cancellation_token,
             )
             self.completed.emit(result)
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
-            msg = str(exc).strip()
-            if not msg or msg.lower() == "failure":
-                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
-            self.failed.emit(msg)
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class RecoveryScanWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(self, project: Project, mapping: SyncMapping, passphrase: str | None) -> None:
         super().__init__()
         self.project = project
         self.mapping = mapping
         self.passphrase = passphrase
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
         client = None
         sftp = None
         try:
+            self.cancellation_token.raise_if_cancelled()
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(
+                OperationProgress(
+                    stage=1,
+                    total_stages=2,
+                    message="XServerへSSH接続中",
+                    summary_prefix="安全性確認を実行中…",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -587,19 +977,55 @@ class RecoveryScanWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
-            self.completed.emit(analyze_recovery_artifacts(sftp, self.mapping.remote_root))
+
+            def report(current: int, total: int | None, detail: str) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=2,
+                        total_stages=2,
+                        message=(
+                            "XServerのフォルダを確認中"
+                            if total is None
+                            else "残存一時ファイルを照合中"
+                        ),
+                        current=current,
+                        total=total,
+                        unit="directories" if total is None else "files",
+                        detail=detail,
+                        summary_prefix="安全性確認を実行中…",
+                    )
+                )
+
+            self.completed.emit(
+                analyze_recovery_artifacts(
+                    sftp,
+                    self.mapping.remote_root,
+                    progress_callback=report,
+                    cancellation_token=self.cancellation_token,
+                )
+            )
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class RestoreWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
+    cancelled = Signal(str)
 
     def __init__(
         self,
@@ -618,12 +1044,26 @@ class RestoreWorker(QObject):
         self.expected_current_hashes = expected_current_hashes
         self.authorization = authorization
         self.passphrase = passphrase
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
 
     @Slot()
     def run(self) -> None:
         client = None
         sftp = None
         try:
+            self.cancellation_token.raise_if_cancelled()
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(
+                OperationProgress(
+                    stage=1,
+                    total_stages=3,
+                    message="XServerへSSH接続中",
+                    summary_prefix="バックアップから復元中…",
+                )
+            )
             client, sftp = connect_sftp(
                 host=self.project.ssh_host,
                 port=self.project.ssh_port,
@@ -632,26 +1072,72 @@ class RestoreWorker(QObject):
                 host_key_fingerprint=self.project.host_key_fingerprint,
                 passphrase=self.passphrase,
             )
-            recovery = scan_recovery_artifacts(sftp, self.mapping.remote_root)
+
+            def report_recovery(current: int, total: int | None, detail: str) -> None:
+                emit_progress(
+                    OperationProgress(
+                        stage=2,
+                        total_stages=3,
+                        message="残存一時ファイルを確認中",
+                        current=current,
+                        total=total,
+                        unit="directories" if total is None else "files",
+                        detail=detail,
+                        summary_prefix="バックアップから復元中…",
+                    )
+                )
+
+            recovery = scan_recovery_artifacts(
+                sftp,
+                self.mapping.remote_root,
+                progress_callback=report_recovery,
+                cancellation_token=self.cancellation_token,
+            )
             if recovery.temporary_files or recovery.issues:
                 raise RuntimeError(
                     "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
                 )
+
+            def report_restore(current: int, total: int, detail: str) -> None:
+                phase_kind = detail.split(":", 1)[0].strip() if ":" in detail else detail
+                emit_progress(
+                    OperationProgress(
+                        stage=3,
+                        total_stages=3,
+                        message=detail,
+                        current=current,
+                        total=total,
+                        unit="files",
+                        phase_key=("restore", phase_kind, total),
+                        summary_prefix="バックアップから復元中…",
+                    )
+                )
+
             result = RemoteRestoreEngine().restore(
                 sftp=sftp,
                 manifest_path=self.manifest_path,
                 destination_root=self.mapping.remote_root,
                 expected_current_hashes=self.expected_current_hashes,
                 authorization=self.authorization,
+                progress_callback=report_restore,
+                cancellation_token=self.cancellation_token,
             )
             self.completed.emit(result)
+        except OperationCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_worker_error(exc))
         finally:
             if sftp is not None:
-                sftp.close()
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             if client is not None:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 class WordPressSetupWorker(QObject):
@@ -686,7 +1172,8 @@ class WordPressSetupWorker(QObject):
         client = None
         sftp = None
         try:
-            self.progress.emit(
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(
                 WordPressSetupProgress(
                     step=1,
                     total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
@@ -714,11 +1201,11 @@ class WordPressSetupWorker(QObject):
                 ssh_client=client,
                 sftp=sftp,
                 ssh_username=self.project.ssh_username,
-                progress_callback=self.progress.emit,
+                progress_callback=emit_progress,
                 checkpoint_callback=self.checkpoint.emit,
                 cancellation_token=self.cancellation_token,
             )
-            self.progress.emit(
+            emit_progress(
                 WordPressSetupProgress(
                     step=10,
                     total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
@@ -733,7 +1220,7 @@ class WordPressSetupWorker(QObject):
             homepage = perform_https_health_check(
                 domain=health_domain, path=homepage_path
             )
-            self.progress.emit(
+            emit_progress(
                 WordPressSetupProgress(
                     step=10,
                     total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
@@ -798,7 +1285,8 @@ class LaravelSetupWorker(QObject):
         client = None
         sftp = None
         try:
-            self.progress.emit(
+            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
+            emit_progress(
                 LaravelSetupProgress(
                     step=1,
                     total_steps=LARAVEL_SETUP_TOTAL_STEPS,
@@ -826,11 +1314,11 @@ class LaravelSetupWorker(QObject):
                 ssh_client=client,
                 sftp=sftp,
                 ssh_username=self.project.ssh_username,
-                progress_callback=self.progress.emit,
+                progress_callback=emit_progress,
                 checkpoint_callback=self.checkpoint.emit,
                 cancellation_token=self.cancellation_token,
             )
-            self.progress.emit(
+            emit_progress(
                 LaravelSetupProgress(
                     step=10,
                     total_steps=LARAVEL_SETUP_TOTAL_STEPS,
@@ -935,10 +1423,19 @@ class MainWindow(QMainWindow):
         self._dry_run_progress_timer.timeout.connect(
             self._refresh_dry_run_progress
         )
+        self._op_progress_event: OperationProgress | None = None
+        self._op_progress_started_at: float | None = None
+        self._op_progress_phase_started_at: float | None = None
+        self._op_progress_last_update_at: float | None = None
+        self._op_progress_phase_key: tuple[object, ...] | None = None
+        self._op_progress_timer = QTimer(self)
+        self._op_progress_timer.setInterval(1000)
+        self._op_progress_timer.timeout.connect(self._refresh_op_progress)
         self._auto_sync_stage: str | None = None
         self._auto_sync_preferences: AutoSyncPreferences | None = None
         self._auto_backup_skipped = False
         self._auto_health_check_path: str | None = None
+        self._deploy_total_stages: int = 4
         self._auto_dry_run_result: DryRunResult | None = None
 
         root = QWidget()
@@ -1115,12 +1612,17 @@ class MainWindow(QMainWindow):
 
         self.summary = QLabel("フォルダを選択して検査してください。")
         self.summary.setWordWrap(True)
+        self.summary.setTextFormat(Qt.PlainText)
         layout.addWidget(self.summary)
         progress_layout = QHBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
         progress_layout.addWidget(self.progress_bar, 1)
+        self.progress_label = QLabel()
+        self.progress_label.setVisible(False)
+        self.progress_label.setTextFormat(Qt.PlainText)
+        progress_layout.addWidget(self.progress_label)
         self.stop_button = QPushButton("処理を停止")
         self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self._request_operation_cancel)
@@ -1200,8 +1702,42 @@ class MainWindow(QMainWindow):
                 self.mapping_combo.addItem(mapping.name, mapping.mapping_id)
         self.mapping_combo.blockSignals(False)
         self._mapping_selected(self.mapping_combo.currentIndex())
+        self._apply_project_field_lock()
         self._apply_connection_masks()
         self._update_setup_panel()
+
+    def _apply_project_field_lock(self) -> None:
+        has_saved_project = self._current_project is not None
+        controls_locked = (
+            self._auto_sync_active
+            or self._wordpress_setup_active
+            or self._laravel_setup_active
+        )
+        manual_editable = not has_saved_project and not controls_locked
+        tooltip = (
+            "保存済みプロジェクトの設定を表示中です。変更する場合は「編集…」または「新規…」を使用してください。"
+            if has_saved_project
+            else ""
+        )
+        for widget in (
+            self.site_combo,
+            self.browse_button,
+            self.port_spin,
+            self.key_browse_button,
+        ):
+            widget.setEnabled(manual_editable)
+            widget.setToolTip(tooltip)
+        for editor in (
+            self.path_edit,
+            self.host_edit,
+            self.user_edit,
+            self.remote_root_edit,
+            self.fingerprint_edit,
+            self.key_edit,
+        ):
+            editor.setReadOnly(has_saved_project)
+            editor.setEnabled(not controls_locked)
+            editor.setToolTip(tooltip)
 
     @Slot(int)
     def _mapping_selected(self, index: int) -> None:
@@ -1261,6 +1797,8 @@ class MainWindow(QMainWindow):
         mask_action.triggered.connect(self._show_mask_settings)
         auto_action = settings_menu.addAction("自動実行設定…")
         auto_action.triggered.connect(self._show_auto_sync_settings)
+        self.plan_validity_action = settings_menu.addAction("計画の有効時間設定…")
+        self.plan_validity_action.triggered.connect(self._show_plan_validity_settings)
         security_action = settings_menu.addAction("確認コードの保存状態…")
         security_action.triggered.connect(self._show_security_status)
         register_action = settings_menu.addAction("接続先の確認コードを再登録…")
@@ -1274,6 +1812,9 @@ class MainWindow(QMainWindow):
         self.manual_action.triggered.connect(self._open_online_manual)
         about_action = help_menu.addAction("バージョン情報")
         about_action.triggered.connect(self._show_about)
+
+    def _plan_validity_minutes(self) -> int:
+        return load_plan_validity_minutes(self.settings)
 
     @Slot()
     def _show_mask_settings(self) -> None:
@@ -1318,6 +1859,19 @@ class MainWindow(QMainWindow):
             self,
             "自動実行設定",
             f"「{project.name}」の自動実行設定を保存しました。",
+        )
+
+    @Slot()
+    def _show_plan_validity_settings(self) -> None:
+        dialog = PlanValiditySettingsDialog(self._plan_validity_minutes(), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        minutes = save_plan_validity_minutes(self.settings, dialog.selected_minutes())
+        QMessageBox.information(
+            self,
+            "計画の有効時間設定",
+            f"計画の有効時間を {minutes}分 に設定しました。\n"
+            "次回以降のドライランで作成される計画に適用されます。",
         )
 
     @Slot()
@@ -1402,6 +1956,12 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "再登録完了", "OS資格情報ストアへ保存しました。")
 
     def _refresh_ready_plan(self) -> None:
+        previous_plan_id = self._current_plan_id
+        had_active_plan = (
+            self._validated_plan_id is not None
+            or self._current_backup_id is not None
+            or self._backup_skipped
+        )
         self.store.expire_plans()
         cleanup_stale_staging(self.store, self.staging_parent)
         self._current_plan_id = None
@@ -1419,8 +1979,22 @@ class MainWindow(QMainWindow):
             self._validated_plan_id = None
             self._current_backup_id = None
             self._backup_skipped = False
+            if (
+                had_active_plan
+                and previous_plan_id is not None
+                and self._current_plan_id is None
+                and self._thread is None
+                and not self._auto_sync_active
+            ):
+                expired_plan = self.store.get_plan(previous_plan_id)
+                if expired_plan is not None and expired_plan.status == "expired":
+                    self.summary.setText(
+                        "計画の有効期限が切れました。再度「読み取り専用ドライラン」を実行してください。"
+                    )
         self.revalidate_button.setEnabled(
-            self._current_plan_id is not None and self._thread is None
+            self._current_plan_id is not None
+            and self._thread is None
+            and not self._auto_sync_active
         )
         self._update_action_buttons()
 
@@ -1585,8 +2159,8 @@ class MainWindow(QMainWindow):
         self.dry_run_button.setEnabled(False)
         self.laravel_setup_button.setEnabled(False)
         self._update_action_buttons()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setVisible(True)
+        self._set_progress_bar_range(0, 0)
+        self._set_progress_visible(True)
 
         now = time.monotonic()
         self._laravel_progress_started_at = now
@@ -1674,8 +2248,8 @@ class MainWindow(QMainWindow):
         self.dry_run_button.setEnabled(False)
         self.wordpress_setup_button.setEnabled(False)
         self._update_action_buttons()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setVisible(True)
+        self._set_progress_bar_range(0, 0)
+        self._set_progress_visible(True)
         now = time.monotonic()
         self._wordpress_progress_started_at = now
         self._wordpress_progress_phase_started_at = now
@@ -1734,6 +2308,19 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         thread.start()
 
+    def _set_progress_visible(self, visible: bool) -> None:
+        self.progress_bar.setVisible(visible)
+        self.progress_label.setVisible(visible)
+        if not visible:
+            self.progress_label.clear()
+
+    def _set_progress_bar_range(self, minimum: int, maximum: int) -> None:
+        if (
+            self.progress_bar.minimum() != minimum
+            or self.progress_bar.maximum() != maximum
+        ):
+            self.progress_bar.setRange(minimum, maximum)
+
     @Slot(object)
     def _wordpress_setup_progress(self, event: object) -> None:
         if isinstance(event, str):
@@ -1751,6 +2338,7 @@ class MainWindow(QMainWindow):
             self._wordpress_progress_phase_key = phase_key
         self._wordpress_progress_event = event
         self._wordpress_progress_last_update_at = now
+        self._set_progress_visible(True)
         self._refresh_wordpress_progress()
 
     @staticmethod
@@ -1773,7 +2361,9 @@ class MainWindow(QMainWindow):
         )
 
     @staticmethod
-    def _format_progress_amount(event: WordPressSetupProgress) -> str:
+    def _format_progress_amount(
+        event: WordPressSetupProgress | LaravelSetupProgress | OperationProgress,
+    ) -> str:
         assert event.current is not None and event.total is not None
         if event.unit == "bytes":
             mib = 1024 * 1024
@@ -1800,7 +2390,7 @@ class MainWindow(QMainWindow):
             assert event.current is not None and event.total is not None
             current = min(max(event.current, 0), event.total)
             ratio = current / event.total
-            self.progress_bar.setRange(0, 1000)
+            self._set_progress_bar_range(0, 1000)
             self.progress_bar.setValue(round(ratio * 1000))
             amount = self._format_progress_amount(
                 replace(event, current=current)
@@ -1814,20 +2404,26 @@ class MainWindow(QMainWindow):
                 eta_text = (
                     f"残り約 {self._format_progress_duration(eta_seconds)}"
                 )
-            elif current == 0:
+            elif current < event.total:
                 eta_text = "残り時間を計算中"
-            elif current >= event.total:
+            else:
                 eta_text = "完了"
             if eta_text:
                 details.append(eta_text)
             self.progress_bar.setFormat(f"{amount} ({percent})")
+            self.progress_label.setText(f"{amount} ({percent})")
         else:
-            self.progress_bar.setRange(0, 0)
-            details.append("処理継続中")
+            self._set_progress_bar_range(0, 0)
+            if event.total == 0:
+                details.append("0/0")
+                self.progress_label.setText("0/0")
+            else:
+                details.append("処理継続中")
+                self.progress_label.setText("処理中…")
             self.progress_bar.setFormat(f"{stage}  {event.message}")
 
         details.append(elapsed_text)
-        if event.detail:
+        if event.detail and event.detail != event.message:
             details.append(event.detail)
         since_update = now - (self._wordpress_progress_last_update_at or now)
         if since_update >= 2:
@@ -1847,12 +2443,16 @@ class MainWindow(QMainWindow):
         if not isinstance(event, DryRunProgress):
             return
         now = time.monotonic()
+        if self._dry_run_progress_started_at is None:
+            self._dry_run_progress_started_at = now
+            self._dry_run_progress_phase_started_at = now
         phase_key = (event.stage, event.message, event.unit, event.total)
         if phase_key != self._dry_run_progress_phase_key:
             self._dry_run_progress_phase_started_at = now
             self._dry_run_progress_phase_key = phase_key
         self._dry_run_progress_event = event
         self._dry_run_progress_last_update_at = now
+        self._set_progress_visible(True)
         self._refresh_dry_run_progress()
 
     def _refresh_dry_run_progress(self) -> None:
@@ -1862,6 +2462,8 @@ class MainWindow(QMainWindow):
         now = time.monotonic()
         elapsed = now - (self._dry_run_progress_started_at or now)
         stage = f"手順 {event.stage}/{event.total_stages}"
+        if self._auto_sync_active and self._auto_sync_stage == "dry_run":
+            stage = f"自動実行 1/4 — {stage}"
         details = [stage, event.message]
         determinate = (
             event.current is not None
@@ -1871,27 +2473,40 @@ class MainWindow(QMainWindow):
         if determinate:
             current = min(max(event.current, 0), event.total)
             ratio = current / event.total
-            self.progress_bar.setRange(0, 1000)
+            self._set_progress_bar_range(0, 1000)
             self.progress_bar.setValue(round(ratio * 1000))
-            amount = f"{current}/{event.total}"
+            amount = f"{current:,}/{event.total:,}"
             percent = f"{ratio * 100:.1f}%"
             details.extend((amount, percent))
             phase_elapsed = now - (self._dry_run_progress_phase_started_at or now)
             if 0 < current < event.total and phase_elapsed >= 1:
                 eta_seconds = phase_elapsed * (event.total - current) / current
                 details.append(f"残り約 {self._format_progress_duration(eta_seconds)}")
-            elif current >= event.total:
+            elif current < event.total:
+                details.append("残り時間を計算中")
+            else:
                 details.append("この工程は完了")
             self.progress_bar.setFormat(f"{event.message}  {amount}  {percent}")
+            self.progress_label.setText(f"{amount} ({percent})")
         else:
-            self.progress_bar.setRange(0, 0)
-            if event.current:
-                details.append(f"{event.current}フォルダ確認済み")
+            self._set_progress_bar_range(0, 0)
+            if event.total == 0:
+                details.append("0/0")
+                self.progress_label.setText("0/0")
+            elif event.unit == "directories":
+                if event.current:
+                    details.append(f"{event.current:,}フォルダ確認済み")
+                    self.progress_label.setText(f"{event.current:,}フォルダ")
+                else:
+                    self.progress_label.setText("フォルダ確認中")
+                details.append("全体数を確認中")
+            else:
+                details.append("処理継続中")
+                self.progress_label.setText("処理中…")
             self.progress_bar.setFormat(f"{stage}  {event.message}")
-            details.append("全体数を確認中")
 
         details.append(f"経過 {self._format_progress_duration(elapsed)}")
-        if event.detail:
+        if event.detail and event.detail != event.message:
             details.append(event.detail)
         since_update = now - (self._dry_run_progress_last_update_at or now)
         if since_update >= 2:
@@ -1904,7 +2519,143 @@ class MainWindow(QMainWindow):
     def _stop_dry_run_progress(self) -> None:
         self._dry_run_progress_timer.stop()
         self._dry_run_progress_event = None
+        self._dry_run_progress_started_at = None
+        self._dry_run_progress_phase_started_at = None
+        self._dry_run_progress_last_update_at = None
         self._dry_run_progress_phase_key = None
+
+    def _start_op_progress(self, initial: OperationProgress) -> None:
+        now = time.monotonic()
+        self._op_progress_started_at = now
+        self._op_progress_phase_started_at = now
+        self._op_progress_last_update_at = now
+        self._op_progress_phase_key = (
+            initial.phase_key
+            if initial.phase_key is not None
+            else (initial.stage, initial.message, initial.unit, initial.total)
+        )
+        self._op_progress_event = initial
+        self._set_progress_visible(True)
+        self._op_progress_timer.start()
+        self._refresh_op_progress()
+
+    @Slot(object)
+    def _update_op_progress(self, event: object) -> None:
+        if not isinstance(event, OperationProgress):
+            return
+        now = time.monotonic()
+        if self._op_progress_started_at is None:
+            self._op_progress_started_at = now
+            self._op_progress_phase_started_at = now
+        phase_key = (
+            event.phase_key
+            if event.phase_key is not None
+            else (event.stage, event.message, event.unit, event.total)
+        )
+        if phase_key != self._op_progress_phase_key:
+            self._op_progress_phase_started_at = now
+            self._op_progress_phase_key = phase_key
+        self._op_progress_event = event
+        self._op_progress_last_update_at = now
+        self._set_progress_visible(True)
+        self._refresh_op_progress()
+
+    @Slot()
+    def _refresh_op_progress(self) -> None:
+        event = self._op_progress_event
+        if event is None:
+            return
+        now = time.monotonic()
+        overall_elapsed = now - (self._op_progress_started_at or now)
+        elapsed_text = f"経過 {self._format_progress_duration(overall_elapsed)}"
+        stage_text = (
+            f"手順 {event.stage}/{event.total_stages}"
+            if event.total_stages > 1
+            else ""
+        )
+        if event.summary_prefix:
+            headline = f"{event.summary_prefix} {event.message}".strip()
+            details = [headline]
+            if stage_text:
+                if event.summary_prefix.startswith("自動実行 "):
+                    details.append(stage_text)
+                else:
+                    details.insert(0, stage_text)
+        else:
+            details = ([stage_text] if stage_text else []) + [event.message]
+
+        determinate = (
+            event.current is not None
+            and event.total is not None
+            and event.total > 0
+        )
+        if determinate:
+            assert event.current is not None and event.total is not None
+            current = min(max(event.current, 0), event.total)
+            ratio = current / event.total
+            self._set_progress_bar_range(0, 1000)
+            self.progress_bar.setValue(round(ratio * 1000))
+            amount = self._format_progress_amount(replace(event, current=current))
+            percent = f"{ratio * 100:.1f}%"
+            details.extend((amount, percent))
+            phase_elapsed = now - (self._op_progress_phase_started_at or now)
+            if 0 < current < event.total and phase_elapsed >= 1:
+                eta_seconds = phase_elapsed * (event.total - current) / current
+                details.append(
+                    f"残り約 {self._format_progress_duration(eta_seconds)}"
+                )
+            elif current < event.total:
+                details.append("残り時間を計算中")
+            else:
+                details.append("この工程は完了")
+            if event.progress_label:
+                self.progress_bar.setFormat(
+                    f"{event.progress_label}  {amount}  {percent}"
+                )
+            else:
+                self.progress_bar.setFormat(f"{amount} ({percent})")
+            self.progress_label.setText(f"{amount} ({percent})")
+        else:
+            self._set_progress_bar_range(0, 0)
+            if event.total == 0:
+                details.append("0/0")
+                self.progress_label.setText("0/0")
+            elif event.unit == "directories":
+                if event.current:
+                    details.append(f"{event.current:,}フォルダ確認済み")
+                    self.progress_label.setText(f"{event.current:,}フォルダ")
+                else:
+                    self.progress_label.setText("フォルダ確認中")
+                details.append("全体数を確認中")
+            else:
+                details.append("処理継続中")
+                self.progress_label.setText("処理中…")
+            if event.progress_label:
+                self.progress_bar.setFormat(event.progress_label)
+            elif stage_text:
+                self.progress_bar.setFormat(f"{stage_text}  {event.message}")
+            else:
+                self.progress_bar.setFormat(event.message)
+
+        details.append(elapsed_text)
+        if event.detail and event.detail != event.message:
+            details.append(event.detail)
+        since_update = now - (self._op_progress_last_update_at or now)
+        if since_update >= 2:
+            wait_label = "サーバー応答待ち" if event.remote_wait else "処理継続中"
+            details.append(
+                f"{wait_label} "
+                f"(最終更新から {self._format_progress_duration(since_update)})"
+            )
+        self.summary.setText(" / ".join(details))
+
+    def _stop_op_progress(self) -> None:
+        self._op_progress_timer.stop()
+        self._op_progress_event = None
+        self._op_progress_started_at = None
+        self._op_progress_phase_started_at = None
+        self._op_progress_last_update_at = None
+        self._op_progress_phase_key = None
 
     @Slot(object)
     def _wordpress_setup_completed(self, payload: object) -> None:
@@ -1929,7 +2680,7 @@ class MainWindow(QMainWindow):
         )
         if health_ok:
             self._retire_resumable_operations("wordpress_setup")
-        self.progress_bar.setVisible(False)
+        self._set_progress_visible(False)
         if health_ok:
             self.summary.setText(
                 f"WordPressセットアップ完了 / {result.transferred_files}ファイル / "
@@ -1986,7 +2737,7 @@ class MainWindow(QMainWindow):
     def _wordpress_setup_failed(self, message: str) -> None:
         self._stop_wordpress_progress()
         self._finish_operation("failed", error=message)
-        self.progress_bar.setVisible(False)
+        self._set_progress_visible(False)
         self.summary.setText("WordPress初回セットアップを完了できませんでした。")
         QMessageBox.critical(self, "WordPressセットアップエラー", message)
 
@@ -1994,7 +2745,7 @@ class MainWindow(QMainWindow):
     def _wordpress_setup_cancelled(self, message: str) -> None:
         self._stop_wordpress_progress()
         self._finish_operation("cancelled", error=message)
-        self.progress_bar.setVisible(False)
+        self._set_progress_visible(False)
         self.summary.setText(
             "WordPressセットアップを安全な区切りで停止しました。再開できます。"
         )
@@ -2016,6 +2767,7 @@ class MainWindow(QMainWindow):
             self._laravel_progress_phase_key = phase_key
         self._laravel_progress_event = event
         self._laravel_progress_last_update_at = now
+        self._set_progress_visible(True)
         self._refresh_laravel_progress()
 
     def _refresh_laravel_progress(self) -> None:
@@ -2037,20 +2789,47 @@ class MainWindow(QMainWindow):
             assert event.current is not None and event.total is not None
             current = min(max(event.current, 0), event.total)
             ratio = current / event.total
-            self.progress_bar.setRange(0, 1000)
+            self._set_progress_bar_range(0, 1000)
             self.progress_bar.setValue(round(ratio * 1000))
-            amount = f"{current}/{event.total}"
+            amount = self._format_progress_amount(
+                replace(event, current=current)
+            )
             percent = f"{ratio * 100:.1f}%"
             details.extend((amount, percent))
+            eta_text = ""
+            phase_elapsed = now - (self._laravel_progress_phase_started_at or now)
+            if 0 < current < event.total and phase_elapsed >= 1:
+                eta_seconds = phase_elapsed * (event.total - current) / current
+                eta_text = (
+                    f"残り約 {self._format_progress_duration(eta_seconds)}"
+                )
+            elif current < event.total:
+                eta_text = "残り時間を計算中"
+            else:
+                eta_text = "完了"
+            if eta_text:
+                details.append(eta_text)
             self.progress_bar.setFormat(f"{amount} ({percent})")
+            self.progress_label.setText(f"{amount} ({percent})")
         else:
-            self.progress_bar.setRange(0, 0)
-            details.append("処理継続中")
+            self._set_progress_bar_range(0, 0)
+            if event.total == 0:
+                details.append("0/0")
+                self.progress_label.setText("0/0")
+            else:
+                details.append("処理継続中")
+                self.progress_label.setText("処理中…")
             self.progress_bar.setFormat(f"{stage}  {event.message}")
 
         details.append(elapsed_text)
-        if event.detail:
+        if event.detail and event.detail != event.message:
             details.append(event.detail)
+        since_update = now - (self._laravel_progress_last_update_at or now)
+        if since_update >= 2:
+            details.append(
+                "サーバー応答待ち "
+                f"(最終更新から {self._format_progress_duration(since_update)})"
+            )
         self.summary.setText(" / ".join(details))
 
     def _stop_laravel_progress(self) -> None:
@@ -2075,7 +2854,7 @@ class MainWindow(QMainWindow):
             },
             error=None if health_ok else "HTTPS health check failed after setup",
         )
-        self.progress_bar.setVisible(False)
+        self._set_progress_visible(False)
         if health_ok:
             self._retire_resumable_operations("laravel_setup")
             self.summary.setText(
@@ -2124,7 +2903,7 @@ class MainWindow(QMainWindow):
     def _laravel_setup_failed(self, message: str) -> None:
         self._stop_laravel_progress()
         self._finish_operation("failed", error=message)
-        self.progress_bar.setVisible(False)
+        self._set_progress_visible(False)
         self.summary.setText("Laravel初回セットアップを完了できませんでした。")
         QMessageBox.critical(self, "Laravelセットアップエラー", message)
 
@@ -2132,7 +2911,7 @@ class MainWindow(QMainWindow):
     def _laravel_setup_cancelled(self, message: str) -> None:
         self._stop_laravel_progress()
         self._finish_operation("cancelled", error=message)
-        self.progress_bar.setVisible(False)
+        self._set_progress_visible(False)
         self.summary.setText(
             "Laravelセットアップを安全な区切りで停止しました。"
         )
@@ -2329,11 +3108,14 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
         self._update_action_buttons()
-        self.progress_bar.setRange(0, max(len(remaining), 1))
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("無条件上書きを再開 %v/%m")
-        self.progress_bar.setVisible(True)
-        self.summary.setText("無条件上書きを未完了ファイルから再開中…")
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=2,
+                message="XServerへSSH接続中",
+                summary_prefix="無条件上書きを再開中…",
+            )
+        )
         self._begin_operation(
             "force_overwrite",
             details={
@@ -2352,6 +3134,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._force_overwrite_progress)
+        worker.status_progress.connect(self._update_op_progress)
         worker.completed.connect(self._force_overwrite_completed)
         worker.failed.connect(self._force_overwrite_failed)
         worker.cancelled.connect(self._force_overwrite_cancelled)
@@ -2470,13 +3253,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "laravel_setup_action"):
             self.laravel_setup_action.setEnabled(not locked)
         if not locked:
+            self._apply_project_field_lock()
             self._update_setup_panel()
 
     def _set_auto_stage(self, step: int, label: str) -> None:
-        self.progress_bar.setRange(0, 4)
+        self._set_progress_bar_range(0, 4)
         self.progress_bar.setValue(step)
         self.progress_bar.setFormat(f"{step}/4 (%p%)")
-        self.progress_bar.setVisible(True)
+        self.progress_label.setText(f"{step}/4")
+        self._set_progress_visible(True)
         self.summary.setText(f"自動実行 {step}/4 — {label}")
 
     def _stop_auto_sync(self, *, hide_progress: bool = True) -> None:
@@ -2488,7 +3273,7 @@ class MainWindow(QMainWindow):
         self._auto_dry_run_result = None
         self._set_auto_sync_controls_locked(False)
         if hide_progress:
-            self.progress_bar.setVisible(False)
+            self._set_progress_visible(False)
         self._update_action_buttons()
 
     @Slot()
@@ -2593,25 +3378,45 @@ class MainWindow(QMainWindow):
     def _start_scan(self) -> None:
         if self._thread is not None:
             return
-        root = Path(self.path_edit.text().strip()).expanduser()
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is not None and mapping is not None:
+            root = Path(mapping.local_root).expanduser()
+            site_type = project.site_type
+        else:
+            root = Path(self.path_edit.text().strip()).expanduser()
+            site_type = SiteType(self.site_combo.currentData())
         if not root.is_dir():
             QMessageBox.warning(self, "フォルダを確認", "読み取り可能なフォルダを選択してください。")
             return
-        site_type = SiteType(self.site_combo.currentData())
         self.scan_button.setEnabled(False)
-        self.summary.setText("検査中… ファイル内容からSHA-256を計算しています。")
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=1,
+                message="ローカルファイルを列挙中",
+                summary_prefix="ローカル検査中…",
+                remote_wait=False,
+            )
+        )
 
         thread = QThread(self)
         worker = ScanWorker(root, site_type)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._update_op_progress)
         worker.completed.connect(self._scan_completed)
         worker.failed.connect(self._scan_failed)
+        worker.cancelled.connect(self._scan_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self._update_action_buttons()
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot()
@@ -2621,14 +3426,40 @@ class MainWindow(QMainWindow):
         if not self._require_runtime_paths_confirmation():
             return
         self._reset_write_state()
-        root = Path(self.path_edit.text().strip()).expanduser()
-        key_path = Path(self.key_edit.text().strip()).expanduser()
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is not None and mapping is not None:
+            root = Path(mapping.local_root).expanduser()
+            site_type = project.site_type
+            host = project.ssh_host.strip()
+            port = project.ssh_port
+            username = project.ssh_username.strip()
+            remote_root = mapping.remote_root.strip()
+            fingerprint = project.host_key_fingerprint.strip()
+            key_path = Path(project.private_key_reference).expanduser()
+            mapping_id = mapping.mapping_id
+            extra_excludes = mapping.exclude_patterns
+            extra_protected = mapping.protect_patterns
+            config_sha256 = project_config_sha256(project, mapping)
+        else:
+            root = Path(self.path_edit.text().strip()).expanduser()
+            site_type = SiteType(self.site_combo.currentData())
+            host = self.host_edit.text().strip()
+            port = self.port_spin.value()
+            username = self.user_edit.text().strip()
+            remote_root = self.remote_root_edit.text().strip()
+            fingerprint = self.fingerprint_edit.text().strip()
+            key_path = Path(self.key_edit.text().strip()).expanduser()
+            mapping_id = "gui-manual"
+            extra_excludes = ()
+            extra_protected = ()
+            config_sha256 = ""
         required = {
             "ローカルフォルダ": root.is_dir(),
-            "ホスト": bool(self.host_edit.text().strip()),
-            "ユーザー": bool(self.user_edit.text().strip()),
-            "リモートルート": bool(self.remote_root_edit.text().strip()),
-            "SHA-256ホスト鍵": self.fingerprint_edit.text().strip().startswith("SHA256:"),
+            "ホスト": bool(host),
+            "ユーザー": bool(username),
+            "リモートルート": bool(remote_root),
+            "SHA-256ホスト鍵": fingerprint.startswith("SHA256:"),
             "秘密鍵": key_path.is_file(),
         }
         missing = [label for label, valid in required.items() if not valid]
@@ -2638,39 +3469,58 @@ class MainWindow(QMainWindow):
 
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
-        self.summary.setText("読み取り専用ドライラン中… ローカルとXServerを比較しています。")
-        self._begin_operation("dry_run")
+        self.revalidate_button.setEnabled(False)
+        self._set_progress_bar_range(0, 0)
+        self._set_progress_visible(True)
+        now = time.monotonic()
+        self._dry_run_progress_started_at = now
+        self._dry_run_progress_phase_started_at = now
+        self._dry_run_progress_last_update_at = now
+        self._dry_run_progress_phase_key = None
+        self._dry_run_progress_event = DryRunProgress(
+            stage=1,
+            total_stages=4,
+            message="XServerへSSH接続中",
+        )
+        self._dry_run_progress_timer.start()
+        self._refresh_dry_run_progress()
+        self._begin_operation(
+            "dry_run",
+            details={"auto_sync": True} if self._auto_sync_active else None,
+        )
         thread = QThread(self)
-        mapping = self._selected_mapping()
         worker = DryRunWorker(
             root=root,
-            mapping_id=mapping.mapping_id if mapping else "gui-manual",
-            site_type=SiteType(self.site_combo.currentData()),
-            host=self.host_edit.text().strip(),
-            port=self.port_spin.value(),
-            username=self.user_edit.text().strip(),
+            mapping_id=mapping_id,
+            site_type=site_type,
+            host=host,
+            port=port,
+            username=username,
             private_key_path=str(key_path),
-            fingerprint=self.fingerprint_edit.text().strip(),
-            remote_root=self.remote_root_edit.text().strip(),
+            fingerprint=fingerprint,
+            remote_root=remote_root,
             passphrase=self.passphrase_edit.text() or None,
             staging_parent=self.staging_parent,
-            extra_excludes=mapping.exclude_patterns if mapping else (),
-            extra_protected=mapping.protect_patterns if mapping else (),
-            config_sha256=(
-                project_config_sha256(self._current_project, mapping)
-                if self._current_project is not None and mapping is not None
-                else ""
-            ),
+            extra_excludes=extra_excludes,
+            extra_protected=extra_protected,
+            config_sha256=config_sha256,
+            plan_validity=timedelta(minutes=self._plan_validity_minutes()),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._dry_run_progress)
         worker.completed.connect(self._dry_run_completed)
         worker.failed.connect(self._dry_run_failed)
+        worker.cancelled.connect(self._dry_run_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self._update_action_buttons()
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot()
@@ -2688,7 +3538,15 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
         self.revalidate_button.setEnabled(False)
-        self.summary.setText("計画を再検証中… ローカル、XServer、ステージングを確認しています。")
+        prefix = "自動実行 2/4 — " if self._auto_sync_active else ""
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=4,
+                message="XServerへSSH接続中",
+                summary_prefix=f"{prefix}計画を再検証中…",
+            )
+        )
         self._begin_operation("revalidation")
         thread = QThread(self)
         worker = RevalidationWorker(
@@ -2699,13 +3557,19 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._revalidation_progress)
         worker.completed.connect(self._revalidation_completed)
         worker.failed.connect(self._revalidation_failed)
+        worker.cancelled.connect(self._revalidation_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self._update_action_buttons()
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot()
@@ -2756,7 +3620,15 @@ class MainWindow(QMainWindow):
         self.revalidate_button.setEnabled(False)
         self.backup_button.setEnabled(False)
         self.deploy_button.setEnabled(False)
-        self.summary.setText("バックアップ作成中… 公開ファイルは変更しません。")
+        prefix = "自動実行 3/4 — " if self._auto_sync_active else ""
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=4,
+                message="XServerへSSH接続中",
+                summary_prefix=f"{prefix}バックアップを作成中…",
+            )
+        )
         self._begin_operation("backup")
         thread = QThread(self)
         worker = BackupWorker(
@@ -2769,15 +3641,20 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._backup_progress)
         worker.completed.connect(self._backup_completed)
         worker.blocked.connect(self._backup_blocked)
         worker.failed.connect(self._backup_failed)
+        worker.cancelled.connect(self._backup_cancelled)
         worker.completed.connect(thread.quit)
         worker.blocked.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot()
@@ -2846,23 +3723,21 @@ class MainWindow(QMainWindow):
         *,
         resume: bool = False,
     ) -> None:
-        counts = stored.plan.counts()
-
         self.scan_button.setEnabled(False)
         self.dry_run_button.setEnabled(False)
         self.revalidate_button.setEnabled(False)
         self.backup_button.setEnabled(False)
         self.deploy_button.setEnabled(False)
-        self.summary.setText("承認済み同期を実行中… 一時転送と検証を行っています。")
-        total_changes = (
-            counts[ChangeType.ADD]
-            + counts[ChangeType.UPDATE]
-            + len(self._approved_delete_paths)
+        prefix = "自動実行 4/4 — " if self._auto_sync_active else ""
+        self._deploy_total_stages = 5 if health_check_path is not None else 4
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=self._deploy_total_stages,
+                message="XServerへSSH接続中",
+                summary_prefix=f"{prefix}承認済み同期を実行中…",
+            )
         )
-        self.progress_bar.setRange(0, max(total_changes, 1))
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("承認済み同期 %v/%m")
-        self.progress_bar.setVisible(True)
         self._current_plan_id = stored.plan.plan_id
         self._begin_operation(
             "deployment",
@@ -2900,6 +3775,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._deployment_failed)
         worker.cancelled.connect(self._deployment_cancelled)
         worker.progress.connect(self._deployment_progress)
+        worker.status_progress.connect(self._deployment_status_progress)
         worker.completed.connect(thread.quit)
         worker.blocked.connect(thread.quit)
         worker.failed.connect(thread.quit)
@@ -2960,11 +3836,13 @@ class MainWindow(QMainWindow):
         self.backup_button.setEnabled(False)
         self.deploy_button.setEnabled(False)
         self.recovery_button.setEnabled(False)
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setFormat("無条件上書きの準備中…")
-        self.progress_bar.setVisible(True)
-        self.summary.setText(
-            "無条件上書き中… 差分照合・バックアップ・転送後ハッシュ検証は行いません。"
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=2,
+                message="XServerへSSH接続中",
+                summary_prefix="無条件上書き中…",
+            )
         )
         self._begin_operation(
             "force_overwrite",
@@ -2983,6 +3861,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._force_overwrite_progress)
+        worker.status_progress.connect(self._update_op_progress)
         worker.completed.connect(self._force_overwrite_completed)
         worker.failed.connect(self._force_overwrite_failed)
         worker.cancelled.connect(self._force_overwrite_cancelled)
@@ -3008,7 +3887,14 @@ class MainWindow(QMainWindow):
         self.dry_run_button.setEnabled(False)
         self.recovery_button.setEnabled(False)
         self._update_action_buttons()
-        self.summary.setText("残存一時ファイルを読み取り専用で確認しています…")
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=2,
+                message="XServerへSSH接続中",
+                summary_prefix="安全性確認を実行中…",
+            )
+        )
         self._begin_operation("recovery_scan")
         thread = QThread(self)
         worker = RecoveryScanWorker(
@@ -3016,13 +3902,18 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._update_op_progress)
         worker.completed.connect(self._recovery_scan_completed)
         worker.failed.connect(self._recovery_scan_failed)
+        worker.cancelled.connect(self._recovery_scan_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     def _start_restore(self, backup_id: str) -> None:
@@ -3089,7 +3980,14 @@ class MainWindow(QMainWindow):
         self.backup_button.setEnabled(False)
         self.deploy_button.setEnabled(False)
         self.recovery_button.setEnabled(False)
-        self.summary.setText("現在ファイルとバックアップを検証して復元しています…")
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=3,
+                message="XServerへSSH接続中",
+                summary_prefix="バックアップから復元中…",
+            )
+        )
         self._begin_operation("restore")
         thread = QThread(self)
         worker = RestoreWorker(
@@ -3106,22 +4004,42 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._update_op_progress)
         worker.completed.connect(self._restore_completed)
         worker.failed.connect(self._restore_failed)
+        worker.cancelled.connect(self._restore_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._scan_finished)
         self._thread = thread
         self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
         thread.start()
 
     @Slot(object)
     def _scan_completed(self, result: ScanResult) -> None:
-        site_type = SiteType(self.site_combo.currentData())
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        mapping = self._selected_mapping()
+        site_type = (
+            self._current_project.site_type
+            if self._current_project is not None and mapping is not None
+            else SiteType(self.site_combo.currentData())
+        )
         preset = get_preset(site_type)
-        self.table_model.set_scan(result, preset.protect_patterns)
+        extra_protected = (
+            mapping.protect_patterns
+            if mapping is not None
+            and self._current_project is not None
+            and self._current_project.site_type is site_type
+            else ()
+        )
+        protected_patterns = preset.protect_patterns + extra_protected
+        self.table_model.set_scan(result, protected_patterns)
         protected_count = sum(
-            1 for item in result.files if PathRules(preset.protect_patterns).matches(item.relative_path)
+            1 for item in result.files if PathRules(protected_patterns).matches(item.relative_path)
         )
         total_bytes = sum(item.size or 0 for item in result.files)
         issue_text = f" / 要確認 {len(result.issues)}件" if result.issues else ""
@@ -3132,11 +4050,21 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _scan_failed(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self.summary.setText("検査に失敗しました。")
         QMessageBox.critical(self, "検査エラー", message)
 
+    @Slot(str)
+    def _scan_cancelled(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self.summary.setText("ローカル検査を停止しました。")
+
     @Slot(object)
     def _dry_run_completed(self, result: DryRunResult) -> None:
+        self._stop_dry_run_progress()
+        self._set_progress_visible(False)
         self.table_model.set_plan(result)
         if self._current_project is not None and not result.has_blocking_issues:
             staging_path = str(result.staging.root) if result.staging else None
@@ -3153,7 +4081,16 @@ class MainWindow(QMainWindow):
             set(result.local.skipped_protected_paths) | set(result.remote.skipped_protected_paths)
         )
         status = "実行不可" if result.has_blocking_issues else "確認可能"
-        persisted = " / 計画保存済み（15分間有効）" if self._current_plan_id else ""
+        validity_minutes = max(
+            1,
+            round((result.plan.expires_at - result.plan.created_at).total_seconds() / 60),
+        )
+        if self._current_plan_id:
+            persisted = f" / 計画保存済み（{validity_minutes}分間有効）"
+        elif self._current_project is None and not result.has_blocking_issues:
+            persisted = " / 未保存設定のため再検証・同期には「新規…」で保存してください"
+        else:
+            persisted = ""
         self._finish_operation(
             "blocked" if result.has_blocking_issues else "succeeded",
             details={
@@ -3263,22 +4200,50 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _dry_run_failed(self, message: str) -> None:
+        self._stop_dry_run_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self.summary.setText("ドライランに失敗しました。リモートは変更されていません。")
         QMessageBox.critical(self, "ドライランエラー", message)
         if self._auto_sync_active:
             self._stop_auto_sync()
 
+    @Slot(str)
+    def _dry_run_cancelled(self, message: str) -> None:
+        self._stop_dry_run_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("cancelled", error=message)
+        self.summary.setText("ドライランを安全な区切りで停止しました。")
+        if self._auto_sync_active:
+            self._stop_auto_sync()
+
+    @Slot(object)
+    def _revalidation_progress(self, event: object) -> None:
+        if not isinstance(event, OperationProgress):
+            return
+        prefix = "自動実行 2/4 — " if self._auto_sync_active else ""
+        self._update_op_progress(
+            replace(event, summary_prefix=f"{prefix}計画を再検証中…")
+        )
+
     @Slot(object)
     def _revalidation_completed(self, result: RevalidationResult) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         if result.valid:
             self._validated_plan_id = self._current_plan_id
             self._current_backup_id = None
             self._backup_skipped = False
             self._update_action_buttons()
             self._finish_operation("succeeded", details={"valid": True})
+            next_hint = (
+                ""
+                if self._auto_sync_active
+                else "次は「バックアップを作成」へ進んでください。"
+            )
             self.summary.setText(
                 "計画の再検証に成功しました。設定、ローカル、XServer、ステージングは一致しています。"
+                + next_hint
             )
             if self._auto_sync_active and self._auto_sync_stage == "revalidation":
                 if self._auto_backup_skipped:
@@ -3307,14 +4272,36 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _revalidation_failed(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self.summary.setText("再検証を完了できませんでした。計画は実行されていません。")
         QMessageBox.critical(self, "再検証エラー", message)
         if self._auto_sync_active:
             self._stop_auto_sync()
 
+    @Slot(str)
+    def _revalidation_cancelled(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("cancelled", error=message)
+        self.summary.setText("計画の再検証を停止しました。")
+        if self._auto_sync_active:
+            self._stop_auto_sync()
+
+    @Slot(object)
+    def _backup_progress(self, event: object) -> None:
+        if not isinstance(event, OperationProgress):
+            return
+        prefix = "自動実行 3/4 — " if self._auto_sync_active else ""
+        self._update_op_progress(
+            replace(event, summary_prefix=f"{prefix}バックアップを作成中…")
+        )
+
     @Slot(object)
     def _backup_completed(self, result: BackupResult) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         project = self._current_project
         mapping = self._selected_mapping()
         if project is None or mapping is None or self._current_plan_id is None:
@@ -3334,6 +4321,7 @@ class MainWindow(QMainWindow):
         self.store.save_backup(backup)
         self._current_backup_id = backup.backup_id
         self._backup_skipped = False
+        self._update_action_buttons()
         self._finish_operation(
             "succeeded",
             details={
@@ -3351,6 +4339,8 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _backup_blocked(self, result: RevalidationResult) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "invalid")
         self._finish_operation(
@@ -3364,6 +4354,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _backup_failed(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self._reset_write_state()
         self.summary.setText("バックアップに失敗しました。公開ファイルは変更されていません。")
@@ -3371,9 +4363,29 @@ class MainWindow(QMainWindow):
         if self._auto_sync_active:
             self._stop_auto_sync()
 
+    @Slot(str)
+    def _backup_cancelled(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("cancelled", error=message)
+        self._reset_write_state()
+        self.summary.setText("バックアップ作成を停止しました。公開ファイルは変更されていません。")
+        if self._auto_sync_active:
+            self._stop_auto_sync()
+
+    @Slot(object)
+    def _deployment_status_progress(self, event: object) -> None:
+        if not isinstance(event, OperationProgress):
+            return
+        prefix = "自動実行 4/4 — " if self._auto_sync_active else ""
+        self._update_op_progress(
+            replace(event, summary_prefix=f"{prefix}承認済み同期を実行中…")
+        )
+
     @Slot(object)
     def _deployment_completed(self, result: DeploymentResult) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "used")
         details = {
@@ -3427,7 +4439,8 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _deployment_blocked(self, result: RevalidationResult) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         if self._current_plan_id:
             self.store.set_plan_status(self._current_plan_id, "invalid")
         self._finish_operation(
@@ -3443,7 +4456,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _deployment_failed(self, message: str) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self._reset_write_state()
         self.summary.setText(
@@ -3456,7 +4470,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _deployment_cancelled(self, message: str) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("cancelled", error=message)
         self._reset_write_state()
         self.summary.setText(
@@ -3468,22 +4483,38 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int, str)
     def _deployment_progress(self, current: int, total: int, phase: str) -> None:
-        self.progress_bar.setRange(0, max(total, 1))
-        self.progress_bar.setValue(current)
-        ratio = current / max(total, 1)
-        percent = f"{ratio * 100:.1f}%"
-        self.progress_bar.setFormat(f"{current}/{total} ({percent})")
         prefix = "自動実行 4/4 — " if self._auto_sync_active else ""
-        self.summary.setText(f"{prefix}承認済み同期を実行中… {phase}")
+        phase_kind = phase.split(":", 1)[0].strip() if ":" in phase else phase
+        pass_name = (
+            "publish" if phase_kind in {"公開切り替え", "削除適用"} else "prepare"
+        )
+        self._update_op_progress(
+            OperationProgress(
+                stage=4,
+                total_stages=5 if self._auto_health_check_path else self._deploy_total_stages,
+                message=phase,
+                current=current,
+                total=total,
+                unit="files",
+                phase_key=("deploy", pass_name, total),
+                summary_prefix=f"{prefix}承認済み同期を実行中…",
+            )
+        )
 
     @Slot(int, int, str)
     def _force_overwrite_progress(self, current: int, total: int, path: str) -> None:
-        self.progress_bar.setRange(0, max(total, 1))
-        self.progress_bar.setValue(current)
-        ratio = current / max(total, 1)
-        percent = f"{ratio * 100:.1f}%"
-        self.progress_bar.setFormat(f"{current}/{total} ({percent})")
-        self.summary.setText(f"無条件上書き中… {path}")
+        self._update_op_progress(
+            OperationProgress(
+                stage=2,
+                total_stages=2,
+                message=path,
+                current=current,
+                total=total,
+                unit="files",
+                phase_key=("force_overwrite", total),
+                summary_prefix="無条件上書き中…",
+            )
+        )
         completed = list(self._current_operation_details.get("completed_paths", []))
         if path not in completed:
             completed.append(path)
@@ -3495,7 +4526,8 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _force_overwrite_completed(self, result: ForceOverwriteResult) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation(
             "succeeded",
             details={
@@ -3516,7 +4548,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _force_overwrite_failed(self, message: str) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self._reset_write_state()
         self.summary.setText(
@@ -3526,7 +4559,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _force_overwrite_cancelled(self, message: str) -> None:
-        self.progress_bar.setVisible(False)
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("cancelled", error=message)
         self._reset_write_state()
         self.summary.setText(
@@ -3536,6 +4570,8 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _recovery_scan_completed(self, result: RecoveryAnalysisResult) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation(
             "blocked" if result.artifacts or result.issues else "succeeded",
             details={
@@ -3557,12 +4593,23 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _recovery_scan_failed(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self.summary.setText("安全性確認を完了できませんでした。")
         QMessageBox.critical(self, "安全性確認エラー", message)
 
+    @Slot(str)
+    def _recovery_scan_cancelled(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("cancelled", error=message)
+        self.summary.setText("安全性確認を停止しました。")
+
     @Slot(object)
     def _restore_completed(self, result: RestoreResult) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         if self._restore_backup_id:
             self.store.set_backup_status(self._restore_backup_id, "restored")
         self._finish_operation(
@@ -3582,16 +4629,36 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _restore_failed(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self._restore_backup_id = None
         self._reset_write_state()
         self.summary.setText("復元を中止しました。外部変更または検証エラーを確認してください。")
         QMessageBox.critical(self, "復元エラー", message)
 
+    @Slot(str)
+    def _restore_cancelled(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("cancelled", error=message)
+        self._restore_backup_id = None
+        self._reset_write_state()
+        self.summary.setText("バックアップからの復元を安全な区切りで停止しました。")
+
     @Slot()
     def _scan_finished(self) -> None:
-        if self._wordpress_setup_active:
+        if self._dry_run_progress_timer.isActive():
+            self._stop_dry_run_progress()
+        if self._op_progress_timer.isActive():
+            self._stop_op_progress()
+        if self._wordpress_progress_timer.isActive():
+            self._stop_wordpress_progress()
+        if self._laravel_progress_timer.isActive():
+            self._stop_laravel_progress()
+        if self._wordpress_setup_active or self._laravel_setup_active:
             self._wordpress_setup_active = False
+            self._laravel_setup_active = False
             self._set_auto_sync_controls_locked(False)
         self.scan_button.setEnabled(not self._auto_sync_active)
         self.dry_run_button.setEnabled(not self._auto_sync_active)
@@ -3601,6 +4668,7 @@ class MainWindow(QMainWindow):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self._deploy_total_stages = 4
         self.stop_button.setVisible(False)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("処理を停止")

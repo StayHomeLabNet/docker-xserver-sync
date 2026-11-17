@@ -16,6 +16,33 @@ from .models import (
 from .rules import PathRules
 
 
+DEFAULT_PLAN_VALIDITY_MINUTES = 15
+MIN_PLAN_VALIDITY_MINUTES = 1
+MAX_PLAN_VALIDITY_MINUTES = 60
+
+
+def normalize_plan_validity_minutes(value: object) -> int:
+    if isinstance(value, bool):
+        return DEFAULT_PLAN_VALIDITY_MINUTES
+    try:
+        minutes = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_PLAN_VALIDITY_MINUTES
+    return max(
+        MIN_PLAN_VALIDITY_MINUTES,
+        min(MAX_PLAN_VALIDITY_MINUTES, minutes),
+    )
+
+
+def validate_plan_validity(validity: timedelta) -> timedelta:
+    max_validity = timedelta(minutes=MAX_PLAN_VALIDITY_MINUTES)
+    if validity <= timedelta(0) or validity > max_validity:
+        raise ValueError(
+            f"Plan validity must be greater than 0 and at most {MAX_PLAN_VALIDITY_MINUTES} minutes"
+        )
+    return validity
+
+
 def snapshot_hash(records: dict[str, FileRecord]) -> str:
     payload = [records[path].to_dict() for path in sorted(records)]
     canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -32,9 +59,10 @@ class PlanBuilder:
         mapping_id: str,
         local: ScanResult,
         remote_records: tuple[FileRecord, ...],
-        validity: timedelta = timedelta(minutes=15),
+        validity: timedelta = timedelta(minutes=DEFAULT_PLAN_VALIDITY_MINUTES),
         config_sha256: str = "",
     ) -> SyncPlan:
+        validate_plan_validity(validity)
         local_by_path = local.by_path
         remote_by_path = {record.relative_path: record for record in remote_records}
         changes: list[FileChange] = []

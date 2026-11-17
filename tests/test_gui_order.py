@@ -8,8 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
-from dxsync.gui import MainWindow
+from dxsync.gui import DryRunWorker, MainWindow, OperationProgress
 from dxsync.health import HealthCheckResult
+from dxsync.laravel_setup import LaravelSetupProgress
 from dxsync.models import Project, SiteType, SyncMapping
 from dxsync.secure_store import MemoryHostKeyStore
 from dxsync.service import DryRunProgress
@@ -28,10 +29,11 @@ def test_main_window_site_order(tmp_path: Path) -> None:
         QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
     )
 
-    assert [window.site_combo.itemData(index) for index in range(3)] == [
+    assert [window.site_combo.itemData(index) for index in range(window.site_combo.count())] == [
         SiteType.CUSTOM_PHP.value,
         SiteType.WORDPRESS.value,
         SiteType.LARAVEL.value,
+        SiteType.STATIC_SITE.value,
     ]
     assert window.centralWidget().layout().contentsMargins().top() == 4
     connection_layout = window.auto_sync_button.parentWidget().layout()
@@ -465,3 +467,836 @@ def test_main_window_help_menu_has_online_manual(tmp_path: Path, monkeypatch) ->
     assert "StayHomeLabNet/docker-xserver-sync/blob/main/docs/manual.md" in opened_urls[0]
     window.close()
 
+
+def test_auto_sync_dry_run_progress_shows_stage_eta_and_heartbeat(
+    tmp_path: Path,
+) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window._auto_sync_active = True
+    window._auto_sync_stage = "dry_run"
+
+    window._dry_run_progress(
+        DryRunProgress(
+            stage=3,
+            total_stages=4,
+            message="XServerファイルを読み取り中",
+            current=0,
+            total=1200,
+            unit="files",
+            detail="assets/app.js",
+        )
+    )
+    assert "自動実行 1/4 — 手順 3/4" in window.summary.text()
+    assert "0/1,200" in window.summary.text()
+    assert "残り時間を計算中" in window.summary.text()
+
+    now = time.monotonic()
+    window._dry_run_progress_started_at = now - 25
+    window._dry_run_progress_phase_started_at = now - 10
+    window._dry_run_progress(
+        DryRunProgress(
+            stage=3,
+            total_stages=4,
+            message="XServerファイルを読み取り中",
+            current=300,
+            total=1200,
+            unit="files",
+            detail="assets/app.css",
+        )
+    )
+    assert "300/1,200" in window.summary.text()
+    assert "25.0%" in window.summary.text()
+    assert "残り約" in window.summary.text()
+    assert "経過" in window.summary.text()
+    assert "assets/app.css" in window.summary.text()
+
+    window._dry_run_progress_last_update_at = time.monotonic() - 3
+    window._refresh_dry_run_progress()
+    assert "サーバー応答待ち" in window.summary.text()
+    window._stop_dry_run_progress()
+    window.close()
+
+
+def test_start_dry_run_for_static_site_wires_progress_timer_and_stops_cleanly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app()
+    site_dir = tmp_path / "static"
+    site_dir.mkdir()
+    (site_dir / "index.html").write_text("<h1>hello</h1>")
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("dummy")
+
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    mapping = SyncMapping.create(
+        "static",
+        str(site_dir),
+        "/home/sample/example.com/public_html",
+    )
+    project = Project.create(
+        name="Static Site",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference=str(key_file),
+        mappings=(mapping,),
+    )
+    store.save(project)
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+
+    import threading
+
+    from dxsync import gui as gui_module
+
+    entered_execute = threading.Event()
+    proceed_execute = threading.Event()
+
+    class FakeCloseable:
+        def close(self) -> None:
+            pass
+
+    def fake_connect_sftp(**_kwargs):
+        return FakeCloseable(), FakeCloseable()
+
+    def fake_execute(**kwargs):
+        progress_callback = kwargs["progress_callback"]
+        cancellation_token = kwargs["cancellation_token"]
+        progress_callback(
+            DryRunProgress(
+                stage=2,
+                total_stages=4,
+                message="ローカルファイルを確認中",
+                current=1,
+                total=10,
+                unit="files",
+                detail="index.html",
+            )
+        )
+        entered_execute.set()
+        assert proceed_execute.wait(timeout=5.0)
+        cancellation_token.raise_if_cancelled()
+        raise AssertionError("Expected cancellation")
+
+    monkeypatch.setattr(gui_module, "connect_sftp", fake_connect_sftp)
+    monkeypatch.setattr(gui_module.DryRunService, "execute", staticmethod(fake_execute))
+
+    window._auto_sync_active = True
+    window._auto_sync_stage = "dry_run"
+    window._start_dry_run()
+
+    assert window._dry_run_progress_timer.isActive()
+    assert not window.stop_button.isHidden()
+    assert "自動実行 1/4 — 手順 1/4" in window.summary.text()
+    assert "XServerへSSH接続中" in window.summary.text()
+
+    assert entered_execute.wait(timeout=5.0)
+    app().processEvents()
+    assert "1/10" in window.summary.text()
+    assert "index.html" in window.summary.text()
+
+    assert isinstance(window._worker, DryRunWorker)
+    window._worker.cancel()
+    proceed_execute.set()
+
+    deadline = time.monotonic() + 5.0
+    while window._thread is not None and time.monotonic() < deadline:
+        app().processEvents()
+        time.sleep(0.01)
+
+    assert window._thread is None
+    assert not window._dry_run_progress_timer.isActive()
+    assert not window._auto_sync_active
+    window.close()
+
+
+def test_operation_progress_covers_sync_and_local_scan_states(
+    tmp_path: Path,
+) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+
+    # Local scan: remote_wait=False should show 処理継続中 rather than サーバー応答待ち
+    now = time.monotonic()
+    window._op_progress_started_at = now - 10
+    window._op_progress_phase_started_at = now - 5
+    window._op_progress_phase_key = (1, "SHA-256を計算中", "files", 100)
+    window._update_op_progress(
+        OperationProgress(
+            stage=1,
+            total_stages=1,
+            message="SHA-256を計算中",
+            current=25,
+            total=100,
+            unit="files",
+            detail="images/hero.png",
+            summary_prefix="ローカル検査中…",
+            remote_wait=False,
+        )
+    )
+    assert "25/100" in window.progress_bar.format()
+    assert "残り約" in window.summary.text()
+    assert "images/hero.png" in window.summary.text()
+
+    window._op_progress_last_update_at = time.monotonic() - 3
+    window._refresh_op_progress()
+    assert "処理継続中 (最終更新から" in window.summary.text()
+    assert "サーバー応答待ち" not in window.summary.text()
+
+    # Revalidation during auto-sync
+    window._auto_sync_active = True
+    window._revalidation_progress(
+        OperationProgress(
+            stage=2,
+            total_stages=4,
+            message="ローカルファイルを読み取り中",
+            current=5,
+            total=20,
+            unit="files",
+            detail="index.html",
+            progress_label="ローカルファイルを読み取り中",
+            remote_wait=False,
+        )
+    )
+    window._op_progress_last_update_at = time.monotonic() - 3
+    window._refresh_op_progress()
+    assert "自動実行 2/4 — 計画を再検証中…" in window.summary.text()
+    assert "手順 2/4" in window.summary.text()
+    assert "5/20" in window.summary.text()
+    assert "index.html" in window.summary.text()
+    assert "処理継続中 (最終更新から" in window.summary.text()
+    assert "サーバー応答待ち" not in window.summary.text()
+    assert "5/20 (25.0%)" == window.progress_label.text()
+
+    window._revalidation_progress(
+        OperationProgress(
+            stage=3,
+            total_stages=4,
+            message="XServerファイルを読み取り中",
+            current=4,
+            total=20,
+            unit="files",
+            detail="about.html",
+            progress_label="XServerファイルを読み取り中",
+            remote_wait=True,
+        )
+    )
+    assert "自動実行 2/4 — 計画を再検証中…" in window.summary.text()
+    assert "手順 3/4" in window.summary.text()
+    assert "4/20" in window.summary.text()
+    assert "about.html" in window.summary.text()
+
+    # Deployment preparation -> publish pass resets phase ETA cleanly
+    window._op_progress_phase_started_at = time.monotonic() - 20
+    window._deployment_progress(10, 10, "転送準備: app.js")
+    first_phase_started = window._op_progress_phase_started_at
+    assert "この工程は完了" in window.summary.text()
+
+    window._deployment_progress(1, 10, "公開切り替え: app.js")
+    assert window._op_progress_phase_started_at != first_phase_started
+    assert "公開切り替え: app.js" in window.summary.text()
+
+    # Restore progress with server heartbeat
+    window._auto_sync_active = False
+    window._update_op_progress(
+        OperationProgress(
+            stage=3,
+            total_stages=3,
+            message="復元準備: index.html",
+            current=2,
+            total=8,
+            unit="files",
+            phase_key=("restore", "復元準備", 8),
+            summary_prefix="バックアップから復元中…",
+        )
+    )
+    window._op_progress_last_update_at = time.monotonic() - 3
+    window._refresh_op_progress()
+    assert "手順 3/3" in window.summary.text()
+    assert "バックアップから復元中…" in window.summary.text()
+    assert "サーバー応答待ち" in window.summary.text()
+
+    window._stop_op_progress()
+    window.close()
+
+
+def test_laravel_progress_shows_mib_eta_and_heartbeat(tmp_path: Path) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    now = time.monotonic()
+    window._laravel_progress_started_at = now - 20
+    window._laravel_progress_phase_started_at = now - 10
+    window._laravel_progress_last_update_at = now
+    window._laravel_progress_phase_key = (
+        6,
+        "Laravelアプリ本体を転送中",
+        "bytes",
+        10 * 1024 * 1024,
+    )
+
+    window._laravel_setup_progress(
+        LaravelSetupProgress(
+            step=6,
+            total_steps=10,
+            message="Laravelアプリ本体を転送中",
+            current=2 * 1024 * 1024,
+            total=10 * 1024 * 1024,
+            unit="bytes",
+            detail="vendor/autoload.php (5/40件)",
+        )
+    )
+
+    assert "2.0/10.0 MiB" in window.progress_bar.format()
+    assert "20.0%" in window.progress_bar.format()
+    assert "残り約" in window.summary.text()
+    assert "経過" in window.summary.text()
+    assert "vendor/autoload.php (5/40件)" in window.summary.text()
+
+    window._laravel_progress_last_update_at = time.monotonic() - 3
+    window._refresh_laravel_progress()
+    assert "サーバー応答待ち" in window.summary.text()
+    window._stop_laravel_progress()
+    window.close()
+
+
+def test_throttled_progress_emitter_keeps_boundaries_and_phase_changes() -> None:
+    from dxsync.gui import _ThrottledProgressEmitter
+
+    emitted: list[DryRunProgress] = []
+    emitter = _ThrottledProgressEmitter(emitted.append, min_interval=10.0)
+
+    emitter(DryRunProgress(2, 4, "ローカルファイルを列挙中", 0, None, "directories", ""))
+    emitter(DryRunProgress(2, 4, "ローカルファイルを列挙中", 1, None, "directories", "."))
+    emitter(DryRunProgress(2, 4, "ローカルファイルを列挙中", 2, None, "directories", "a"))
+    # Phase change + current == 0 boundary both emit immediately
+    emitter(DryRunProgress(2, 4, "ローカルファイルを読み取り中", 0, 5, "files", "f1.txt"))
+    # Intermediate within min_interval is throttled
+    emitter(DryRunProgress(2, 4, "ローカルファイルを読み取り中", 1, 5, "files", "f1.txt"))
+    emitter(DryRunProgress(2, 4, "ローカルファイルを読み取り中", 2, 5, "files", "f2.txt"))
+    # Completion boundary (current >= total) emits immediately
+    emitter(DryRunProgress(2, 4, "ローカルファイルを読み取り中", 5, 5, "files", "f5.txt"))
+
+    assert [(e.message, e.current, e.total) for e in emitted] == [
+        ("ローカルファイルを列挙中", 0, None),
+        ("ローカルファイルを読み取り中", 0, 5),
+        ("ローカルファイルを読み取り中", 5, 5),
+    ]
+
+
+def test_dry_run_progress_updates_inline_label_and_avoids_redundant_range_reset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app()
+    window = MainWindow(
+        ProjectStore(tmp_path / "state.db", MemoryHostKeyStore()),
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+
+    range_calls: list[tuple[int, int]] = []
+    original_set_range = window.progress_bar.setRange
+
+    def tracked_set_range(minimum: int, maximum: int) -> None:
+        range_calls.append((minimum, maximum))
+        original_set_range(minimum, maximum)
+
+    monkeypatch.setattr(window.progress_bar, "setRange", tracked_set_range)
+
+    # 1) Directory enumeration phase (two updates should call setRange(0, 0) only once)
+    window._dry_run_progress(
+        DryRunProgress(2, 4, "ローカルファイルを列挙中", 0, None, "directories", "")
+    )
+    window._dry_run_progress(
+        DryRunProgress(2, 4, "ローカルファイルを列挙中", 12, None, "directories", "assets")
+    )
+    assert not window.progress_label.isHidden()
+    assert window.progress_label.text() == "12フォルダ"
+    assert "12フォルダ確認済み" in window.summary.text()
+    assert range_calls == [(0, 0)]
+
+    # 2) Early determinate phase (< 1s) with current > 0 shows ETA calculation placeholder
+    window._dry_run_progress(
+        DryRunProgress(2, 4, "ローカルファイルを読み取り中", 5, 100, "files", "assets/app.js")
+    )
+    assert window.progress_label.text() == "5/100 (5.0%)"
+    assert "残り時間を計算中" in window.summary.text()
+    assert range_calls == [(0, 0), (0, 1000)]
+
+    # 3) Stage 4 planning (non-directory indeterminate) should show 処理継続中, not 全体数を確認中
+    window._dry_run_progress(DryRunProgress(4, 4, "差分計画を作成中"))
+    assert window.progress_label.text() == "処理中…"
+    assert "処理継続中" in window.summary.text()
+    assert "全体数を確認中" not in window.summary.text()
+
+    # 4) Zero-total determinate-style fallback shows 0/0 cleanly
+    window._dry_run_progress(DryRunProgress(4, 4, "承認用ファイルを準備中", 0, 0, "files", ""))
+    assert window.progress_label.text() == "0/0"
+    assert "0/0" in window.summary.text()
+
+    window._stop_dry_run_progress()
+    window._set_progress_visible(False)
+    assert window.progress_label.isHidden()
+    window.close()
+
+
+def test_revalidation_worker_emits_detailed_progress_and_remote_wait(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from dxsync import gui as gui_module
+    from dxsync.gui import RevalidationWorker
+    from dxsync.models import ScanResult, SyncPlan
+    from dxsync.revalidation import RevalidationResult
+    from dxsync.service import DryRunProgress
+    from dxsync.storage import StoredPlan
+    from datetime import datetime, timedelta, timezone
+
+    app()
+    local_dir = tmp_path / "site"
+    local_dir.mkdir()
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("dummy", encoding="utf-8")
+    mapping = SyncMapping.create("public", str(local_dir), "/home/user/site")
+    project = Project.create(
+        name="Static Site",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference=str(key_file),
+        mappings=(mapping,),
+    )
+    now = datetime.now(timezone.utc)
+    plan = SyncPlan(
+        plan_id="plan-1",
+        mapping_id=mapping.mapping_id,
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        changes=(),
+        local_snapshot_sha256="a",
+        remote_snapshot_sha256="b",
+        config_sha256="c",
+    )
+    stored = StoredPlan(
+        plan=plan,
+        project_id=project.project_id,
+        status="ready",
+        staging_path=str(tmp_path / "staging"),
+    )
+
+    class FakeCloseable:
+        def close(self) -> None:
+            pass
+
+    def fake_connect_sftp(**_kwargs):
+        return FakeCloseable(), FakeCloseable()
+
+    def fake_revalidate(self, **kwargs):
+        cb = kwargs["progress_callback"]
+        cb(DryRunProgress(1, 4, "ステージングを確認中", 2, 5, "files", "index.html"))
+        cb(DryRunProgress(2, 4, "ローカルファイルを読み取り中", 3, 10, "files", "app.js"))
+        cb(DryRunProgress(3, 4, "XServerファイルを読み取り中", 4, 8, "files", "style.css"))
+        cb(DryRunProgress(4, 4, "差分と設定の一致を確認中"))
+        return RevalidationResult(valid=True, reasons=(), current=None)
+
+    monkeypatch.setattr(gui_module, "connect_sftp", fake_connect_sftp)
+    monkeypatch.setattr(gui_module.PlanRevalidator, "revalidate", fake_revalidate)
+
+    worker = RevalidationWorker(
+        stored=stored,
+        project=project,
+        mapping=mapping,
+        passphrase=None,
+    )
+    events: list[OperationProgress] = []
+    worker.progress.connect(events.append)
+    worker.run()
+
+    staging_event = next(e for e in events if e.message == "ステージングを確認中")
+    assert staging_event.current == 2
+    assert staging_event.total == 5
+    assert staging_event.detail == "index.html"
+    assert staging_event.progress_label == "ステージングを確認中"
+    assert staging_event.remote_wait is False
+
+    local_event = next(e for e in events if e.message == "ローカルファイルを読み取り中")
+    assert local_event.remote_wait is False
+    assert local_event.progress_label == "ローカルファイルを読み取り中"
+
+    remote_event = next(e for e in events if e.message == "XServerファイルを読み取り中")
+    assert remote_event.remote_wait is True
+    assert remote_event.detail == "style.css"
+
+    compare_event = next(e for e in events if e.message == "差分と設定の一致を確認中")
+    assert compare_event.stage == 4
+    assert compare_event.remote_wait is False
+
+
+def test_saved_project_locks_main_window_fields_and_keeps_lock_after_auto_sync(
+    tmp_path: Path,
+) -> None:
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    site_dir = tmp_path / "wp"
+    site_dir.mkdir()
+    mapping = SyncMapping.create(
+        "WordPress",
+        str(site_dir),
+        "/home/sample/wp.example.com/public_html",
+    )
+    project = Project.create(
+        name="WordPress",
+        site_type=SiteType.WORDPRESS,
+        domain="wp.example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference="/tmp/test.key",
+        mappings=(mapping,),
+    )
+    store.save(project)
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+
+    assert window._current_project is not None
+    assert not window.site_combo.isEnabled()
+    assert not window.browse_button.isEnabled()
+    assert not window.port_spin.isEnabled()
+    assert not window.key_browse_button.isEnabled()
+    assert window.path_edit.isReadOnly()
+    assert window.host_edit.isReadOnly()
+    assert window.user_edit.isReadOnly()
+    assert window.remote_root_edit.isReadOnly()
+    assert window.fingerprint_edit.isReadOnly()
+    assert window.key_edit.isReadOnly()
+
+    # Unlocking after auto-sync / setup keeps saved-project lock intact
+    window._set_auto_sync_controls_locked(True)
+    window._set_auto_sync_controls_locked(False)
+    assert not window.site_combo.isEnabled()
+    assert window.path_edit.isReadOnly()
+
+    # Switching to 手動設定（未保存） re-enables direct editing
+    window.project_combo.setCurrentIndex(0)
+    assert window._current_project is None
+    assert window.site_combo.isEnabled()
+    assert window.browse_button.isEnabled()
+    assert not window.path_edit.isReadOnly()
+    assert not window.host_edit.isReadOnly()
+
+    # Switching back to the saved project restores the lock
+    window.project_combo.setCurrentIndex(
+        window.project_combo.findData(project.project_id)
+    )
+    assert not window.site_combo.isEnabled()
+    assert window.path_edit.isReadOnly()
+    window.close()
+
+
+def test_static_site_manual_flow_dry_run_revalidation_backup_and_deploy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import io
+    import stat
+    from dataclasses import dataclass
+    from PySide6.QtWidgets import QDialogButtonBox
+    from dxsync import gui as gui_module
+    from dxsync.approval_dialog import (
+        BackupConfirmationDialog,
+        DeploymentApprovalDialog,
+    )
+
+    app()
+    site_dir = tmp_path / "static_site"
+    site_dir.mkdir()
+    (site_dir / "index.html").write_bytes(b"<h1>updated</h1>")
+    (site_dir / "new.html").write_bytes(b"<p>added</p>")
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("dummy", encoding="utf-8")
+
+    remote_root = "/home/sample/example.com/public_html"
+    mapping = SyncMapping.create("public", str(site_dir), remote_root)
+    project = Project.create(
+        name="Static Example",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference=str(key_file),
+        mappings=(mapping,),
+    )
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    store.save(project)
+
+    @dataclass
+    class FakeAttr:
+        filename: str
+        st_mode: int
+        st_size: int = 0
+        st_mtime: int = 1
+
+    class FakeWriter(io.BytesIO):
+        def __init__(self, sftp_fs, path: str) -> None:
+            super().__init__()
+            self._sftp_fs = sftp_fs
+            self._path = path
+
+        def close(self) -> None:
+            if not self.closed:
+                self._sftp_fs.files[self._path] = self.getvalue()
+            super().close()
+
+    class FakeSftp:
+        def __init__(self) -> None:
+            self.directories = {
+                "/",
+                "/home",
+                "/home/sample",
+                "/home/sample/example.com",
+                remote_root,
+            }
+            self.files: dict[str, bytes] = {
+                f"{remote_root}/index.html": b"<h1>old</h1>",
+                f"{remote_root}/stale.html": b"<p>stale</p>",
+            }
+            self.modes: dict[str, int] = {}
+
+        def listdir_attr(self, path: str):
+            norm = path.rstrip("/") or "/"
+            prefix = "/" if norm == "/" else norm + "/"
+            entries = []
+            seen_dirs: set[str] = set()
+            for directory in self.directories:
+                if directory.startswith(prefix) and directory != norm:
+                    rest = directory[len(prefix) :]
+                    if "/" not in rest and rest and rest not in seen_dirs:
+                        seen_dirs.add(rest)
+                        entries.append(FakeAttr(rest, stat.S_IFDIR | 0o755))
+            for file_path, data in self.files.items():
+                if file_path.startswith(prefix):
+                    rest = file_path[len(prefix) :]
+                    if "/" not in rest and rest:
+                        entries.append(
+                            FakeAttr(
+                                rest,
+                                stat.S_IFREG | self.modes.get(file_path, 0o644),
+                                len(data),
+                                1,
+                            )
+                        )
+            return entries
+
+        def stat(self, path: str):
+            if path in self.directories:
+                return FakeAttr(Path(path).name or "/", stat.S_IFDIR | 0o755)
+            if path in self.files:
+                return FakeAttr(
+                    Path(path).name,
+                    stat.S_IFREG | self.modes.get(path, 0o644),
+                    len(self.files[path]),
+                    1,
+                )
+            raise FileNotFoundError(path)
+
+        def mkdir(self, path: str, mode: int = 0o755) -> None:
+            self.directories.add(path)
+
+        def rmdir(self, path: str) -> None:
+            self.directories.discard(path)
+
+        def open(self, path: str, mode: str = "r"):
+            if "w" in mode:
+                return FakeWriter(self, path)
+            if path not in self.files:
+                raise FileNotFoundError(path)
+            return io.BytesIO(self.files[path])
+
+        def remove(self, path: str) -> None:
+            self.files.pop(path, None)
+            self.modes.pop(path, None)
+
+        def rename(self, oldpath: str, newpath: str) -> None:
+            self.files[newpath] = self.files.pop(oldpath)
+            if oldpath in self.modes:
+                self.modes[newpath] = self.modes.pop(oldpath)
+
+        def chmod(self, path: str, mode: int) -> None:
+            if path not in self.files:
+                raise FileNotFoundError(path)
+            self.modes[path] = mode
+
+        def close(self) -> None:
+            pass
+
+    class FakeClient:
+        def close(self) -> None:
+            pass
+
+    fake_sftp = FakeSftp()
+    monkeypatch.setattr(
+        gui_module,
+        "connect_sftp",
+        lambda **_kwargs: (FakeClient(), fake_sftp),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, text, *_args: (_ for _ in ()).throw(AssertionError(f"Unexpected warning: {title}: {text}"))),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        staticmethod(lambda _parent, title, text, *_args: (_ for _ in ()).throw(AssertionError(f"Unexpected critical: {title}: {text}"))),
+    )
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+
+    def wait_idle() -> None:
+        deadline = time.monotonic() + 5.0
+        while window._thread is not None and time.monotonic() < deadline:
+            app().processEvents()
+            time.sleep(0.01)
+        app().processEvents()
+        assert window._thread is None
+
+    # 1) Dry run
+    window._start_dry_run()
+    wait_idle()
+    assert window._current_plan_id is not None
+    assert window.revalidate_button.isEnabled()
+    assert not window.backup_button.isEnabled()
+    assert not window.deploy_button.isEnabled()
+
+    # 2) Revalidation
+    window._start_revalidation()
+    wait_idle()
+    assert window._validated_plan_id == window._current_plan_id
+    assert window.backup_button.isEnabled()
+    assert not window.deploy_button.isEnabled()
+    assert "次は「バックアップを作成」へ進んでください。" in window.summary.text()
+
+    # 3) Skip backup option unlocks deploy while leaving backup option available
+    def skip_backup_exec(dialog_self):
+        dialog_self.skip_backup.setChecked(True)
+        dialog_self.confirm.setChecked(True)
+        assert dialog_self.buttons.button(QDialogButtonBox.Ok).isEnabled()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(BackupConfirmationDialog, "exec", skip_backup_exec)
+    window._start_backup()
+    assert window._backup_skipped is True
+    assert window.deploy_button.isEnabled()
+    assert window.backup_button.isEnabled()
+
+    # 4) Actual backup creation
+    def run_backup_exec(dialog_self):
+        dialog_self.skip_backup.setChecked(False)
+        dialog_self.confirm.setChecked(True)
+        assert dialog_self.buttons.button(QDialogButtonBox.Ok).isEnabled()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(BackupConfirmationDialog, "exec", run_backup_exec)
+    window._start_backup()
+    wait_idle()
+    assert window._current_backup_id is not None
+    assert not window.backup_button.isEnabled()
+    assert window.deploy_button.isEnabled()
+
+    # 5) Deployment approval and execution
+    def deploy_exec(dialog_self):
+        dialog_self.health_check.setChecked(False)
+        dialog_self.destination_check.setChecked(True)
+        dialog_self.changes_check.setChecked(True)
+        dialog_self.backup_check.setChecked(True)
+        dialog_self.domain_edit.setText("example.com")
+        assert dialog_self.apply_button.isEnabled()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(DeploymentApprovalDialog, "exec", deploy_exec)
+    window._start_deployment()
+    wait_idle()
+
+    assert window._current_plan_id is None
+    assert not window.revalidate_button.isEnabled()
+    assert not window.backup_button.isEnabled()
+    assert not window.deploy_button.isEnabled()
+    assert fake_sftp.files[f"{remote_root}/index.html"] == b"<h1>updated</h1>"
+    assert fake_sftp.files[f"{remote_root}/new.html"] == b"<p>added</p>"
+    window.close()
+
+
+def test_refresh_ready_plan_updates_summary_when_validated_plan_expires(
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from dxsync.models import SyncPlan
+
+    app()
+    local_dir = tmp_path / "site"
+    local_dir.mkdir()
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("dummy", encoding="utf-8")
+    mapping = SyncMapping.create("public", str(local_dir), "/home/user/site")
+    project = Project.create(
+        name="Static Site",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="sample.xsrv.jp",
+        ssh_username="sample",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference=str(key_file),
+        mappings=(mapping,),
+    )
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    store.save(project)
+
+    now = datetime.now(timezone.utc)
+    plan = SyncPlan(
+        plan_id="plan-expiring",
+        mapping_id=mapping.mapping_id,
+        created_at=now - timedelta(minutes=2),
+        expires_at=now - timedelta(seconds=1),
+        changes=(),
+        local_snapshot_sha256="a",
+        remote_snapshot_sha256="b",
+        config_sha256="c",
+    )
+    store.save_plan(project.project_id, plan, str(tmp_path / "staging"))
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window._current_plan_id = plan.plan_id
+    window._validated_plan_id = plan.plan_id
+    window._refresh_ready_plan()
+
+    assert window._current_plan_id is None
+    assert window._validated_plan_id is None
+    assert not window.revalidate_button.isEnabled()
+    assert not window.backup_button.isEnabled()
+    assert not window.deploy_button.isEnabled()
+    assert "計画の有効期限が切れました" in window.summary.text()
+    window.close()

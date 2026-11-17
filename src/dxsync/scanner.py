@@ -51,7 +51,7 @@ class LocalScanner:
         candidates: list[tuple[Path, str]] = []
         scanned_directories = 0
         report = progress_callback or (lambda _current, _total, _detail: None)
-        report(0, None, "ローカルファイルを列挙中")
+        report(0, None, "")
 
         for current, directory_names, file_names in os.walk(resolved_root, followlinks=False):
             if cancellation_token is not None:
@@ -98,10 +98,12 @@ class LocalScanner:
                 candidates.append((absolute, relative))
 
         total = len(candidates)
-        report(0, total, "")
+        if total == 0:
+            report(0, 0, "")
         for index, (absolute, relative) in enumerate(candidates, start=1):
             if cancellation_token is not None:
                 cancellation_token.raise_if_cancelled()
+            report(index - 1, total, relative)
             try:
                 stat = absolute.stat()
                 if not absolute.is_file():

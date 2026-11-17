@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import stat
 import hashlib
+import stat
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO, Callable, Protocol
 
+from .cancellation import CancellationToken
 from .validation import normalize_remote_root
 
 
@@ -49,14 +50,24 @@ def is_dxsync_temporary_name(filename: str) -> bool:
 def scan_recovery_artifacts(
     sftp: RecoveryRemoteFileSystem,
     remote_root: str,
+    *,
+    progress_callback: Callable[[int, int | None, str], None] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> RecoveryScanResult:
     """Find recovery artifacts without reading, changing, or deleting remote files."""
+    cancel = cancellation_token or CancellationToken()
+    report = progress_callback or (lambda _current, _total, _detail: None)
     root = normalize_remote_root(remote_root)
     pending = [(root, "")]
     found: list[str] = []
     issues: list[str] = []
+    scanned_directories = 0
+    report(0, None, "XServerのフォルダを列挙中")
     while pending:
+        cancel.raise_if_cancelled()
         absolute_directory, relative_directory = pending.pop()
+        scanned_directories += 1
+        report(scanned_directories, None, relative_directory or ".")
         try:
             entries = sftp.listdir_attr(absolute_directory)
         except OSError as exc:
@@ -78,11 +89,17 @@ def scan_recovery_artifacts(
     return RecoveryScanResult(root, tuple(sorted(found)), tuple(sorted(issues)))
 
 
-def _hash_remote(sftp: RecoveryRemoteFileSystem, path: str) -> tuple[str, int]:
+def _hash_remote(
+    sftp: RecoveryRemoteFileSystem,
+    path: str,
+    cancellation_token: CancellationToken | None = None,
+) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
     with sftp.open(path, "rb") as stream:
         while chunk := stream.read(1024 * 1024):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
@@ -98,23 +115,45 @@ def _exists_regular(sftp: RecoveryRemoteFileSystem, path: str) -> bool:
 def analyze_recovery_artifacts(
     sftp: RecoveryRemoteFileSystem,
     remote_root: str,
+    *,
+    progress_callback: Callable[[int, int | None, str], None] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> RecoveryAnalysisResult:
-    scan = scan_recovery_artifacts(sftp, remote_root)
+    cancel = cancellation_token or CancellationToken()
+    report = progress_callback or (lambda _current, _total, _detail: None)
+    scan = scan_recovery_artifacts(
+        sftp,
+        remote_root,
+        progress_callback=progress_callback,
+        cancellation_token=cancel,
+    )
     root = PurePosixPath(scan.remote_root)
     artifacts: list[RecoveryArtifact] = []
     issues = list(scan.issues)
-    for temporary_relative in scan.temporary_files:
+    total = len(scan.temporary_files)
+    if total > 0:
+        report(0, total, scan.temporary_files[0])
+    for index, temporary_relative in enumerate(scan.temporary_files, start=1):
+        cancel.raise_if_cancelled()
         marker = temporary_relative.rfind(".dxsync-")
         kind = temporary_relative.rsplit(".", 1)[-1]
         destination_relative = temporary_relative[:marker]
         temporary_path = str(root / temporary_relative)
         destination_path = str(root / destination_relative)
         try:
-            temporary_hash, temporary_size = _hash_remote(sftp, temporary_path)
+            temporary_hash, temporary_size = _hash_remote(
+                sftp,
+                temporary_path,
+                cancellation_token=cancel,
+            )
             destination_hash = None
             destination_size = None
             if _exists_regular(sftp, destination_path):
-                destination_hash, destination_size = _hash_remote(sftp, destination_path)
+                destination_hash, destination_size = _hash_remote(
+                    sftp,
+                    destination_path,
+                    cancellation_token=cancel,
+                )
             same = destination_hash == temporary_hash and destination_hash is not None
             if kind == "new" and same:
                 assessment = "公開済みコピーと一致"
@@ -155,4 +194,5 @@ def analyze_recovery_artifacts(
             )
         except OSError as exc:
             issues.append(f"{temporary_relative}: {exc}")
+        report(index, total, temporary_relative)
     return RecoveryAnalysisResult(scan.remote_root, tuple(artifacts), tuple(sorted(issues)))

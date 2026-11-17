@@ -52,10 +52,12 @@ class StagingArea:
         )
         report = progress_callback or (lambda _current, _total, _detail: None)
         total = len(records)
-        report(0, total, "")
+        if total == 0:
+            report(0, 0, "")
         for index, record in enumerate(records, start=1):
             if cancellation_token is not None:
                 cancellation_token.raise_if_cancelled()
+            report(index - 1, total, record.relative_path)
             if record.sha256 is None:
                 raise StagingError(f"Cannot stage a file without a hash: {record.relative_path}")
             source = scan.root / Path(record.relative_path)
@@ -82,7 +84,13 @@ class StagingArea:
         )
         return StagingResult(root, manifest_path, len(manifest), total_bytes)
 
-    def verify(self, root: Path, expected_hashes: dict[str, str]) -> StagingVerification:
+    def verify(
+        self,
+        root: Path,
+        expected_hashes: dict[str, str],
+        progress_callback: Callable[[int, int, str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> StagingVerification:
         resolved_root = root.resolve()
         issues: list[str] = []
         manifest_path = resolved_root / ".dxsync-manifest.json"
@@ -99,20 +107,36 @@ class StagingArea:
         if manifest_records != expected_hashes:
             issues.append("Staging manifest does not match the approved upload set")
 
-        actual_paths: set[str] = set()
-        for candidate in resolved_root.rglob("*"):
+        candidates: list[tuple[Path, str]] = []
+        for candidate in sorted(resolved_root.rglob("*")):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             relative = candidate.relative_to(resolved_root).as_posix()
             if relative == ".dxsync-manifest.json" or candidate.is_dir():
                 continue
+            candidates.append((candidate, relative))
+
+        report = progress_callback or (lambda _current, _total, _detail: None)
+        total = len(candidates)
+        if total == 0:
+            report(0, 0, "")
+
+        actual_paths: set[str] = set()
+        for index, (candidate, relative) in enumerate(candidates, start=1):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
+            report(index - 1, total, relative)
             actual_paths.add(relative)
             if candidate.is_symlink() or not candidate.is_file():
                 issues.append(f"Unsafe staged entry: {relative}")
+                report(index, total, relative)
                 continue
             expected = expected_hashes.get(relative)
             if expected is None:
                 issues.append(f"Unexpected staged file: {relative}")
-            elif sha256_file(candidate) != expected:
+            elif sha256_file(candidate, cancellation_token=cancellation_token) != expected:
                 issues.append(f"Staged file hash changed: {relative}")
+            report(index, total, relative)
 
         missing = set(expected_hashes) - actual_paths
         issues.extend(f"Staged file is missing: {path}" for path in sorted(missing))

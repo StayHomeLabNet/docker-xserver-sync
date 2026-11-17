@@ -43,6 +43,34 @@ COMMON_EXCLUDES = (
 )
 
 
+STATIC_EXCLUDES = (
+    ".git/",
+    "/.gitignore",
+    "/.gitattributes",
+    "/.github/",
+    "/.gitlab/",
+    "/.dockerignore",
+    "/.editorconfig",
+    "/.idea/",
+    "/.vscode/",
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "*.pem",
+    "*.key",
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
+    "compose*.yml",
+    "compose*.yaml",
+    "Dockerfile*",
+    "node_modules/",
+    "/AGENTS.md",
+    "/CLAUDE.md",
+    ".DS_Store",
+    "Thumbs.db",
+)
+
+
 @dataclass(frozen=True)
 class SitePreset:
     site_type: SiteType
@@ -93,6 +121,12 @@ PRESETS = {
             "logs/",
             "tmp/",
         ),
+        required_paths=(),
+    ),
+    SiteType.STATIC_SITE: SitePreset(
+        site_type=SiteType.STATIC_SITE,
+        exclude_patterns=STATIC_EXCLUDES,
+        protect_patterns=(),
         required_paths=(),
     ),
 }

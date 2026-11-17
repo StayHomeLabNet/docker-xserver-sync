@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 from urllib.parse import urljoin, urlparse
 
+from . import __version__
+
 
 class HttpResponse(Protocol):
     status: int
@@ -55,7 +57,7 @@ def perform_https_health_check(
         connection.request(
             "GET",
             normalized_path,
-            headers={"User-Agent": "Docker-XServer-Sync/0.1 health-check"},
+            headers={"User-Agent": f"Docker-XServer-Sync/{__version__} health-check"},
         )
         response = connection.getresponse()
         response.read(1024)

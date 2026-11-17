@@ -62,6 +62,31 @@ def test_backup_confirmation_preserves_checked_folder() -> None:
     assert "uploads/one.jpg" not in dialog.selected_delete_paths()
 
 
+def test_backup_confirmation_select_all_and_clear_all_respect_preserved_folders() -> None:
+    app()
+    dialog = BackupConfirmationDialog(
+        update_count=0,
+        backup_root="/home/user/.dxsync/backups",
+        remote_only_paths=("old/a.html", "keep/b.html", "c.html"),
+    )
+    keep_row = next(
+        row
+        for row in range(dialog.preserve_table.rowCount())
+        if dialog.preserve_table.item(row, 0).text() == "keep/"
+    )
+    dialog.preserve_table.item(keep_row, 0).setCheckState(Qt.Checked)
+
+    dialog.select_all_deletions_button.click()
+    assert dialog.selected_delete_paths() == ("old/a.html", "c.html")
+
+    dialog.clear_all_deletions_button.click()
+    assert dialog.selected_delete_paths() == ()
+
+    dialog.skip_backup.setChecked(True)
+    assert not dialog.select_all_deletions_button.isEnabled()
+    assert not dialog.clear_all_deletions_button.isEnabled()
+
+
 def test_backup_can_be_explicitly_skipped_without_deletions() -> None:
     app()
     dialog = BackupConfirmationDialog(

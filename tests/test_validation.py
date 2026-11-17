@@ -80,6 +80,20 @@ def test_custom_php_requires_explicit_runtime_path_confirmation(tmp_path: Path) 
     )
 
 
+def test_static_site_does_not_require_runtime_path_confirmation(tmp_path: Path) -> None:
+    local = tmp_path / "dist"
+    local.mkdir()
+    mapping = SyncMapping.create("dist", str(local), "/home/user/public_html")
+    project = replace(
+        make_project(tmp_path, (mapping,)),
+        site_type=SiteType.STATIC_SITE,
+    )
+
+    assert not any(
+        issue.code == "runtime_paths_unconfirmed" for issue in validate_project(project)
+    )
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [("uploads", "uploads/"), ("data/sessions/", "data/sessions/")],

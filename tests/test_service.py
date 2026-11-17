@@ -128,3 +128,102 @@ def test_dry_run_reports_file_counts_for_each_phase(tmp_path: Path) -> None:
         and event.detail == "index.php"
         for event in progress
     )
+
+
+class StaticSiteSftp:
+    def __init__(self) -> None:
+        self.directories = {
+            "/remote/site": [
+                Attr("index.html", stat.S_IFREG | 0o644, 3),
+                Attr(".well-known", stat.S_IFDIR | 0o755),
+            ],
+            "/remote/site/.well-known": [Attr("acme.txt", stat.S_IFREG | 0o644, 3)],
+        }
+
+    def listdir_attr(self, path: str):
+        return self.directories[path]
+
+    def open(self, path: str, mode: str = "r"):
+        return io.BytesIO(b"old")
+
+
+def test_static_site_syncs_uploads_htaccess_docs_and_optional_protected_paths(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.html").write_bytes(b"new-html")
+    (tmp_path / ".htaccess").write_bytes(b"RewriteEngine On")
+    (tmp_path / ".env").write_bytes(b"SECRET=1")
+    uploads = tmp_path / "wp-content" / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "photo.jpg").write_bytes(b"photo")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.html").write_bytes(b"guide")
+    well_known = tmp_path / ".well-known"
+    well_known.mkdir()
+    (well_known / "local.txt").write_bytes(b"local")
+
+    result = DryRunService().execute(
+        site_type=SiteType.STATIC_SITE,
+        mapping_id="mapping",
+        local_root=tmp_path,
+        remote_root="/remote/site",
+        sftp=StaticSiteSftp(),
+        extra_protected=(".well-known/",),
+        staging_parent=tmp_path / "staging",
+    )
+
+    by_path = {change.relative_path: change.change_type for change in result.plan.changes}
+    assert by_path == {
+        ".htaccess": ChangeType.ADD,
+        "docs/guide.html": ChangeType.ADD,
+        "index.html": ChangeType.UPDATE,
+        "wp-content/uploads/photo.jpg": ChangeType.ADD,
+    }
+    assert result.local.skipped_protected_paths == (".well-known",)
+    assert result.remote.skipped_protected_paths == (".well-known",)
+    assert result.staging is not None
+    assert (result.staging.root / ".htaccess").read_bytes() == b"RewriteEngine On"
+    assert (result.staging.root / "wp-content" / "uploads" / "photo.jpg").read_bytes() == b"photo"
+    assert (result.staging.root / "docs" / "guide.html").read_bytes() == b"guide"
+    assert not (result.staging.root / ".env").exists()
+
+
+def test_dry_run_respects_custom_plan_validity(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    (tmp_path / "index.php").write_bytes(b"new")
+
+    result = DryRunService().execute(
+        site_type=SiteType.WORDPRESS,
+        mapping_id="mapping",
+        local_root=tmp_path,
+        remote_root="/remote/site",
+        sftp=FakeSftp(),
+        plan_validity=timedelta(minutes=45),
+    )
+
+    assert result.plan.expires_at - result.plan.created_at == timedelta(minutes=45)
+
+
+def test_dry_run_rejects_validity_above_60_minutes_before_scan(tmp_path: Path) -> None:
+    from datetime import timedelta
+    import pytest
+
+    class ExplodingSftp:
+        def listdir_attr(self, path: str):
+            raise AssertionError("Should not scan when plan_validity is invalid")
+
+        def open(self, path: str, mode: str = "r"):
+            raise AssertionError("Should not open when plan_validity is invalid")
+
+    with pytest.raises(ValueError, match="at most 60 minutes"):
+        DryRunService().execute(
+            site_type=SiteType.WORDPRESS,
+            mapping_id="mapping",
+            local_root=tmp_path,
+            remote_root="/remote/site",
+            sftp=ExplodingSftp(),
+            plan_validity=timedelta(minutes=61),
+        )
+

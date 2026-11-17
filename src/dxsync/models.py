@@ -12,6 +12,7 @@ class SiteType(str, Enum):
     WORDPRESS = "wordpress"
     LARAVEL = "laravel"
     CUSTOM_PHP = "custom_php"
+    STATIC_SITE = "static_site"
 
 
 class ChangeType(str, Enum):

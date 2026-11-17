@@ -1,5 +1,5 @@
 #define MyAppName "Docker XServer Sync"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "1.0.0"
 #define MyAppPublisher "StayHomeLabNet"
 #define MyAppExeName "Docker XServer Sync.exe"
 

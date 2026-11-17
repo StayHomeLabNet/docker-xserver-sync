@@ -1,6 +1,6 @@
 # Docker → XServer Sync Comprehensive User Manual
 
-A complete, exhaustive operational manual for safely, swiftly, and reliably synchronizing and deploying web applications developed with Docker (Custom PHP, WordPress, Laravel) to XServer staging and production environments.
+A complete, exhaustive operational manual for safely, swiftly, and reliably synchronizing and deploying web applications developed with Docker (Custom PHP, WordPress, Laravel, Static Site) to XServer staging and production environments.
 
 ---
 
@@ -13,6 +13,7 @@ A complete, exhaustive operational manual for safely, swiftly, and reliably sync
    - [4-1. Custom PHP Sites](#4-1-custom-php-sites)
    - [4-2. WordPress Sites](#4-2-wordpress-sites)
    - [4-3. Laravel Sites](#4-3-laravel-sites)
+   - [4-4. Static Sites (HTML / Pre-built)](#4-4-static-sites-html--pre-built)
 5. [Project Management (Create, Duplicate, Edit, Delete)](#5-project-management-create-duplicate-edit-delete)
 6. [Synchronization Modes & Execution Pipeline](#6-synchronization-modes--execution-pipeline)
 7. [Pause & Resumption Workflow (After App Restart)](#7-pause--resumption-workflow-after-app-restart)
@@ -75,7 +76,7 @@ Docker → XServer Sync was designed specifically to bridge the gap between loca
 |                                                                                                       |
 | [WordPress/Laravel First-Time Setup Banner]     [Start Setup…] [Resume Setup…]                        |
 |                                                                                                       |
-| Site Type: [ Custom PHP / WordPress / Laravel v ] Target: [ site v ] [ C:/Repos/site... ] [Browse…]   |
+| Site Type: [ Custom PHP / WordPress / Laravel / Static Site v ] Target: [ site v ] [ C:/Repos/site... ] [Browse…] |
 |                                                                                                       |
 | ┌─ XServer Connection & Safe Sync ──────────────────────────────────────────────────────────────────┐ |
 | │ Host: [ server.xsrv.jp          ] Port: [ 10022 ] User: [ server_id                               ] │ |
@@ -117,7 +118,7 @@ For standard PHP projects outside the WordPress or Laravel frameworks.
 
 1. **Configuration**:
    - Set Site Type to **Custom PHP (独自 PHP)**.
-   - Click "Runtime Paths Configuration… (保持パス設定…)".
+   - Click **Configure Production Writable Paths… (本番書き込み先を設定…)**.
    - `uploads/`, `storage/`, `cache/`, `logs/`, and `tmp/` are automatically safeguarded.
    - Add site-specific runtime directories (e.g. `userfiles/`, `data/sessions/`) relative to the root.
    - Check the agreement box to confirm runtime directory preservation.
@@ -185,6 +186,18 @@ For maximum security on shared hosting:
 
 ---
 
+### 4-4. Static Sites (HTML / Pre-built)
+Tailored for static HTML/CSS/JS sites and pre-built outputs (e.g., Astro, Next.js `out/`, Hugo, Vite).
+
+1. **Defaults & Behavior**:
+   - **No Automatic Protected Paths (No Confirmation Required)**: Unlike PHP frameworks, directories/files such as `uploads/`, `wp-content/uploads/`, `wp-config.php`, or `.htaccess` are not automatically protected—build artifacts and static `.htaccess` files sync directly.
+   - **Public Directory Friendly Excludes**: Only secrets, VCS metadata, dependencies, and dev files (`.git/`, `.env`, `node_modules/`, `docker-compose*.yml`, `.DS_Store`, etc.) are excluded. Public paths such as `/docs/`, `/test/`, `/README*`, and `/LICENSE*` are not excluded.
+   - **Optional Protected Paths**: If you need to keep server-managed directories (e.g., `.well-known/`, `cgi-bin/`), click **Configure Protected Paths… (保護パスを設定…)** in the project editor.
+2. **Bulk Selection for Deletion Candidates**:
+   - When hashed build assets change between builds, use **Select All Deletions (削除候補をすべて選択)** / **Clear All Deletions (削除候補をすべて解除)** in the confirmation dialog to quickly mark or clear remote-only files for deletion (folders listed under "Do Not Delete Folders" remain safely disabled).
+
+---
+
 ## 5. Project Management (Create, Duplicate, Edit, Delete)
 
 ### New Project (`New…` / `新規…`)
@@ -219,9 +232,10 @@ Executes a 4-phase safe deployment:
 
 ### 2. Read-Only Dry Run
 - Audits remote files without modifying any data.
+- Generated sync plans remain valid for **15 minutes** by default and can be configured between **1 and 60 minutes** via **Settings → 計画の有効時間設定…**.
 
 ### 3. Approved Sync
-- Allows manual inspection and deselecting specific files before initiating transfers.
+- Allows manual inspection and selecting/deselecting files or deletion candidates (including bulk **Select All Deletions** / **Clear All Deletions**) before initiating transfers.
 
 ### 4. Force Overwrite
 - Bypasses dry run and pushes local files directly. Records completed paths to allow resuming if stopped.
@@ -237,7 +251,7 @@ Executes a 4-phase safe deployment:
 
 ### Resuming After Exit or Interruption
 If the computer shuts down or network drops during a transfer:
-1. **Custom PHP / General Sync**:
+1. **Custom PHP / Static Site / General Sync**:
    - The app detects unfinished operations on relaunch and presents the **Resume Interrupted Process… (中断した処理を再開…)** button.
    - Staged Sync Plans stored in SQLite resume without recalculating differences from scratch.
 2. **WordPress**:
@@ -298,10 +312,10 @@ dxsync project list [--json]
 dxsync project show <project_name|domain|id> [--json]
 
 # Execute a read-only dry run (no remote modifications)
-dxsync run dry-run <project> [--mapping <mapping_name>] [--json]
+dxsync run dry-run <project> [--mapping <mapping_name>] [--validity-minutes <1-60>] [--json]
 
 # Execute a safe 4-stage automated synchronization pipeline
-# Pass --yes to bypass interactive confirmation (ideal for CI and AI agents)
+# Prompts for confirmation on TTY; --yes (-y) is required in non-interactive mode (CI / AI scripts)
 dxsync run auto-sync <project> [--mapping <mapping_name>] [--yes] [--json]
 
 # Safety audit and orphaned temporary file cleanup
@@ -311,6 +325,7 @@ dxsync run verify <project> [--cleanup] [--json]
 dxsync backup list <project> [--json]
 
 # Restore remote files from a specific backup
+# Prompts for confirmation on TTY; --yes (-y) is required in non-interactive mode
 dxsync backup restore <project> --backup-id <id> [--yes] [--json]
 ```
 
@@ -350,4 +365,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v0.4.0 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.0.0 / StayHomeLabNet*

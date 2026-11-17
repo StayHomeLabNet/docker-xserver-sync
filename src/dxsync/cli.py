@@ -4,6 +4,7 @@ import argparse
 import getpass
 import json
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -19,7 +20,13 @@ from .operations import (
     list_backups_summary,
     list_projects_summary,
 )
-from .planner import PlanBuilder
+from .planner import (
+    DEFAULT_PLAN_VALIDITY_MINUTES,
+    MAX_PLAN_VALIDITY_MINUTES,
+    MIN_PLAN_VALIDITY_MINUTES,
+    PlanBuilder,
+    validate_plan_validity,
+)
 from .presets import get_preset
 from .remote import (
     HostKeyMismatchError,
@@ -40,6 +47,18 @@ def _site_type(value: str) -> SiteType:
         raise argparse.ArgumentTypeError(f"site must be one of: {choices}") from exc
 
 
+def _validity_minutes(value: str) -> int:
+    try:
+        minutes = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("validity minutes must be an integer") from exc
+    if not (MIN_PLAN_VALIDITY_MINUTES <= minutes <= MAX_PLAN_VALIDITY_MINUTES):
+        raise argparse.ArgumentTypeError(
+            f"validity minutes must be between {MIN_PLAN_VALIDITY_MINUTES} and {MAX_PLAN_VALIDITY_MINUTES}"
+        )
+    return minutes
+
+
 def _scan(args: argparse.Namespace) -> int:
     preset = get_preset(args.site)
     result = LocalScanner(preset.exclude_patterns).scan(args.root)
@@ -55,6 +74,7 @@ def _scan(args: argparse.Namespace) -> int:
 
 
 def _plan(args: argparse.Namespace) -> int:
+    validity = validate_plan_validity(timedelta(minutes=args.validity_minutes))
     preset = get_preset(args.site)
     local = LocalScanner(preset.exclude_patterns).scan(args.root)
     remote_payload = json.loads(args.remote_manifest.read_text(encoding="utf-8"))
@@ -64,6 +84,7 @@ def _plan(args: argparse.Namespace) -> int:
         mapping_id=args.mapping_id,
         local=local,
         remote_records=remote,
+        validity=validity,
     )
     counts = {kind.value: count for kind, count in plan.counts().items()}
     output = {
@@ -92,6 +113,7 @@ def _plan(args: argparse.Namespace) -> int:
 
 
 def _remote_dry_run(args: argparse.Namespace) -> int:
+    validity = validate_plan_validity(timedelta(minutes=args.validity_minutes))
     passphrase = getpass.getpass("秘密鍵のパスフレーズ: ") if args.ask_passphrase else None
     client, sftp = connect_sftp(
         host=args.host,
@@ -108,6 +130,7 @@ def _remote_dry_run(args: argparse.Namespace) -> int:
             local_root=args.root,
             remote_root=args.remote_root,
             sftp=sftp,
+            plan_validity=validity,
         )
     finally:
         sftp.close()
@@ -208,6 +231,7 @@ def _run_dry_run_project(args: argparse.Namespace) -> int:
         project=project,
         mapping_name=args.mapping,
         passphrase=passphrase,
+        plan_validity_minutes=args.validity_minutes,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -227,9 +251,25 @@ def _run_dry_run_project(args: argparse.Namespace) -> int:
     return 2 if result["has_blocking_issues"] else 0
 
 
+def _confirm_write_action(args: argparse.Namespace, prompt_message: str) -> None:
+    if getattr(args, "yes", False):
+        return
+    if not sys.stdin.isatty():
+        raise OperationError(
+            "非対話環境で書き込み操作を実行するには --yes (-y) オプションが必要です。"
+        )
+    answer = input(f"{prompt_message} [y/N]: ").strip().lower()
+    if answer not in {"y", "yes"}:
+        raise OperationError("ユーザーにより実行がキャンセルされました。")
+
+
 def _run_auto_sync_project(args: argparse.Namespace) -> int:
     store = _get_store_from_args(args)
     project = _resolve_project(store, args.project)
+    _confirm_write_action(
+        args,
+        f"[{project.name}] ドメイン {project.domain} へ安全自動同期を実行しますか？",
+    )
     passphrase = getpass.getpass("秘密鍵のパスフレーズ: ") if args.ask_passphrase else None
     result = execute_auto_sync(
         store=store,
@@ -243,10 +283,19 @@ def _run_auto_sync_project(args: argparse.Namespace) -> int:
         if result["status"] == "no_changes":
             print(f"[{project.name}] {result['message']}")
         else:
-            print(f"[{project.name}] 安全同期が正常に完了しました:")
+            hc = result["health_check"]
+            hc_text = (
+                f"{hc['status_code']} ({hc['url']})"
+                if hc.get("status_code") is not None
+                else f"エラー: {hc.get('error') or '不明'} ({hc['url']})"
+            )
+            if hc.get("ok"):
+                print(f"[{project.name}] 安全同期が正常に完了しました:")
+            else:
+                print(f"[{project.name}] 同期は完了しましたが、HTTPS動作確認に失敗しました:")
             print(f"  • 転送ファイル数: {result['transferred_files']}件 ({result['total_bytes']:,} bytes)")
             print(f"  • バックアップ:   {result['backup_id']} ({result['backup_files']}件退避)")
-            print(f"  • HTTPS状態:      {result['health_check']['status_code']} ({result['health_check']['url']})")
+            print(f"  • HTTPS状態:      {hc_text}")
     return 0
 
 
@@ -272,6 +321,10 @@ def _run_verify_project(args: argparse.Namespace) -> int:
                 print(f"      - {f}")
         if args.cleanup:
             print(f"  • 削除完了ファイル数:     {result['cleaned_up_count']}件")
+        if result["issues"]:
+            print("  • 検出・処理上の問題:")
+            for issue in result["issues"]:
+                print(f"      - {issue}")
     return 0
 
 
@@ -295,6 +348,10 @@ def _backup_list(args: argparse.Namespace) -> int:
 def _backup_restore(args: argparse.Namespace) -> int:
     store = _get_store_from_args(args)
     project = _resolve_project(store, args.project)
+    _confirm_write_action(
+        args,
+        f"[{project.name}] バックアップ {args.backup_id} からリモートファイルを復元しますか？",
+    )
     passphrase = getpass.getpass("秘密鍵のパスフレーズ: ") if args.ask_passphrase else None
     result = execute_restore(
         store=store,
@@ -341,6 +398,12 @@ def build_parser() -> argparse.ArgumentParser:
     r_dry = run_subs.add_parser("dry-run", help="run a read-only dry run on a configured project")
     r_dry.add_argument("project", help="project name, domain, or ID")
     r_dry.add_argument("--mapping", help="optional mapping name or ID")
+    r_dry.add_argument(
+        "--validity-minutes",
+        type=_validity_minutes,
+        default=DEFAULT_PLAN_VALIDITY_MINUTES,
+        help=f"plan validity in minutes ({MIN_PLAN_VALIDITY_MINUTES}-{MAX_PLAN_VALIDITY_MINUTES}, default: {DEFAULT_PLAN_VALIDITY_MINUTES})",
+    )
     r_dry.add_argument("--ask-passphrase", action="store_true", help="prompt for SSH key passphrase")
     r_dry.add_argument("--json", action="store_true", help="output JSON")
     r_dry.set_defaults(handler=_run_dry_run_project)
@@ -394,6 +457,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--root", type=Path, required=True)
     plan.add_argument("--remote-manifest", type=Path, required=True)
     plan.add_argument("--mapping-id", default="cli")
+    plan.add_argument(
+        "--validity-minutes",
+        type=_validity_minutes,
+        default=DEFAULT_PLAN_VALIDITY_MINUTES,
+    )
     plan.set_defaults(handler=_plan)
 
     remote = subparsers.add_parser(
@@ -408,6 +476,11 @@ def build_parser() -> argparse.ArgumentParser:
     remote.add_argument("--fingerprint", required=True, help="expected SHA256 host-key fingerprint")
     remote.add_argument("--remote-root", required=True)
     remote.add_argument("--mapping-id", default="cli")
+    remote.add_argument(
+        "--validity-minutes",
+        type=_validity_minutes,
+        default=DEFAULT_PLAN_VALIDITY_MINUTES,
+    )
     remote.add_argument("--ask-passphrase", action="store_true")
     remote.set_defaults(handler=_remote_dry_run)
 

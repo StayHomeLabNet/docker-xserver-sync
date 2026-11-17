@@ -6,8 +6,9 @@ import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO, Callable, Protocol
 
+from .cancellation import CancellationToken
 from .models import normalize_relative_path
 from .validation import normalize_remote_root
 
@@ -79,11 +80,17 @@ def _exists(sftp: RestoreRemoteFileSystem, path: str) -> bool:
         return False
 
 
-def _hash_remote(sftp: RestoreRemoteFileSystem, path: str) -> tuple[str, int]:
+def _hash_remote(
+    sftp: RestoreRemoteFileSystem,
+    path: str,
+    cancellation_token: CancellationToken | None = None,
+) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
     with sftp.open(path, "rb") as stream:
         while chunk := stream.read(1024 * 1024):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
@@ -98,7 +105,11 @@ class RemoteRestoreEngine:
         destination_root: str,
         expected_current_hashes: dict[str, str | None],
         authorization: RestoreAuthorization,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> RestoreResult:
+        cancel = cancellation_token or CancellationToken()
+        cancel.raise_if_cancelled()
         destination_root = normalize_remote_root(destination_root)
         manifest_path = str(PurePosixPath(manifest_path))
         try:
@@ -117,7 +128,9 @@ class RemoteRestoreEngine:
         token = f"{backup_id[:24]}-{uuid.uuid4().hex[:12]}"
         items: list[_RestoreItem] = []
         seen: set[str] = set()
-        for record in manifest_files:
+        total_files = len(manifest_files)
+        for index, record in enumerate(manifest_files, start=1):
+            cancel.raise_if_cancelled()
             try:
                 relative = normalize_relative_path(str(record["relative_path"]))
                 backup_hash = str(record["sha256"])
@@ -127,6 +140,8 @@ class RemoteRestoreEngine:
                 mode = int(record.get("mode", 0o644))
             except (KeyError, TypeError, ValueError) as exc:
                 raise RestoreError(f"Invalid backup file record: {exc}") from exc
+            if progress_callback is not None:
+                progress_callback(index - 1, total_files, f"検証中: {relative}")
             if relative in seen:
                 raise RestoreError(f"Duplicate backup path: {relative}")
             seen.add(relative)
@@ -143,10 +158,14 @@ class RemoteRestoreEngine:
             else:
                 if expected_current is None or not destination_exists:
                     raise RestoreError(f"Current destination file is missing: {relative}")
-                current_hash, _ = _hash_remote(sftp, destination)
+                current_hash, _ = _hash_remote(
+                    sftp, destination, cancellation_token=cancel
+                )
                 if current_hash != expected_current:
                     raise RestoreError(f"Current file was externally modified: {relative}")
-            actual_hash, actual_size = _hash_remote(sftp, backup_path)
+            actual_hash, actual_size = _hash_remote(
+                sftp, backup_path, cancellation_token=cancel
+            )
             if actual_hash != backup_hash or actual_size != backup_size:
                 raise RestoreError(f"Backup file verification failed: {relative}")
             new_temporary = destination + f".dxsync-restore-{token}.new"
@@ -162,27 +181,41 @@ class RemoteRestoreEngine:
                 expected_current, new_temporary, old_temporary,
                 stat.S_IMODE(sftp.stat(destination).st_mode) if destination_exists else mode,
             ))
+            if progress_callback is not None:
+                progress_callback(index, total_files, f"検証中: {relative}")
 
         prepared: list[_RestoreItem] = []
         try:
-            for item in items:
+            for index, item in enumerate(items, start=1):
+                cancel.raise_if_cancelled()
+                if progress_callback is not None:
+                    progress_callback(
+                        index - 1, total_files, f"復元準備: {item.relative_path}"
+                    )
                 with sftp.open(item.backup_path, "rb") as reader, sftp.open(
                     item.new_temporary, "wb"
                 ) as writer:
                     while chunk := reader.read(1024 * 1024):
+                        cancel.raise_if_cancelled()
                         writer.write(chunk)
                 sftp.chmod(item.new_temporary, item.mode)
-                copied_hash, copied_size = _hash_remote(sftp, item.new_temporary)
+                copied_hash, copied_size = _hash_remote(
+                    sftp, item.new_temporary, cancellation_token=cancel
+                )
                 if copied_hash != item.backup_hash or copied_size != item.backup_size:
                     raise RestoreError(f"Restore copy verification failed: {item.relative_path}")
                 prepared.append(item)
+                if progress_callback is not None:
+                    progress_callback(
+                        index, total_files, f"復元準備: {item.relative_path}"
+                    )
         except Exception:
             self._cleanup_new(sftp, items)
             raise
 
         applied: list[_RestoreItem] = []
         try:
-            for item in prepared:
+            for index, item in enumerate(prepared, start=1):
                 if item.expected_current_hash is None:
                     if _exists(sftp, item.destination):
                         raise RestoreError(
@@ -199,6 +232,10 @@ class RemoteRestoreEngine:
                 restored_hash, restored_size = _hash_remote(sftp, item.destination)
                 if restored_hash != item.backup_hash or restored_size != item.backup_size:
                     raise RestoreError(f"Restored file verification failed: {item.relative_path}")
+                if progress_callback is not None:
+                    progress_callback(
+                        index, total_files, f"復元適用: {item.relative_path}"
+                    )
         except Exception as exc:
             errors = self._rollback(sftp, applied, prepared)
             if errors:

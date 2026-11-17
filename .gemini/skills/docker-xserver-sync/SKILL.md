@@ -37,13 +37,13 @@ uv run dxsync project show <PROJECT_NAME_OR_DOMAIN> --json
 uv run dxsync run dry-run <PROJECT_NAME_OR_DOMAIN> --json
 
 # 一発自動安全同期
-uv run dxsync run auto-sync <PROJECT_NAME_OR_DOMAIN> --json
+uv run dxsync run auto-sync <PROJECT_NAME_OR_DOMAIN> --yes --json
 
 # バックアップ一覧
 uv run dxsync backup list <PROJECT_NAME_OR_DOMAIN> --json
 
 # ロールバック（復元）
-uv run dxsync backup restore <PROJECT_NAME_OR_DOMAIN> --backup-id <BACKUP_ID> --json
+uv run dxsync backup restore <PROJECT_NAME_OR_DOMAIN> --backup-id <BACKUP_ID> --yes --json
 
 # 安全性確認・掃除
 uv run dxsync run verify <PROJECT_NAME_OR_DOMAIN> --cleanup --json

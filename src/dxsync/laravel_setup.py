@@ -488,7 +488,13 @@ class LaravelSetupEngine:
                     app_candidates.append(path)
 
         total_app_files = len(app_candidates)
-        report(4, f"Laravel本体ファイルを転送中（全{total_app_files}ファイル）")
+        report(
+            4,
+            "Laravel本体ファイルを転送中",
+            current=0 if total_app_files else None,
+            total=total_app_files or None,
+            unit="files" if total_app_files else "",
+        )
         for i, local_file in enumerate(app_candidates, start=1):
             cancel.raise_if_cancelled()
             rel = local_file.relative_to(local_root).as_posix()
@@ -507,18 +513,25 @@ class LaravelSetupEngine:
                     )
                 continue
 
+            report(
+                4,
+                "Laravel本体ファイルを転送中",
+                current=i - 1,
+                total=total_app_files,
+                unit="files",
+                detail=rel,
+            )
             bytes_sent = _upload_file(sftp, local_file, remote_target)
             app_files_transferred += 1
             total_bytes += bytes_sent
-            if i % 25 == 0 or i == total_app_files:
-                report(
-                    4,
-                    "Laravel本体ファイルを転送中",
-                    current=i,
-                    total=total_app_files,
-                    unit="files",
-                    detail=rel,
-                )
+            report(
+                4,
+                "Laravel本体ファイルを転送中",
+                current=i,
+                total=total_app_files,
+                unit="files",
+                detail=rel,
+            )
 
         cancel.raise_if_cancelled()
 
@@ -541,7 +554,13 @@ class LaravelSetupEngine:
                     public_candidates.append(path)
 
         total_pub_files = len(public_candidates)
-        report(5, f"公開ディレクトリ（public/）のファイルを転送中（全{total_pub_files}ファイル）")
+        report(
+            5,
+            "公開ディレクトリのファイルを転送中",
+            current=0 if total_pub_files else None,
+            total=total_pub_files or None,
+            unit="files" if total_pub_files else "",
+        )
         for i, local_file in enumerate(public_candidates, start=1):
             cancel.raise_if_cancelled()
             rel = local_file.relative_to(local_public).as_posix()
@@ -559,18 +578,25 @@ class LaravelSetupEngine:
                     )
                 continue
 
+            report(
+                5,
+                "公開ディレクトリのファイルを転送中",
+                current=i - 1,
+                total=total_pub_files,
+                unit="files",
+                detail=rel,
+            )
             bytes_sent = _upload_file(sftp, local_file, remote_target)
             public_files_transferred += 1
             total_bytes += bytes_sent
-            if i % 10 == 0 or i == total_pub_files:
-                report(
-                    5,
-                    "公開ディレクトリのファイルを転送中",
-                    current=i,
-                    total=total_pub_files,
-                    unit="files",
-                    detail=rel,
-                )
+            report(
+                5,
+                "公開ディレクトリのファイルを転送中",
+                current=i,
+                total=total_pub_files,
+                unit="files",
+                detail=rel,
+            )
 
         cancel.raise_if_cancelled()
 

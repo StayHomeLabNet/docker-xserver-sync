@@ -241,3 +241,42 @@ def test_restore_recreates_approved_deleted_file() -> None:
     assert sftp.files[destination] == b"original"
     assert sftp.modes[destination] == 0o640
     assert result.files[0].relative_path == "removed.php"
+
+
+def test_restore_reports_progress_and_cleans_up_on_cancellation() -> None:
+    from dxsync.cancellation import CancellationToken, OperationCancelled
+
+    sftp, root, destination, _, manifest_path = setup_files()
+    events: list[tuple[int, int, str]] = []
+    RemoteRestoreEngine().restore(
+        sftp=sftp,
+        manifest_path=manifest_path,
+        destination_root=root,
+        expected_current_hashes={"index.php": digest(b"new")},
+        authorization=authorize(root),
+        progress_callback=lambda cur, tot, msg: events.append((cur, tot, msg)),
+    )
+    assert any(msg.startswith("検証中:") for _, _, msg in events)
+    assert any(msg.startswith("復元準備:") for _, _, msg in events)
+    assert any(msg.startswith("復元適用:") for _, _, msg in events)
+
+    sftp2, root2, destination2, _, manifest_path2 = setup_files()
+    cancel = CancellationToken()
+
+    def cancel_on_prepare(cur: int, tot: int, msg: str) -> None:
+        if msg.startswith("復元準備:"):
+            cancel.cancel()
+
+    with pytest.raises(OperationCancelled):
+        RemoteRestoreEngine().restore(
+            sftp=sftp2,
+            manifest_path=manifest_path2,
+            destination_root=root2,
+            expected_current_hashes={"index.php": digest(b"new")},
+            authorization=authorize(root2),
+            progress_callback=cancel_on_prepare,
+            cancellation_token=cancel,
+        )
+    assert sftp2.files[destination2] == b"new"
+    assert not any(".dxsync-restore" in path for path in sftp2.files)
+

@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
+from .cancellation import CancellationToken
 from .integrity import project_config_sha256
 from .models import ChangeType, Project, SyncMapping
 from .remote import RemoteFileSystem
-from .service import DryRunResult, DryRunService
+from .service import DryRunProgress, DryRunResult, DryRunService
 from .staging import StagingArea
 from .storage import StoredPlan
 from .validation import custom_runtime_paths_issue
@@ -30,8 +32,14 @@ class PlanRevalidator:
         sftp: RemoteFileSystem,
         now: datetime | None = None,
         allow_resume: bool = False,
+        progress_callback: Callable[[DryRunProgress], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> RevalidationResult:
         current_time = now or datetime.now(timezone.utc)
+        progress = progress_callback or (lambda _event: None)
+        cancel = cancellation_token or CancellationToken()
+        cancel.raise_if_cancelled()
+        progress(DryRunProgress(1, 4, "計画とステージングを確認中"))
         reasons: list[str] = []
         if runtime_issue := custom_runtime_paths_issue(project, mapping):
             reasons.append(runtime_issue.message)
@@ -56,7 +64,22 @@ class PlanRevalidator:
         if not stored.staging_path:
             reasons.append("Plan has no staging directory")
         else:
-            staging = StagingArea().verify(Path(stored.staging_path), expected_hashes)
+            staging = StagingArea().verify(
+                Path(stored.staging_path),
+                expected_hashes,
+                progress_callback=lambda current, total, detail: progress(
+                    DryRunProgress(
+                        stage=1,
+                        total_stages=4,
+                        message="ステージングを確認中",
+                        current=current,
+                        total=total,
+                        unit="files",
+                        detail=detail,
+                    )
+                ),
+                cancellation_token=cancel,
+            )
             reasons.extend(staging.issues)
 
         if reasons:
@@ -71,7 +94,16 @@ class PlanRevalidator:
             extra_excludes=mapping.exclude_patterns,
             extra_protected=mapping.protect_patterns,
             config_sha256=expected_config,
+            progress_callback=progress_callback,
+            cancellation_token=cancel,
         )
+        progress(DryRunProgress(4, 4, "差分と設定の一致を確認中"))
+        if (
+            now is None
+            and not allow_resume
+            and stored.plan.expires_at <= datetime.now(timezone.utc)
+        ):
+            reasons.append("Plan has expired")
         if current.has_blocking_issues:
             reasons.append("Current scan contains blocking issues")
         if current.plan.local_snapshot_sha256 != stored.plan.local_snapshot_sha256:

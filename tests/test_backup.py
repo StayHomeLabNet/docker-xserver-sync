@@ -208,3 +208,61 @@ def test_backup_copies_only_approved_remote_only_deletion_candidates() -> None:
     assert result.files[0].mode == 0o600
     assert sftp.files["/home/user/site/remove.php"] == b"remove"
     assert sftp.files["/home/user/site/keep.php"] == b"keep"
+
+
+def test_backup_reports_progress_and_supports_cancellation() -> None:
+    from dxsync.cancellation import CancellationToken, OperationCancelled
+
+    sftp = MemorySftp()
+    sftp.directories.update({"/home", "/home/user", "/home/user/site"})
+    sftp.files["/home/user/site/one.php"] = b"one"
+    sftp.files["/home/user/site/two.php"] = b"two"
+    now = utc_now()
+    changes = tuple(
+        FileChange(
+            name,
+            ChangeType.UPDATE,
+            FileRecord(name, EntryKind.FILE, 3, 1, digest(b"new")),
+            FileRecord(name, EntryKind.FILE, len(content), 1, digest(content)),
+        )
+        for name, content in (("one.php", b"one"), ("two.php", b"two"))
+    )
+    plan = SyncPlan(
+        "plan-progress",
+        "mapping-1",
+        now,
+        now + timedelta(minutes=5),
+        changes,
+        "local",
+        "remote",
+    )
+
+    events: list[tuple[int, int, str]] = []
+    RemoteBackupEngine().create_backup(
+        sftp=sftp,
+        plan=plan,
+        project_id="project-1",
+        remote_root="/home/user/site",
+        backup_root="/home/user/.dxsync/backups",
+        progress_callback=lambda cur, tot, path: events.append((cur, tot, path)),
+    )
+    assert events == [(0, 2, "one.php"), (1, 2, "one.php"), (2, 2, "two.php")]
+
+    cancel = CancellationToken()
+
+    def cancel_after_first(cur: int, tot: int, path: str) -> None:
+        if cur >= 1:
+            cancel.cancel()
+
+    with pytest.raises(OperationCancelled):
+        RemoteBackupEngine().create_backup(
+            sftp=sftp,
+            plan=plan,
+            project_id="project-2",
+            remote_root="/home/user/site",
+            backup_root="/home/user/.dxsync/backups",
+            progress_callback=cancel_after_first,
+            cancellation_token=cancel,
+        )
+    assert not any("project-2" in path for path in sftp.files)
+

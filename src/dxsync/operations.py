@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,13 +14,16 @@ from .deployment import (
     RemoteDeploymentEngine,
 )
 from .health import perform_https_health_check
+from .integrity import project_config_sha256
 from .models import ChangeType, Project, SyncMapping
+from .planner import DEFAULT_PLAN_VALIDITY_MINUTES, validate_plan_validity
 from .recovery import is_dxsync_temporary_name, scan_recovery_artifacts
 from .remote import connect_sftp
 from .restore import RemoteRestoreEngine, RestoreAuthorization
 from .revalidation import PlanRevalidator
 from .service import DryRunProgress, DryRunService
 from .storage import BackupRecord, ProjectStore, get_default_store
+from .validation import custom_runtime_paths_issue
 
 
 class OperationError(RuntimeError):
@@ -135,21 +138,43 @@ def get_project_detail(store: ProjectStore, project: Project) -> dict[str, Any]:
     }
 
 
+def _ensure_project_operational(
+    store: ProjectStore,
+    project: Project,
+    mapping: SyncMapping,
+    *,
+    require_runtime_paths: bool = True,
+) -> None:
+    store.initialize()
+    security = store.security_status(project.project_id)
+    if security.state != "secure":
+        raise OperationError(
+            f"接続先の確認コードがOS資格情報ストアで保護されていないため実行できません: {security.message}"
+        )
+    if require_runtime_paths:
+        if runtime_issue := custom_runtime_paths_issue(project, mapping):
+            raise OperationError(runtime_issue.message)
+
+
 def execute_dry_run(
     store: ProjectStore,
     project: Project,
     mapping_name: str | None = None,
     staging_parent: Path | None = None,
     passphrase: str | None = None,
+    plan_validity_minutes: int = DEFAULT_PLAN_VALIDITY_MINUTES,
     progress_callback: Callable[[DryRunProgress], None] | None = None,
 ) -> dict[str, Any]:
+    plan_validity = validate_plan_validity(timedelta(minutes=plan_validity_minutes))
     mapping = select_mapping(project, mapping_name)
+    _ensure_project_operational(store, project, mapping, require_runtime_paths=True)
+    config_sha256 = project_config_sha256(project, mapping)
     staging_dir = staging_parent or (store.database_path.parent / "staging")
     op = store.start_operation(
         project_id=project.project_id,
         mapping_id=mapping.mapping_id,
         kind="dry_run",
-        details={"mode": "read_only"},
+        details={"mode": "read_only", "plan_validity_minutes": plan_validity_minutes},
     )
     client, sftp = connect_sftp(
         host=project.ssh_host,
@@ -170,6 +195,8 @@ def execute_dry_run(
             extra_excludes=mapping.exclude_patterns,
             extra_protected=mapping.protect_patterns,
             staging_parent=staging_dir,
+            config_sha256=config_sha256,
+            plan_validity=plan_validity,
             progress_callback=progress_callback,
         )
         staging_root = str(result.staging.root) if result.staging else None
@@ -189,6 +216,8 @@ def execute_dry_run(
             "project": project.name,
             "mapping": mapping.name,
             "plan_id": result.plan.plan_id,
+            "plan_validity_minutes": plan_validity_minutes,
+            "expires_at": result.plan.expires_at.isoformat(),
             "counts": counts,
             "has_blocking_issues": result.has_blocking_issues,
             "changes": [
@@ -226,6 +255,8 @@ def execute_auto_sync(
     passphrase: str | None = None,
 ) -> dict[str, Any]:
     mapping = select_mapping(project, mapping_name)
+    _ensure_project_operational(store, project, mapping, require_runtime_paths=True)
+    config_sha256 = project_config_sha256(project, mapping)
     staging_dir = staging_parent or (store.database_path.parent / "staging")
     backup_root = get_backup_root(project)
 
@@ -255,6 +286,7 @@ def execute_auto_sync(
             extra_excludes=mapping.exclude_patterns,
             extra_protected=mapping.protect_patterns,
             staging_parent=staging_dir,
+            config_sha256=config_sha256,
         )
         if dry_result.has_blocking_issues:
             raise OperationError("Dry-run detected blocking issues. Auto-sync cannot proceed.")
@@ -298,6 +330,7 @@ def execute_auto_sync(
             sftp=sftp,
         )
         if not reval_result.valid:
+            store.set_plan_status(plan.plan_id, "invalid")
             reasons = "; ".join(reval_result.reasons)
             raise OperationError(f"Plan revalidation failed: {reasons}")
 
@@ -342,37 +375,58 @@ def execute_auto_sync(
             file_mode=mapping.file_mode,
             directory_mode=mapping.directory_mode,
         )
+        store.set_plan_status(plan.plan_id, "used")
 
         # Phase 5: HTTPS Health Check
-        health = perform_https_health_check(domain=project.domain)
+        health = perform_https_health_check(domain=project.domain, path="/")
+        health_error = (
+            None
+            if health.ok
+            else (health.error or f"HTTPS check returned {health.status_code}")
+        )
+        health_summary = (
+            f"HTTPS {health.status_code}"
+            if health.status_code is not None
+            else f"HTTPSエラー ({health.error or '不明'})"
+        )
 
         store.finish_operation(
             op.operation_id,
-            status="succeeded" if health.healthy else "warning",
+            status="succeeded",
             details={
+                "plan_id": plan.plan_id,
                 "backup_id": backup_record.backup_id,
                 "transferred_files": len(deploy_result.files),
                 "total_bytes": deploy_result.total_bytes,
                 "health_status": health.status_code,
+                "health_check": {
+                    "url": health.url,
+                    "ok": health.ok,
+                    "status_code": health.status_code,
+                    "error": health.error,
+                },
             },
-            error=None if health.healthy else f"HTTPS check returned {health.status_code}",
+            error=health_error,
         )
         return {
-            "status": "success",
+            "status": "success" if health.ok else "warning",
             "project": project.name,
             "mapping": mapping.name,
+            "plan_id": plan.plan_id,
             "transferred_files": len(deploy_result.files),
             "total_bytes": deploy_result.total_bytes,
             "backup_id": backup_record.backup_id,
             "backup_files": backup_record.file_count,
             "health_check": {
-                "healthy": health.healthy,
+                "ok": health.ok,
+                "healthy": health.ok,
                 "status_code": health.status_code,
                 "url": health.url,
+                "error": health.error,
             },
             "summary": (
                 f"{len(deploy_result.files)}件のファイルを同期しました / "
-                f"バックアップ: {backup_record.backup_id} / HTTPS {health.status_code}"
+                f"バックアップ: {backup_record.backup_id} / {health_summary}"
             ),
         }
     except Exception as exc:
@@ -391,6 +445,7 @@ def execute_verify(
     passphrase: str | None = None,
 ) -> dict[str, Any]:
     mapping = select_mapping(project, mapping_name)
+    _ensure_project_operational(store, project, mapping, require_runtime_paths=False)
     client, sftp = connect_sftp(
         host=project.ssh_host,
         port=project.ssh_port,
@@ -401,6 +456,7 @@ def execute_verify(
     )
     try:
         scan_res = scan_recovery_artifacts(sftp, mapping.remote_root)
+        issues = list(scan_res.issues)
         cleaned_up = []
         if cleanup and scan_res.temporary_files:
             for rel in scan_res.temporary_files:
@@ -409,7 +465,7 @@ def execute_verify(
                     sftp.remove(abs_path)
                     cleaned_up.append(rel)
                 except Exception as exc:
-                    scan_res.issues.append(f"Failed to remove {rel}: {exc}")
+                    issues.append(f"Failed to remove {rel}: {exc}")
         return {
             "status": "success",
             "project": project.name,
@@ -419,7 +475,7 @@ def execute_verify(
             "temporary_files": list(scan_res.temporary_files),
             "cleaned_up_count": len(cleaned_up),
             "cleaned_up": cleaned_up,
-            "issues": list(scan_res.issues),
+            "issues": issues,
         }
     finally:
         sftp.close()
@@ -451,12 +507,56 @@ def execute_restore(
     mapping_name: str | None = None,
     passphrase: str | None = None,
 ) -> dict[str, Any]:
-    mapping = select_mapping(project, mapping_name)
     store.initialize()
     backups = {b.backup_id: b for b in store.list_backups(project.project_id)}
     backup = backups.get(backup_id)
     if not backup:
         raise OperationError(f"Backup '{backup_id}' not found for project '{project.name}'.")
+
+    backup_mapping = next(
+        (m for m in project.mappings if m.mapping_id == backup.mapping_id),
+        None,
+    )
+    if mapping_name is not None:
+        selected_mapping = select_mapping(project, mapping_name)
+        if selected_mapping.mapping_id != backup.mapping_id:
+            raise OperationError(
+                f"Backup '{backup_id}' belongs to mapping '{backup.mapping_id}', "
+                f"not '{selected_mapping.name}'."
+            )
+    if backup_mapping is None:
+        raise OperationError(
+            f"Mapping '{backup.mapping_id}' for backup '{backup_id}' "
+            f"was not found in project '{project.name}'."
+        )
+    mapping = backup_mapping
+    _ensure_project_operational(store, project, mapping, require_runtime_paths=True)
+
+    if backup.status != "available":
+        raise OperationError(
+            f"Backup '{backup_id}' is not available for restore (status: {backup.status})."
+        )
+    if backup.file_count <= 0:
+        raise OperationError(f"Backup '{backup_id}' contains no restorable files.")
+    stored = store.get_plan(backup.plan_id)
+    if stored is None:
+        raise OperationError(
+            f"Stored plan '{backup.plan_id}' required for restore was not found."
+        )
+    expected_hashes = {
+        change.relative_path: (
+            change.local.sha256 if change.change_type is ChangeType.UPDATE else None
+        )
+        for change in stored.plan.changes
+        if (
+            change.change_type is ChangeType.UPDATE
+            and change.local is not None
+            and change.local.sha256 is not None
+        )
+        or change.change_type is ChangeType.REMOTE_ONLY
+    }
+    if len(expected_hashes) < backup.file_count:
+        raise OperationError("同期完了時のハッシュ記録が不足しています。")
 
     op = store.start_operation(
         project_id=project.project_id,
@@ -488,9 +588,10 @@ def execute_restore(
             sftp=sftp,
             manifest_path=backup.manifest_path,
             destination_root=mapping.remote_root,
-            expected_current_hashes={},
+            expected_current_hashes=expected_hashes,
             authorization=auth,
         )
+        store.set_backup_status(backup_id, "restored")
         store.finish_operation(
             op.operation_id,
             status="succeeded",

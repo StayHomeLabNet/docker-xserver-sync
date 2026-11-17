@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable
 
 from .cancellation import CancellationToken
 from .models import ChangeType, ScanResult, SiteType, SyncPlan
-from .planner import PlanBuilder
+from .planner import (
+    DEFAULT_PLAN_VALIDITY_MINUTES,
+    PlanBuilder,
+    validate_plan_validity,
+)
 from .presets import get_preset
 from .remote import RemoteFileSystem, RemoteScanResult, SftpScanner
 from .scanner import LocalScanner
@@ -53,9 +58,11 @@ class DryRunService:
         extra_protected: tuple[str, ...] = (),
         staging_parent: Path | None = None,
         config_sha256: str = "",
+        plan_validity: timedelta = timedelta(minutes=DEFAULT_PLAN_VALIDITY_MINUTES),
         progress_callback: Callable[[DryRunProgress], None] | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> DryRunResult:
+        validate_plan_validity(plan_validity)
         progress = progress_callback or (lambda _event: None)
         cancel = cancellation_token or CancellationToken()
         preset = get_preset(site_type)
@@ -106,6 +113,7 @@ class DryRunService:
             mapping_id=mapping_id,
             local=local,
             remote_records=remote.files,
+            validity=plan_validity,
             config_sha256=config_sha256,
         )
         staging = None

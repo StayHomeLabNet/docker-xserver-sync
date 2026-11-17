@@ -78,6 +78,17 @@ class BackupConfirmationDialog(QDialog):
             deletion_note.setWordWrap(True)
             layout.addWidget(deletion_note)
         layout.addWidget(self.deletion_table)
+        deletion_buttons = QHBoxLayout()
+        self.select_all_deletions_button = QPushButton("削除候補をすべて選択")
+        self.clear_all_deletions_button = QPushButton("削除候補をすべて解除")
+        self.select_all_deletions_button.clicked.connect(self._select_all_deletions)
+        self.clear_all_deletions_button.clicked.connect(self._clear_all_deletions)
+        self.select_all_deletions_button.setVisible(bool(remote_only_paths))
+        self.clear_all_deletions_button.setVisible(bool(remote_only_paths))
+        deletion_buttons.addWidget(self.select_all_deletions_button)
+        deletion_buttons.addWidget(self.clear_all_deletions_button)
+        deletion_buttons.addStretch(1)
+        layout.addLayout(deletion_buttons)
         if preserved_folders:
             preserve_note = QLabel(
                 "チェックしたフォルダー以下は、上の削除候補で選択しても削除されません。"
@@ -121,6 +132,18 @@ class BackupConfirmationDialog(QDialog):
     def should_skip_backup(self) -> bool:
         return self.skip_backup.isChecked()
 
+    def _select_all_deletions(self) -> None:
+        for row in range(self.deletion_table.rowCount()):
+            item = self.deletion_table.item(row, 0)
+            if item is not None and (item.flags() & Qt.ItemIsEnabled):
+                item.setCheckState(Qt.Checked)
+
+    def _clear_all_deletions(self) -> None:
+        for row in range(self.deletion_table.rowCount()):
+            item = self.deletion_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(Qt.Unchecked)
+
     def _preserved_folders_changed(self, *_args) -> None:
         preserved = self.preserved_folder_paths()
         for row in range(self.deletion_table.rowCount()):
@@ -145,6 +168,8 @@ class BackupConfirmationDialog(QDialog):
         else:
             self.confirm.setText("XServerの専用バックアップ領域への書き込みを許可します")
         self.deletion_table.setEnabled(not skipped)
+        self.select_all_deletions_button.setEnabled(not skipped)
+        self.clear_all_deletions_button.setEnabled(not skipped)
         self.preserve_table.setEnabled(not skipped)
         self.buttons.button(QDialogButtonBox.Ok).setText(
             "バックアップをスキップ" if skipped else "バックアップを作成"

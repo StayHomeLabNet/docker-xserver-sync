@@ -191,6 +191,10 @@ class RemoteDeploymentEngine:
         try:
             for index, change in enumerate(upload_changes, start=1):
                 cancel.raise_if_cancelled()
+                if progress_callback is not None:
+                    progress_callback(
+                        index - 1, total_changes, f"転送準備: {change.relative_path}"
+                    )
                 if change.local is None or not change.local.sha256:
                     raise DeployError(f"Missing approved local hash: {change.relative_path}")
                 local_path = staging_root / Path(change.relative_path)

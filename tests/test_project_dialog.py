@@ -49,14 +49,57 @@ def test_project_dialog_site_order_and_mapping_button_order(tmp_path) -> None:
         ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
     )
 
-    assert [dialog.site_combo.itemData(index) for index in range(3)] == [
+    assert [dialog.site_combo.itemData(index) for index in range(dialog.site_combo.count())] == [
         SiteType.CUSTOM_PHP.value,
         SiteType.WORDPRESS.value,
         SiteType.LARAVEL.value,
+        SiteType.STATIC_SITE.value,
     ]
     assert dialog.mapping_header.indexOf(dialog.add_mapping_button) < (
         dialog.mapping_header.indexOf(dialog.runtime_paths_button)
     )
+
+
+def test_project_dialog_static_site_optional_protect_paths_without_confirmation(
+    tmp_path, monkeypatch
+) -> None:
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    key_file = tmp_path / "id_rsa"
+    key_file.write_text("dummy key")
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+
+    # Optional RuntimePathsDialog does not require confirmation checkbox
+    opt_dialog = RuntimePathsDialog(require_confirmation=False)
+    assert opt_dialog.confirm.isHidden()
+    assert opt_dialog.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    opt_dialog.paths_edit.setPlainText(".well-known\ncgi-bin/")
+    opt_dialog._accept_paths()
+    assert opt_dialog.patterns == (".well-known/", "cgi-bin/")
+    opt_dialog.close()
+
+    dialog = ProjectDialog(store)
+    dialog.site_combo.setCurrentIndex(dialog.site_combo.findData(SiteType.STATIC_SITE.value))
+    dialog._append_mapping("dist", str(dist_dir), "/home/user/example.com/public_html")
+
+    assert dialog.runtime_paths_button.isEnabled()
+    assert dialog.runtime_paths_button.text() == "保護パスを設定…"
+    assert dialog.mapping_table.item(0, 3).text() == "保護なし（確認不要）"
+
+    dialog.name_edit.setText("Static Site")
+    dialog.domain_edit.setText("example.com")
+    dialog.host_edit.setText("sv1.xsrv.jp")
+    dialog.user_edit.setText("user")
+    dialog.fingerprint_edit.setText("SHA256:testfingerprint")
+    dialog.key_edit.setText(str(key_file))
+    dialog._save()
+
+    assert dialog.saved_project is not None
+    assert dialog.saved_project.site_type is SiteType.STATIC_SITE
+    assert not dialog.saved_project.mappings[0].runtime_paths_confirmed
+    assert dialog.saved_project.mappings[0].protect_patterns == ()
+    dialog.close()
 
 
 def test_project_dialog_hints_span_full_width_and_content_scrolls(tmp_path) -> None:

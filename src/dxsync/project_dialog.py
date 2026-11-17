@@ -39,6 +39,7 @@ SITE_LABELS = {
     SiteType.CUSTOM_PHP: "独自 PHP（上記以外）",
     SiteType.WORDPRESS: "WordPress（wp-contentがある）",
     SiteType.LARAVEL: "Laravel（artisanがある）",
+    SiteType.STATIC_SITE: "静的サイト（HTML / ビルド済み）",
 }
 
 
@@ -57,31 +58,58 @@ class RuntimePathsDialog(QDialog):
         *,
         patterns: tuple[str, ...] = (),
         confirmed: bool = False,
+        require_confirmation: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.patterns = patterns
-        self.setWindowTitle("本番で書き込まれるディレクトリ")
+        self.require_confirmation = require_confirmation
+        self.setWindowTitle(
+            "本番で書き込まれるディレクトリ" if require_confirmation else "保護パスを設定（任意）"
+        )
         self.resize(620, 500)
         layout = QVBoxLayout(self)
 
-        intro = QLabel(
-            "XServer上でアップロード、ログ、キャッシュなどが保存される"
-            "ディレクトリを、同期元ルートからの相対パスで1行ずつ入力してください。"
-            "ここに登録した場所は走査・アップロード・削除の対象にしません。"
-        )
+        if require_confirmation:
+            intro = QLabel(
+                "XServer上でアップロード、ログ、キャッシュなどが保存される"
+                "ディレクトリを、同期元ルートからの相対パスで1行ずつ入力してください。"
+                "ここに登録した場所は走査・アップロード・削除の対象にしません。"
+            )
+        else:
+            intro = QLabel(
+                "静的サイトは原則すべてのファイルを同期します。例外的に上書き・削除対象から"
+                "除外したいディレクトリがある場合のみ、同期元ルートからの相対パスで"
+                "1行ずつ入力してください（空欄のまま保存できます）。"
+            )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        defaults = "\n".join(f"• {path}" for path in get_preset(SiteType.CUSTOM_PHP).protect_patterns)
-        default_label = QLabel("次の場所は常に自動保護されます。\n" + defaults)
+        if require_confirmation:
+            defaults = "\n".join(
+                f"• {path}" for path in get_preset(SiteType.CUSTOM_PHP).protect_patterns
+            )
+            default_label = QLabel("次の場所は常に自動保護されます。\n" + defaults)
+        else:
+            default_label = QLabel(
+                "静的サイトではデフォルトの自動保護はありません。\n"
+                ".htaccess や wp-content/uploads/ 等もそのまま同期対象になります。"
+            )
         default_label.setWordWrap(True)
         default_label.setStyleSheet("background: #f6f8fa; padding: 8px;")
         layout.addWidget(default_label)
 
-        layout.addWidget(QLabel("その他の本番書き込みディレクトリ（1行に1つ）"))
+        layout.addWidget(
+            QLabel(
+                "その他の本番書き込みディレクトリ（1行に1つ）"
+                if require_confirmation
+                else "任意で保護するディレクトリ（1行に1つ・空欄可）"
+            )
+        )
         self.paths_edit = QPlainTextEdit()
-        self.paths_edit.setPlaceholderText("userfiles/\ndata/sessions/")
+        self.paths_edit.setPlaceholderText(
+            "userfiles/\ndata/sessions/" if require_confirmation else ".well-known/\ncgi-bin/"
+        )
         self.paths_edit.setPlainText("\n".join(patterns))
         layout.addWidget(self.paths_edit, 1)
 
@@ -89,12 +117,15 @@ class RuntimePathsDialog(QDialog):
             "本番で書き込まれる場所を確認し、上記の自動保護と追加一覧に漏れがないことを確認しました"
         )
         self.confirm.setChecked(confirmed)
+        self.confirm.setVisible(require_confirmation)
         layout.addWidget(self.confirm)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("確認済みとして保存")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(confirmed)
-        self.confirm.toggled.connect(self.buttons.button(QDialogButtonBox.Ok).setEnabled)
+        ok_button = self.buttons.button(QDialogButtonBox.Ok)
+        ok_button.setText("確認済みとして保存" if require_confirmation else "保存")
+        ok_button.setEnabled(confirmed or not require_confirmation)
+        if require_confirmation:
+            self.confirm.toggled.connect(ok_button.setEnabled)
         self.buttons.accepted.connect(self._accept_paths)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
@@ -285,24 +316,38 @@ class ProjectDialog(QDialog):
             self._load_duplicate(duplicate_from)
         self._site_changed(self.site_combo.currentIndex())
 
+    def _selected_site_type(self) -> SiteType:
+        value = self.site_combo.currentData()
+        return SiteType(value) if value else SiteType.CUSTOM_PHP
+
     def _site_changed(self, index: int) -> None:
         site_type = SiteType(self.site_combo.itemData(index))
         messages = {
             SiteType.WORDPRESS: "フォルダ内にwp-content、wp-admin、wp-includesがあるサイト向けです。",
             SiteType.LARAVEL: "フォルダ内にartisan、app、routes、publicがあるサイト向けです。",
             SiteType.CUSTOM_PHP: "WordPressでもLaravelでもないPHPサイト向けです。",
+            SiteType.STATIC_SITE: "HTML・CSS・JSやビルド済みdist/フォルダ（Astro / Vite / Hugo / 静的化WP等）向けです。",
         }
         self.site_help.setText(messages[site_type])
-        self.runtime_paths_button.setEnabled(site_type is SiteType.CUSTOM_PHP)
+        if site_type is SiteType.STATIC_SITE:
+            self.runtime_paths_button.setText("保護パスを設定…")
+            self.runtime_paths_button.setEnabled(True)
+        else:
+            self.runtime_paths_button.setText("本番書き込み先を設定…")
+            self.runtime_paths_button.setEnabled(site_type is SiteType.CUSTOM_PHP)
+        for row in range(self.mapping_table.rowCount()):
+            self._update_runtime_status(row)
 
     def _show_setup_help(self) -> None:
         QMessageBox.information(
             self,
             "入力項目の確認方法",
             "1. サイトの種類\n"
-            "   wp-contentがあればWordPress、artisanがあればLaravel、それ以外は独自PHP。\n\n"
+            "   wp-contentがあればWordPress、artisanがあればLaravel、\n"
+            "   HTML/ビルド済みdist/は静的サイト、それ以外のPHPは独自PHP。\n\n"
             "2. PC側フォルダ\n"
-            "   compose.ymlの volumes: ./src:/var/www/html なら ./src を選択。\n\n"
+            "   compose.ymlの volumes: ./src:/var/www/html なら ./src 、\n"
+            "   静的サイトならビルド出力先（例: ./dist）を選択。\n\n"
             "3. SSHホスト・ユーザー\n"
             "   XServer サーバーパネル → SSH設定 → SSHソフト設定で確認。\n"
             "   一般にホストはSERVER_ID.xsrv.jp、ユーザーはSERVER_ID、ポートは10022。\n\n"
@@ -457,17 +502,37 @@ class ProjectDialog(QDialog):
         item = self.mapping_table.item(row, 3)
         if item is None:
             return
+        site_type = self._selected_site_type()
         patterns = tuple(item.data(Qt.UserRole) or ())
         confirmed = bool(item.data(Qt.UserRole + 1))
-        if not confirmed:
-            item.setText("未確認（同期不可）")
-            item.setForeground(QColor("#cf222e"))
-        elif patterns:
-            item.setText(f"確認済み（追加 {len(patterns)}件）")
-            item.setToolTip("\n".join(patterns))
+        if site_type is SiteType.STATIC_SITE:
+            if patterns:
+                item.setText(f"任意保護 {len(patterns)}件")
+                item.setToolTip("\n".join(patterns))
+            else:
+                item.setText("保護なし（確認不要）")
+                item.setToolTip("")
             item.setForeground(QColor("#1a7f37"))
+        elif site_type is SiteType.CUSTOM_PHP:
+            if not confirmed:
+                item.setText("未確認（同期不可）")
+                item.setToolTip("")
+                item.setForeground(QColor("#cf222e"))
+            elif patterns:
+                item.setText(f"確認済み（追加 {len(patterns)}件）")
+                item.setToolTip("\n".join(patterns))
+                item.setForeground(QColor("#1a7f37"))
+            else:
+                item.setText("確認済み（自動保護のみ）")
+                item.setToolTip("")
+                item.setForeground(QColor("#1a7f37"))
         else:
-            item.setText("確認済み（自動保護のみ）")
+            if patterns:
+                item.setText(f"自動保護＋追加 {len(patterns)}件")
+                item.setToolTip("\n".join(patterns))
+            else:
+                item.setText("自動保護（確認不要）")
+                item.setToolTip("")
             item.setForeground(QColor("#1a7f37"))
 
     def _edit_runtime_paths(self) -> None:
@@ -478,15 +543,19 @@ class ProjectDialog(QDialog):
         item = self.mapping_table.item(row, 3)
         if item is None:
             return
+        site_type = self._selected_site_type()
+        require_confirmation = site_type is not SiteType.STATIC_SITE
         dialog = RuntimePathsDialog(
             patterns=tuple(item.data(Qt.UserRole) or ()),
             confirmed=bool(item.data(Qt.UserRole + 1)),
+            require_confirmation=require_confirmation,
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
             return
         item.setData(Qt.UserRole, dialog.patterns)
-        item.setData(Qt.UserRole + 1, True)
+        if require_confirmation:
+            item.setData(Qt.UserRole + 1, True)
         self._update_runtime_status(row)
 
     def _browse_key(self) -> None:
