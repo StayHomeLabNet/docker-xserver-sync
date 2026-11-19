@@ -74,4 +74,9 @@ Docker → XServer Sync **v1.1.0** delivers interactive `REMOTE_ONLY` deletion i
 
 ## SHA-256
 
-（リリースパイプライン完了後に確定値へ更新します / Populated upon release artifact build）
+```text
+7bd293521501c0e537e9e4da0f63ed1010a6d58606c17938e6f49b3f16f5bac6  Docker XServer Sync-macOS-arm64.zip
+4bc2ca5ec89ac64605f4f7c550170f610e916f6d892e07d7d936c768f940c351  Docker XServer Sync-Windows-x64.zip
+57d9b8333dad0d05e1f8291917dd4259ea15536615837f6171d968852e9d1fa2  Docker-XServer-Sync-Setup-v1.1.0.exe
+cde351a6324bb13f40b85b82759d504e8274d27fdf84b33c2005488fdf093a6c  Docker XServer Sync-Linux-x64.tar.gz
+```
