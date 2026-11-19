@@ -361,12 +361,75 @@ class ProjectStore:
             ).fetchone()
         if row is not None and row["host_key_reference"]:
             self.secure_store.delete(row["host_key_reference"])
+        try:
+            self.delete_ssh_passphrase(project_id)
+        except SecureStoreError:
+            pass
         with self._connection() as connection:
             connection.execute("DELETE FROM plans WHERE project_id = ?", (project_id,))
             cursor = connection.execute(
                 "DELETE FROM projects WHERE project_id = ?", (project_id,)
             )
         return cursor.rowcount > 0
+
+    def _passphrase_meta_key(self, project_id: str) -> str:
+        return f"ssh_passphrase_ref:{project_id}"
+
+    def has_saved_ssh_passphrase(self, project_id: str) -> bool:
+        self.initialize()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (self._passphrase_meta_key(project_id),),
+            ).fetchone()
+        return row is not None and bool(row["value"])
+
+    def save_ssh_passphrase(self, project_id: str, passphrase: str) -> str | None:
+        self.initialize()
+        if not passphrase:
+            self.delete_ssh_passphrase(project_id)
+            return None
+        store_fn = getattr(self.secure_store, "store_passphrase", None)
+        if not callable(store_fn):
+            raise SecureStoreError(
+                "Current credential store does not support SSH passphrase storage"
+            )
+        reference = str(store_fn(project_id, passphrase))
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                (self._passphrase_meta_key(project_id), reference),
+            )
+        return reference
+
+    def get_ssh_passphrase(self, project_id: str) -> str | None:
+        self.initialize()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (self._passphrase_meta_key(project_id),),
+            ).fetchone()
+        if row is None or not row["value"]:
+            return None
+        retrieve_fn = getattr(self.secure_store, "retrieve_passphrase", None)
+        if not callable(retrieve_fn):
+            return None
+        return retrieve_fn(str(row["value"]))
+
+    def delete_ssh_passphrase(self, project_id: str) -> None:
+        self.initialize()
+        meta_key = self._passphrase_meta_key(project_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (meta_key,),
+            ).fetchone()
+        if row is not None and row["value"]:
+            delete_fn = getattr(self.secure_store, "delete_passphrase", None)
+            if callable(delete_fn):
+                delete_fn(str(row["value"]))
+        with self._connection() as connection:
+            connection.execute("DELETE FROM metadata WHERE key = ?", (meta_key,))
 
     def security_status(self, project_id: str) -> ProjectSecurityStatus:
         self.initialize()

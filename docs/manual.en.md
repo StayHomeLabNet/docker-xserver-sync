@@ -17,7 +17,7 @@ A complete, exhaustive operational manual for safely, swiftly, and reliably sync
 5. [Project Management (Create, Duplicate, Edit, Delete)](#5-project-management-create-duplicate-edit-delete)
 6. [Synchronization Modes & Execution Pipeline](#6-synchronization-modes--execution-pipeline)
 7. [Pause & Resumption Workflow (After App Restart)](#7-pause--resumption-workflow-after-app-restart)
-8. [Safety Verification, Backups, and Rollbacks](#8-safety-verification-backups-and-rollbacks)
+8. [Safety Verification, Backups, Rollbacks, and Update Checks](#8-safety-verification-backups-rollbacks-and-update-checks)
 9. [Security & Credential Protection](#9-security--credential-protection)
 10. [Troubleshooting & FAQ](#10-troubleshooting--faq)
 11. [CLI (Command Line Interface) Mode](#11-cli-command-line-interface-mode)
@@ -193,8 +193,8 @@ Tailored for static HTML/CSS/JS sites and pre-built outputs (e.g., Astro, Next.j
    - **No Automatic Protected Paths (No Confirmation Required)**: Unlike PHP frameworks, directories/files such as `uploads/`, `wp-content/uploads/`, `wp-config.php`, or `.htaccess` are not automatically protected—build artifacts and static `.htaccess` files sync directly.
    - **Public Directory Friendly Excludes**: Only secrets, VCS metadata, dependencies, and dev files (`.git/`, `.env`, `node_modules/`, `docker-compose*.yml`, `.DS_Store`, etc.) are excluded. Public paths such as `/docs/`, `/test/`, `/README*`, and `/LICENSE*` are not excluded.
    - **Optional Protected Paths**: If you need to keep server-managed directories (e.g., `.well-known/`, `cgi-bin/`), click **Configure Protected Paths… (保護パスを設定…)** in the project editor.
-2. **Bulk Selection for Deletion Candidates**:
-   - When hashed build assets change between builds, use **Select All Deletions (削除候補をすべて選択)** / **Clear All Deletions (削除候補をすべて解除)** in the confirmation dialog to quickly mark or clear remote-only files for deletion (folders listed under "Do Not Delete Folders" remain safely disabled).
+2. **Bulk Selection for Deletion Candidates & Auto Safe Sync**:
+   - When hashed build assets change between builds, use **Select All Deletions (削除候補をすべて選択)** / **Clear All Deletions (削除候補をすべて解除)** in manual or Auto Safe Sync confirmation dialogs (when **Remote-Only Policy** is set to **Select candidates in confirmation dialog (`ask`)**) to quickly mark or clear remote-only files for deletion (folders listed under "Do Not Delete Folders" remain safely disabled).
 
 ---
 
@@ -214,7 +214,7 @@ Facilitates setting up multiple domains, staging environments, or similar config
   - Automatically selects the newly created project in the main window.
 
 ### Edit Project (`Edit…` / `編集…`)
-- Adjust host parameters, key paths, or mapping directories at any time.
+- Adjust host parameters, key paths, or mapping directories at any time. Key identity and path fields on saved projects are locked by default to prevent accidental destructive edits and can be unlocked intentionally when needed.
 
 ### Delete Project (`Delete` / `削除`)
 - Removes the configuration profile locally. Remote files and local project repositories are never touched.
@@ -224,11 +224,12 @@ Facilitates setting up multiple domains, staging environments, or similar config
 ## 6. Synchronization Modes & Execution Pipeline
 
 ### 1. Auto Safe Sync (安全同期を自動実行 - Recommended)
-Executes a 4-phase safe deployment:
+Executes a 4-phase safe deployment (configurable per project via **Settings → Auto-Sync Settings…** for backup mode, `REMOTE_ONLY` handling (`keep` / `ask` / `stop`), HTTPS health-check path, and safety limits):
 1. **Phase 1/4 (Dry Run)**: Discovers local and remote file differences and generates an immutable Sync Plan.
-2. **Phase 2/4 (Revalidation)**: Validates that remote files have not drifted since the plan was staged.
-3. **Phase 3/4 (Create Backup)**: Archives files slated for modification into remote `.bak` files.
-4. **Phase 4/4 (Approved Sync)**: Uploads files via `.new` temporary buffers and atomically swaps them.
+2. **Unified Confirmation Dialog**: Review changes and safety thresholds. When `remote_only_policy` is `ask`, select `REMOTE_ONLY` deletion candidates individually or in bulk (folders under "Do Not Delete Folders" remain protected; any scheduled deletion forces a pre-sync backup).
+3. **Phase 2/4 (Revalidation)**: Validates that remote files have not drifted since the plan was staged.
+4. **Phase 3/4 (Create Backup)**: Archives files slated for modification or deletion into remote `.bak` files.
+5. **Phase 4/4 (Approved Sync)**: Uploads files via `.new` temporary buffers, atomically swaps them, and runs the optional HTTPS health check.
 
 ### 2. Read-Only Dry Run
 - Audits remote files without modifying any data.
@@ -263,15 +264,19 @@ If the computer shuts down or network drops during a transfer:
 
 ---
 
-## 8. Safety Verification, Backups, and Rollbacks
+## 8. Safety Verification, Backups, Rollbacks, and Update Checks
 
 ### Safety Verification Scan (`Verify` / `安全性確認`)
 - Scans remote XServer storage for residual `.new` temporary files or expired `.bak` archives.
 - Provides 1-click cleanup to keep disk quotas tidy.
 
-### Historical Rollback (`History…` / `履歴…`)
-- View audit records of past synchronization runs.
+### Historical Rollback & Backup Retention Pruning (`History…` / `履歴…`)
+- View audit records of past synchronization, overwrite, setup, and backup deletion runs.
 - Select any operation and click **Restore from Backup (バックアップから復元)** to revert remote files to their pre-sync state.
+- **Retention Pruning**: In the Backups tab, set **Keep Latest (保持件数（最新）)** (default: 10) and **Retention Days (保持日数)** (default: 30 days), then click **Select Prune Candidates by Retention Rules (保持ルールで整理候補を選択)** to mark only older backups outside both thresholds for reviewed deletion.
+
+### In-App Update Check
+- Click **Help → Check for Updates… (ヘルプ → アップデートを確認…)** to check GitHub Releases in the background and open release notes if a newer version is available.
 
 ---
 
@@ -280,6 +285,10 @@ If the computer shuts down or network drops during a transfer:
 ### Host Key Fingerprint Verification
 - Verifies XServer's SHA-256 host key fingerprint before authenticating.
 - Aborts connections immediately if a fingerprint mismatch is detected, preventing MITM attacks.
+
+### SSH Private Key Passphrase Caching & Opt-In Storage
+- Passphrases entered during a session are cached in memory for the current app run so you are not prompted repeatedly across Dry Run, Revalidation, Backup, and Sync.
+- Optionally check **Save passphrase in OS credential store (パスフレーズをOS資格情報ストアに保存)** in the passphrase dialog to persist it securely in Windows Credential Manager, macOS Keychain, or Linux Secret Service (unchecking removes any stored passphrase immediately).
 
 ### Credential Masking
 - Masking prevents shoulder surfing by obscuring passwords, private key paths, and fingerprints.
@@ -316,7 +325,12 @@ dxsync run dry-run <project> [--mapping <mapping_name>] [--validity-minutes <1-6
 
 # Execute a safe 4-stage automated synchronization pipeline
 # Prompts for confirmation on TTY; --yes (-y) is required in non-interactive mode (CI / AI scripts)
-dxsync run auto-sync <project> [--mapping <mapping_name>] [--yes] [--json]
+dxsync run auto-sync <project> [--mapping <mapping_name>] \
+  [--backup-mode always|add_only|skip] \
+  [--remote-only-policy keep|stop|ask] [--delete-path <relative_path>] \
+  [--health-check-path /] [--no-health-check] [--validity-minutes <1-60>] \
+  [--max-changed-files <N>] [--max-update-files <N>] [--max-upload-mib <N>] \
+  [--yes] [--json]
 
 # Safety audit and orphaned temporary file cleanup
 dxsync run verify <project> [--cleanup] [--json]
@@ -327,6 +341,9 @@ dxsync backup list <project> [--json]
 # Restore remote files from a specific backup
 # Prompts for confirmation on TTY; --yes (-y) is required in non-interactive mode
 dxsync backup restore <project> --backup-id <id> [--yes] [--json]
+
+# Preview (--dry-run) or delete (--yes) old backups using retention thresholds
+dxsync backup prune <project> [--keep-latest 10] [--max-age-days 30] [--dry-run | --yes] [--json]
 ```
 
 ---
@@ -337,8 +354,8 @@ Docker → XServer Sync implements the **Model Context Protocol (MCP)**, allowin
 
 ### 12-1. Safety Architecture
 - **GUI-Managed Credentials**: High-risk configuration (SSH host, credentials, host key fingerprints) remains managed via the GUI and stored in the OS credential store (macOS Keychain, Windows Credential Manager).
-- **AI Scope**: AI assistants can query projects, preview differences via dry runs, trigger automated safe syncs, verify leftover `.new` artifacts, and trigger rollbacks.
-- **Atomic 4-Stage Sync**: When the AI invokes `dxsync_auto_sync`, the application performs the full pipeline: dry run -> plan revalidation -> remote backup -> atomic file deployment -> HTTPS health check.
+- **AI Scope**: AI assistants can query projects, preview differences via dry runs, trigger automated safe syncs, verify leftover `.new` artifacts, trigger rollbacks, and prune aged backups via `dxsync_prune_backups` (`dry_run=true` by default; `confirm_delete=true` required for deletion).
+- **Atomic 4-Stage Sync**: When the AI invokes `dxsync_auto_sync`, the application performs the full pipeline: dry run -> plan revalidation -> remote backup -> atomic file deployment -> HTTPS health check (supporting full policy parameters including `backup_mode`, `remote_only_policy`, `delete_paths`, `plan_validity_minutes`, and safety limits).
 
 ### 12-2. Launching the MCP Server
 A built-in stdio MCP server is available out of the box with zero additional dependencies:
@@ -365,4 +382,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.0.0 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.0 / StayHomeLabNet*

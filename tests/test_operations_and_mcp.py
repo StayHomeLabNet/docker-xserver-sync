@@ -557,3 +557,204 @@ def test_cli_write_commands_require_yes_in_non_interactive_mode(
         captured2 = capsys.readouterr()
         assert "--yes" in captured2.err
 
+        # backup prune without --dry-run and without --yes must fail
+        rc3 = main(["backup", "prune", project.name, "--json"])
+        assert rc3 == 2
+        captured3 = capsys.readouterr()
+        assert "--yes" in captured3.err
+
+
+def test_execute_auto_sync_policy_options_and_delete_paths(tmp_path: Path) -> None:
+    from dxsync.operations import execute_auto_sync
+
+    store, project, local_root = _make_local_project(
+        tmp_path, site_type=SiteType.STATIC_SITE
+    )
+    remote_keep = "/home/xuser/example.com/public_html/keep.txt"
+    remote_old = "/home/xuser/example.com/public_html/old-hash.js"
+    remote_index = "/home/xuser/example.com/public_html/index.php"
+    sftp = _InMemorySftp(
+        {
+            remote_index: b"<?php echo 'old';",
+            remote_keep: b"keep",
+            remote_old: b"old-js",
+        }
+    )
+    client = MagicMock()
+
+    # 1. stop policy aborts when REMOTE_ONLY exists
+    with patch("dxsync.operations.connect_sftp", return_value=(client, sftp)):
+        with pytest.raises(OperationError, match="REMOTE_ONLY"):
+            execute_auto_sync(
+                store,
+                project,
+                staging_parent=tmp_path / "staging-stop",
+                remote_only_policy="stop",
+            )
+
+    # 2. delete_paths without backup is rejected before SFTP connect
+    with pytest.raises(OperationError, match="バックアップを省略できません"):
+        execute_auto_sync(
+            store,
+            project,
+            backup_mode="skip",
+            remote_only_policy="ask",
+            delete_paths=("old-hash.js",),
+        )
+
+    # 3. remote_only_policy="ask" with delete_paths & health_check_enabled=False succeeds
+    with (
+        patch("dxsync.operations.connect_sftp", return_value=(client, sftp)),
+        patch("dxsync.operations.perform_https_health_check") as hc_mock,
+    ):
+        res = execute_auto_sync(
+            store,
+            project,
+            staging_parent=tmp_path / "staging-ask",
+            remote_only_policy="ask",
+            delete_paths=("old-hash.js",),
+            health_check_enabled=False,
+            plan_validity_minutes=45,
+        )
+
+    hc_mock.assert_not_called()
+    assert res["status"] == "success"
+    assert res["deleted_files"] == ["old-hash.js"]
+    assert res["health_check"]["skipped"] is True
+    assert remote_old not in sftp.files
+    assert remote_keep in sftp.files
+    assert sftp.files[remote_index] == b"<?php echo 'new';"
+
+    # 4. add_only backup_mode skips backup when only ADD exists
+    (local_root / "added.txt").write_bytes(b"hello")
+    with (
+        patch("dxsync.operations.connect_sftp", return_value=(client, sftp)),
+        patch("dxsync.operations.perform_https_health_check") as hc_mock,
+    ):
+        from dxsync.health import HealthCheckResult
+
+        hc_mock.return_value = HealthCheckResult(
+            url="https://example.com/app", ok=True, status_code=200
+        )
+        res_add = execute_auto_sync(
+            store,
+            project,
+            staging_parent=tmp_path / "staging-add",
+            backup_mode="add_only",
+            health_check_path="/app",
+        )
+
+    hc_mock.assert_called_once_with(domain="example.com", path="/app")
+    assert res_add["backup_skipped"] is True
+    assert res_add["backup_id"] is None
+
+
+def test_execute_prune_backups_and_mcp_tool(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from dxsync.storage import BackupRecord
+
+    store, project, _ = _make_local_project(tmp_path)
+    now = datetime.now(timezone.utc)
+    old_dir = "/home/xuser/.dxsync/backups/proj/old-backup"
+    new_dir = "/home/xuser/.dxsync/backups/proj/new-backup"
+    sftp = _InMemorySftp({f"{old_dir}/index.php": b"old", f"{new_dir}/index.php": b"new"})
+    client = MagicMock()
+
+    store.save_backup(
+        BackupRecord(
+            backup_id="old-backup",
+            project_id=project.project_id,
+            mapping_id="map-1",
+            plan_id="plan-old",
+            backup_directory=old_dir,
+            manifest_path=f"{old_dir}/manifest.json",
+            created_at=now - timedelta(days=60),
+            file_count=1,
+            total_bytes=3,
+        )
+    )
+    store.save_backup(
+        BackupRecord(
+            backup_id="new-backup",
+            project_id=project.project_id,
+            mapping_id="map-1",
+            plan_id="plan-new",
+            backup_directory=new_dir,
+            manifest_path=f"{new_dir}/manifest.json",
+            created_at=now - timedelta(days=1),
+            file_count=1,
+            total_bytes=3,
+        )
+    )
+
+    server = McpServer(store=store)
+    # 1. MCP prune defaults to dry_run=true
+    dry_resp = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "dxsync_prune_backups",
+                "arguments": {
+                    "project": project.name,
+                    "keep_latest": 1,
+                    "max_age_days": 30,
+                },
+            },
+        }
+    )
+    dry_payload = json.loads(dry_resp["result"]["content"][0]["text"])
+    assert dry_payload["status"] == "dry_run"
+    assert dry_payload["candidate_count"] == 1
+    assert dry_payload["candidates"][0]["backup_id"] == "old-backup"
+
+    # 2. MCP prune with dry_run=false requires confirm_delete=true
+    refused = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "dxsync_prune_backups",
+                "arguments": {
+                    "project": project.name,
+                    "keep_latest": 1,
+                    "max_age_days": 30,
+                    "dry_run": False,
+                },
+            },
+        }
+    )
+    assert refused["result"]["isError"] is True
+    assert "confirm_delete" in refused["result"]["content"][0]["text"]
+
+    # 3. Confirmed delete removes old backup remotely & updates SQLite status
+    with patch("dxsync.operations.connect_sftp", return_value=(client, sftp)):
+        del_resp = server.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "dxsync_prune_backups",
+                    "arguments": {
+                        "project": project.name,
+                        "keep_latest": 1,
+                        "max_age_days": 30,
+                        "dry_run": False,
+                        "confirm_delete": True,
+                    },
+                },
+            }
+        )
+    del_payload = json.loads(del_resp["result"]["content"][0]["text"])
+    assert del_payload["status"] == "success"
+    assert del_payload["deleted"] == ["old-backup"]
+    assert f"{old_dir}/index.php" not in sftp.files
+    assert f"{new_dir}/index.php" in sftp.files
+    assert store.get_backup("old-backup").status == "deleted"
+    assert store.get_backup("new-backup").status == "available"
+
+

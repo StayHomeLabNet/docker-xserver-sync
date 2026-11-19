@@ -13,6 +13,7 @@ from .operations import (
     OperationError,
     execute_auto_sync,
     execute_dry_run,
+    execute_prune_backups,
     execute_restore,
     execute_verify,
     find_project,
@@ -57,6 +58,16 @@ def _validity_minutes(value: str) -> int:
             f"validity minutes must be between {MIN_PLAN_VALIDITY_MINUTES} and {MAX_PLAN_VALIDITY_MINUTES}"
         )
     return minutes
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be zero or positive")
+    return parsed
 
 
 def _scan(args: argparse.Namespace) -> int:
@@ -276,6 +287,15 @@ def _run_auto_sync_project(args: argparse.Namespace) -> int:
         project=project,
         mapping_name=args.mapping,
         passphrase=passphrase,
+        backup_mode=args.backup_mode,
+        remote_only_policy=args.remote_only_policy,
+        delete_paths=tuple(args.delete_path or ()),
+        health_check_enabled=not args.no_health_check,
+        health_check_path=args.health_check_path,
+        plan_validity_minutes=args.validity_minutes,
+        max_changed_files=args.max_changed_files,
+        max_update_files=args.max_update_files,
+        max_upload_mib=args.max_upload_mib,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -284,17 +304,23 @@ def _run_auto_sync_project(args: argparse.Namespace) -> int:
             print(f"[{project.name}] {result['message']}")
         else:
             hc = result["health_check"]
-            hc_text = (
-                f"{hc['status_code']} ({hc['url']})"
-                if hc.get("status_code") is not None
-                else f"エラー: {hc.get('error') or '不明'} ({hc['url']})"
-            )
+            if hc.get("skipped"):
+                hc_text = f"スキップ ({hc['url']})"
+            elif hc.get("status_code") is not None:
+                hc_text = f"{hc['status_code']} ({hc['url']})"
+            else:
+                hc_text = f"エラー: {hc.get('error') or '不明'} ({hc['url']})"
             if hc.get("ok"):
                 print(f"[{project.name}] 安全同期が正常に完了しました:")
             else:
                 print(f"[{project.name}] 同期は完了しましたが、HTTPS動作確認に失敗しました:")
             print(f"  • 転送ファイル数: {result['transferred_files']}件 ({result['total_bytes']:,} bytes)")
-            print(f"  • バックアップ:   {result['backup_id']} ({result['backup_files']}件退避)")
+            if result.get("deleted_count"):
+                print(f"  • 削除ファイル数: {result['deleted_count']}件")
+            if result.get("backup_skipped"):
+                print("  • バックアップ:   スキップ")
+            else:
+                print(f"  • バックアップ:   {result['backup_id']} ({result['backup_files']}件退避)")
             print(f"  • HTTPS状態:      {hc_text}")
     return 0
 
@@ -367,6 +393,41 @@ def _backup_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _backup_prune(args: argparse.Namespace) -> int:
+    store = _get_store_from_args(args)
+    project = _resolve_project(store, args.project)
+    if not args.dry_run:
+        _confirm_write_action(
+            args,
+            f"[{project.name}] 保持ルール（最新{args.keep_latest}世代 / {args.max_age_days}日超過）に該当するバックアップを削除しますか？",
+        )
+    passphrase = (
+        getpass.getpass("秘密鍵のパスフレーズ: ")
+        if (args.ask_passphrase and not args.dry_run)
+        else None
+    )
+    result = execute_prune_backups(
+        store=store,
+        project=project,
+        keep_latest=args.keep_latest,
+        max_age_days=args.max_age_days,
+        dry_run=args.dry_run,
+        passphrase=passphrase,
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        if args.dry_run:
+            print(f"[{project.name}] 削除候補バックアップ: {result['candidate_count']}件")
+            for item in result["candidates"]:
+                print(f"  • {item['backup_id']} ({item['created_at'][:19]}, {item['file_count']}件)")
+        elif result["status"] == "no_changes":
+            print(f"[{project.name}] 保持ルールに該当する削除候補バックアップはありません。")
+        else:
+            print(f"[{project.name}] バックアップを {result['deleted_count']}件 削除しました。")
+    return 0
+
+
 def _mcp(args: argparse.Namespace) -> int:
     from .mcp_server import run_stdio_server
 
@@ -411,6 +472,58 @@ def build_parser() -> argparse.ArgumentParser:
     r_auto = run_subs.add_parser("auto-sync", help="run safe automated 4-stage sync pipeline")
     r_auto.add_argument("project", help="project name, domain, or ID")
     r_auto.add_argument("--mapping", help="optional mapping name or ID")
+    r_auto.add_argument(
+        "--backup-mode",
+        choices=("always", "add_only", "skip"),
+        default="always",
+        help="remote backup policy before deployment (default: always)",
+    )
+    r_auto.add_argument(
+        "--remote-only-policy",
+        choices=("keep", "stop", "ask"),
+        default="keep",
+        help="how to handle REMOTE_ONLY files (default: keep)",
+    )
+    r_auto.add_argument(
+        "--delete-path",
+        action="append",
+        default=[],
+        help="repeatable relative path of REMOTE_ONLY file to delete when --remote-only-policy=ask",
+    )
+    r_auto.add_argument(
+        "--no-health-check",
+        action="store_true",
+        help="skip post-deploy HTTPS health check",
+    )
+    r_auto.add_argument(
+        "--health-check-path",
+        default="/",
+        help="path on project domain to verify over HTTPS (default: /)",
+    )
+    r_auto.add_argument(
+        "--validity-minutes",
+        type=_validity_minutes,
+        default=DEFAULT_PLAN_VALIDITY_MINUTES,
+        help=f"plan validity in minutes ({MIN_PLAN_VALIDITY_MINUTES}-{MAX_PLAN_VALIDITY_MINUTES}, default: {DEFAULT_PLAN_VALIDITY_MINUTES})",
+    )
+    r_auto.add_argument(
+        "--max-changed-files",
+        type=_non_negative_int,
+        default=1000,
+        help="abort auto-sync if ADD+UPDATE exceeds this count (0 disables, default: 1000)",
+    )
+    r_auto.add_argument(
+        "--max-update-files",
+        type=_non_negative_int,
+        default=500,
+        help="abort auto-sync if UPDATE exceeds this count (0 disables, default: 500)",
+    )
+    r_auto.add_argument(
+        "--max-upload-mib",
+        type=_non_negative_int,
+        default=1024,
+        help="abort auto-sync if upload size exceeds this MiB (0 disables, default: 1024)",
+    )
     r_auto.add_argument("--ask-passphrase", action="store_true", help="prompt for SSH key passphrase")
     r_auto.add_argument("--yes", "-y", action="store_true", help="confirm execution")
     r_auto.add_argument("--json", action="store_true", help="output JSON")
@@ -441,6 +554,30 @@ def build_parser() -> argparse.ArgumentParser:
     b_restore.add_argument("--yes", "-y", action="store_true", help="confirm restoration")
     b_restore.add_argument("--json", action="store_true", help="output JSON")
     b_restore.set_defaults(handler=_backup_restore)
+
+    b_prune = backup_subs.add_parser("prune", help="delete old backups based on retention rules")
+    b_prune.add_argument("project", help="project name, domain, or ID")
+    b_prune.add_argument(
+        "--keep-latest",
+        type=_non_negative_int,
+        default=10,
+        help="number of newest backups to keep (default: 10)",
+    )
+    b_prune.add_argument(
+        "--max-age-days",
+        type=_non_negative_int,
+        default=30,
+        help="protect backups newer than this many days (default: 30)",
+    )
+    b_prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list prune candidates without deleting anything",
+    )
+    b_prune.add_argument("--ask-passphrase", action="store_true", help="prompt for SSH key passphrase")
+    b_prune.add_argument("--yes", "-y", action="store_true", help="confirm deletion")
+    b_prune.add_argument("--json", action="store_true", help="output JSON")
+    b_prune.set_defaults(handler=_backup_prune)
 
     # 4. MCP Server subcommand
     mcp_parser = subparsers.add_parser("mcp", help="run Model Context Protocol (MCP) stdio server")

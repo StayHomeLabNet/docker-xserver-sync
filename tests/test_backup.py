@@ -266,3 +266,76 @@ def test_backup_reports_progress_and_supports_cancellation() -> None:
         )
     assert not any("project-2" in path for path in sftp.files)
 
+
+def test_select_prune_candidates_protects_latest_and_recent_backups() -> None:
+    from datetime import datetime, timezone
+    from dxsync.backup import select_prune_candidates
+    from dxsync.storage import BackupRecord
+
+    now = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+    records = [
+        BackupRecord("b-new-1", "p1", "m1", "pl1", "/home/u/.dxsync/backups/p1/b-new-1", "/m1", now - timedelta(days=1), 1, 10, "available"),
+        BackupRecord("b-new-2", "p1", "m1", "pl2", "/home/u/.dxsync/backups/p1/b-new-2", "/m2", now - timedelta(days=10), 1, 10, "restored"),
+        BackupRecord("b-old-3", "p1", "m1", "pl3", "/home/u/.dxsync/backups/p1/b-old-3", "/m3", now - timedelta(days=45), 1, 10, "available"),
+        BackupRecord("b-del-4", "p1", "m1", "pl4", "/home/u/.dxsync/backups/p1/b-del-4", "/m4", now - timedelta(days=90), 1, 10, "deleted"),
+    ]
+
+    # keep_latest=2, max_age_days=30: b-new-1 and b-new-2 kept, b-old-3 pruned, b-del-4 ignored
+    candidates = select_prune_candidates(records, keep_latest=2, max_age_days=30, now=now)
+    assert [c.backup_id for c in candidates] == ["b-old-3"]
+
+    # keep_latest=3 protects b-old-3 even if older than 30 days
+    assert select_prune_candidates(records, keep_latest=3, max_age_days=30, now=now) == ()
+
+    # max_age_days=0 prunes everything beyond keep_latest=1
+    candidates_count_only = select_prune_candidates(records, keep_latest=1, max_age_days=0, now=now)
+    assert [c.backup_id for c in candidates_count_only] == ["b-new-2", "b-old-3"]
+
+
+def test_delete_remote_backup_removes_tree_and_rejects_unsafe_paths() -> None:
+    from types import SimpleNamespace
+    from dxsync.backup import delete_remote_backup
+
+    class TreeSftp(MemorySftp):
+        def listdir_attr(self, path: str):
+            prefix = path.rstrip("/") + "/"
+            seen: dict[str, int] = {}
+            for d in self.directories:
+                if d.startswith(prefix):
+                    rest = d[len(prefix):]
+                    if rest and "/" not in rest:
+                        seen[rest] = stat.S_IFDIR | 0o700
+            for f in self.files:
+                if f.startswith(prefix):
+                    rest = f[len(prefix):]
+                    if rest and "/" not in rest:
+                        seen[rest] = stat.S_IFREG | 0o600
+            return [SimpleNamespace(filename=name, st_mode=mode) for name, mode in seen.items()]
+
+        def rmdir(self, path: str) -> None:
+            self.directories.discard(path)
+
+    sftp = TreeSftp()
+    sftp.directories.update({
+        "/home",
+        "/home/u",
+        "/home/u/.dxsync",
+        "/home/u/.dxsync/backups",
+        "/home/u/.dxsync/backups/proj-1",
+        "/home/u/.dxsync/backups/proj-1/bk-1",
+        "/home/u/.dxsync/backups/proj-1/bk-1/sub",
+    })
+    sftp.files["/home/u/.dxsync/backups/proj-1/bk-1/sub/file.php"] = b"data"
+    sftp.files["/home/u/.dxsync/backups/proj-1/bk-1/.dxsync-backup-manifest.json"] = b"{}"
+
+    with pytest.raises(BackupError, match="Refusing to delete"):
+        delete_remote_backup(sftp, "/home/u/public_html")
+    with pytest.raises(BackupError, match="Refusing to delete"):
+        delete_remote_backup(sftp, "/home/u/.dxsync/backups/proj-1")
+
+    assert delete_remote_backup(sftp, "/home/u/.dxsync/backups/proj-1/bk-1") is True
+    assert "/home/u/.dxsync/backups/proj-1/bk-1" not in sftp.directories
+    assert not any("bk-1" in f for f in sftp.files)
+    assert delete_remote_backup(sftp, "/home/u/.dxsync/backups/proj-1/bk-1") is False
+
+

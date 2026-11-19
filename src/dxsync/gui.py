@@ -72,7 +72,7 @@ from .auto_sync import (
     load_auto_sync_preferences,
     save_auto_sync_preferences,
 )
-from .backup import BackupResult, RemoteBackupEngine
+from .backup import BackupResult, RemoteBackupEngine, delete_remote_backup
 from .cancellation import CancellationToken, OperationCancelled
 from .deployment import (
     DeploymentAuthorization,
@@ -123,7 +123,30 @@ from .settings_dialog import (
     load_plan_validity_minutes,
     save_plan_validity_minutes,
 )
+from .updater import UpdateCheckResult, check_for_updates
 from .validation import custom_runtime_paths_issue
+from .progress_tracker import (
+    OperationProgress,
+    _ThrottledProgressEmitter,
+    format_progress_amount,
+    format_progress_duration,
+    format_size as _format_size,
+    format_worker_error as _format_worker_error,
+)
+from .workers import (
+    BackupDeleteWorker,
+    BackupWorker,
+    DeployWorker,
+    DryRunWorker,
+    ForceOverwriteWorker,
+    LaravelSetupWorker,
+    RecoveryScanWorker,
+    RestoreWorker,
+    RevalidationWorker,
+    ScanWorker,
+    UpdateCheckWorker,
+    WordPressSetupWorker,
+)
 
 
 SITE_LABELS = {
@@ -132,97 +155,6 @@ SITE_LABELS = {
     SiteType.LARAVEL: "Laravel",
     SiteType.STATIC_SITE: "静的サイト",
 }
-
-
-@dataclass(frozen=True)
-class OperationProgress:
-    stage: int
-    total_stages: int
-    message: str
-    current: int | None = None
-    total: int | None = None
-    unit: str = ""
-    detail: str = ""
-    phase_key: tuple[object, ...] | None = None
-    progress_label: str = ""
-    summary_prefix: str = ""
-    remote_wait: bool = True
-
-
-class _ThrottledProgressEmitter:
-    def __init__(
-        self,
-        emit: Callable[[object], None],
-        *,
-        min_interval: float = 0.05,
-    ) -> None:
-        self._emit = emit
-        self._min_interval = min_interval
-        self._last_emitted_at: float | None = None
-        self._last_phase_key: tuple[object, ...] | None = None
-
-    @staticmethod
-    def _classify(event: object) -> tuple[tuple[object, ...] | None, bool]:
-        if isinstance(event, DryRunProgress):
-            key = (event.stage, event.message, event.unit, event.total)
-            is_boundary = event.current is not None and (
-                event.current == 0
-                or (event.total is not None and event.current >= event.total)
-            )
-            return key, is_boundary
-        if isinstance(event, OperationProgress):
-            key = (
-                event.phase_key
-                if event.phase_key is not None
-                else (event.stage, event.message, event.unit, event.total)
-            )
-            is_boundary = event.current is not None and (
-                event.current == 0
-                or (event.total is not None and event.current >= event.total)
-            )
-            return key, is_boundary
-        if isinstance(event, (WordPressSetupProgress, LaravelSetupProgress)):
-            key = (event.step, event.message, event.unit, event.total)
-            is_boundary = event.current is not None and (
-                event.current == 0
-                or (event.total is not None and event.current >= event.total)
-            )
-            return key, is_boundary
-        return None, True
-
-    def __call__(self, event: object) -> None:
-        now = time.monotonic()
-        phase_key, is_boundary = self._classify(event)
-        if (
-            self._last_emitted_at is None
-            or phase_key != self._last_phase_key
-            or is_boundary
-            or (now - self._last_emitted_at) >= self._min_interval
-        ):
-            self._last_emitted_at = now
-            self._last_phase_key = phase_key
-            self._emit(event)
-
-
-def _format_worker_error(exc: Exception) -> str:
-    msg = str(exc).strip()
-    if not msg or msg.lower() == "failure":
-        return (
-            f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - "
-            "サーバーまたはファイルアクセスでエラーが発生しました)"
-        )
-    return msg
-
-
-def _format_size(value: int | None) -> str:
-    if value is None:
-        return "—"
-    size = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{value} B"
 
 
 class FileTableModel(QAbstractTableModel):
@@ -288,1073 +220,6 @@ class FileTableModel(QAbstractTableModel):
         return None
 
 
-class ScanWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(self, root: Path, site_type: SiteType) -> None:
-        super().__init__()
-        self.root = root
-        self.site_type = site_type
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            preset = get_preset(self.site_type)
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-
-            def report(current: int, total: int | None, detail: str) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=1,
-                        total_stages=1,
-                        message=(
-                            "ローカルファイルを列挙中"
-                            if total is None
-                            else "SHA-256を計算中"
-                        ),
-                        current=current,
-                        total=total,
-                        unit="directories" if total is None else "files",
-                        detail=detail,
-                        summary_prefix="ローカル検査中…",
-                        remote_wait=False,
-                    )
-                )
-
-            self.completed.emit(
-                LocalScanner(preset.exclude_patterns).scan(
-                    self.root,
-                    progress_callback=report,
-                    cancellation_token=self.cancellation_token,
-                )
-            )
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:  # worker boundary: surface the failure in the UI
-            self.failed.emit(str(exc))
-
-
-class DryRunWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        root: Path,
-        mapping_id: str,
-        site_type: SiteType,
-        host: str,
-        port: int,
-        username: str,
-        private_key_path: str,
-        fingerprint: str,
-        remote_root: str,
-        passphrase: str | None,
-        staging_parent: Path | None,
-        extra_excludes: tuple[str, ...] = (),
-        extra_protected: tuple[str, ...] = (),
-        config_sha256: str = "",
-        plan_validity: timedelta = timedelta(minutes=DEFAULT_PLAN_VALIDITY_MINUTES),
-    ) -> None:
-        super().__init__()
-        self.root = root
-        self.mapping_id = mapping_id
-        self.site_type = site_type
-        self.host = host
-        self.port = port
-        self.username = username
-        self.private_key_path = private_key_path
-        self.fingerprint = fingerprint
-        self.remote_root = remote_root
-        self.passphrase = passphrase
-        self.staging_parent = staging_parent
-        self.extra_excludes = extra_excludes
-        self.extra_protected = extra_protected
-        self.config_sha256 = config_sha256
-        self.plan_validity = plan_validity
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            self.cancellation_token.raise_if_cancelled()
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(DryRunProgress(1, 4, "XServerへSSH接続中"))
-            client, sftp = connect_sftp(
-                host=self.host,
-                port=self.port,
-                username=self.username,
-                private_key_path=self.private_key_path,
-                host_key_fingerprint=self.fingerprint,
-                passphrase=self.passphrase,
-            )
-            result = DryRunService().execute(
-                site_type=self.site_type,
-                mapping_id=self.mapping_id,
-                local_root=self.root,
-                remote_root=self.remote_root,
-                sftp=sftp,
-                staging_parent=self.staging_parent,
-                extra_excludes=self.extra_excludes,
-                extra_protected=self.extra_protected,
-                config_sha256=self.config_sha256,
-                plan_validity=self.plan_validity,
-                progress_callback=emit_progress,
-                cancellation_token=self.cancellation_token,
-            )
-            self.completed.emit(result)
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:  # worker boundary: surface the failure in the UI
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class RevalidationWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        stored: StoredPlan,
-        project: Project,
-        mapping: SyncMapping,
-        passphrase: str | None,
-    ) -> None:
-        super().__init__()
-        self.stored = stored
-        self.project = project
-        self.mapping = mapping
-        self.passphrase = passphrase
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            self.cancellation_token.raise_if_cancelled()
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(
-                OperationProgress(
-                    stage=1,
-                    total_stages=4,
-                    message="XServerへSSH接続中",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-
-            def report(event: DryRunProgress) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=event.stage,
-                        total_stages=event.total_stages,
-                        message=event.message,
-                        current=event.current,
-                        total=event.total,
-                        unit=event.unit,
-                        detail=event.detail,
-                        phase_key=(
-                            "revalidate",
-                            event.stage,
-                            event.message,
-                            event.unit,
-                            event.total,
-                        ),
-                        progress_label=event.message,
-                        remote_wait=event.stage == 3,
-                    )
-                )
-
-            result = PlanRevalidator().revalidate(
-                stored=self.stored,
-                project=self.project,
-                mapping=self.mapping,
-                sftp=sftp,
-                progress_callback=report,
-                cancellation_token=self.cancellation_token,
-            )
-            self.completed.emit(result)
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class BackupWorker(QObject):
-    completed = Signal(object)
-    blocked = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        stored: StoredPlan,
-        project: Project,
-        mapping: SyncMapping,
-        passphrase: str | None,
-        backup_root: str,
-        delete_paths: tuple[str, ...] = (),
-    ) -> None:
-        super().__init__()
-        self.stored = stored
-        self.project = project
-        self.mapping = mapping
-        self.passphrase = passphrase
-        self.backup_root = backup_root
-        self.delete_paths = delete_paths
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            self.cancellation_token.raise_if_cancelled()
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(
-                OperationProgress(
-                    stage=1,
-                    total_stages=4,
-                    message="XServerへSSH接続中",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-
-            def report_recovery(current: int, total: int | None, detail: str) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=2,
-                        total_stages=4,
-                        message="残存一時ファイルを確認中",
-                        current=current,
-                        total=total,
-                        unit="directories" if total is None else "files",
-                        detail=detail,
-                    )
-                )
-
-            recovery = scan_recovery_artifacts(
-                sftp,
-                self.mapping.remote_root,
-                progress_callback=report_recovery,
-                cancellation_token=self.cancellation_token,
-            )
-            if recovery.temporary_files or recovery.issues:
-                raise RuntimeError(
-                    "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
-                )
-
-            def report_revalidation(event: DryRunProgress) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=3,
-                        total_stages=4,
-                        message=f"計画再検証: {event.message}",
-                        current=event.current,
-                        total=event.total,
-                        unit=event.unit,
-                        detail=event.detail,
-                        phase_key=(
-                            "backup_revalidate",
-                            event.stage,
-                            event.message,
-                            event.unit,
-                            event.total,
-                        ),
-                        progress_label=f"計画再検証: {event.message}",
-                        remote_wait=event.stage == 3,
-                    )
-                )
-
-            revalidation = PlanRevalidator().revalidate(
-                stored=self.stored,
-                project=self.project,
-                mapping=self.mapping,
-                sftp=sftp,
-                progress_callback=report_revalidation,
-                cancellation_token=self.cancellation_token,
-            )
-            if not revalidation.valid:
-                self.blocked.emit(revalidation)
-                return
-
-            def report_backup(current: int, total: int, detail: str) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=4,
-                        total_stages=4,
-                        message="バックアップファイルを作成中",
-                        current=current,
-                        total=total,
-                        unit="files",
-                        detail=detail,
-                        phase_key=("backup", total),
-                    )
-                )
-
-            result = RemoteBackupEngine().create_backup(
-                sftp=sftp,
-                plan=self.stored.plan,
-                project_id=self.project.project_id,
-                remote_root=self.mapping.remote_root,
-                backup_root=self.backup_root,
-                delete_paths=self.delete_paths,
-                progress_callback=report_backup,
-                cancellation_token=self.cancellation_token,
-            )
-            self.completed.emit(result)
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class DeployWorker(QObject):
-    completed = Signal(object)
-    blocked = Signal(object)
-    failed = Signal(str)
-    progress = Signal(int, int, str)
-    status_progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        stored: StoredPlan,
-        project: Project,
-        mapping: SyncMapping,
-        passphrase: str | None,
-        authorization: DeploymentAuthorization,
-        health_check_path: str | None = None,
-        resume: bool = False,
-    ) -> None:
-        super().__init__()
-        self.stored = stored
-        self.project = project
-        self.mapping = mapping
-        self.passphrase = passphrase
-        self.authorization = authorization
-        self.health_check_path = health_check_path
-        self.resume = resume
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        total_stages = 5 if self.health_check_path is not None else 4
-        try:
-            if not self.stored.staging_path:
-                raise RuntimeError("同期計画にステージングファイルがありません")
-            self.cancellation_token.raise_if_cancelled()
-            emit_status = _ThrottledProgressEmitter(self.status_progress.emit)
-            emit_status(
-                OperationProgress(
-                    stage=1,
-                    total_stages=total_stages,
-                    message="XServerへSSH接続中",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-
-            def report_recovery(current: int, total: int | None, detail: str) -> None:
-                emit_status(
-                    OperationProgress(
-                        stage=2,
-                        total_stages=total_stages,
-                        message="残存一時ファイルを確認中",
-                        current=current,
-                        total=total,
-                        unit="directories" if total is None else "files",
-                        detail=detail,
-                    )
-                )
-
-            recovery = scan_recovery_artifacts(
-                sftp,
-                self.mapping.remote_root,
-                progress_callback=report_recovery,
-                cancellation_token=self.cancellation_token,
-            )
-            if recovery.temporary_files or recovery.issues:
-                raise RuntimeError(
-                    "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
-                )
-
-            def report_revalidation(event: DryRunProgress) -> None:
-                emit_status(
-                    OperationProgress(
-                        stage=3,
-                        total_stages=total_stages,
-                        message=f"計画再検証: {event.message}",
-                        current=event.current,
-                        total=event.total,
-                        unit=event.unit,
-                        detail=event.detail,
-                        phase_key=(
-                            "deploy_revalidate",
-                            event.stage,
-                            event.message,
-                            event.unit,
-                            event.total,
-                        ),
-                        progress_label=f"計画再検証: {event.message}",
-                        remote_wait=event.stage == 3,
-                    )
-                )
-
-            revalidation = PlanRevalidator().revalidate(
-                stored=self.stored,
-                project=self.project,
-                mapping=self.mapping,
-                sftp=sftp,
-                allow_resume=self.resume,
-                progress_callback=report_revalidation,
-                cancellation_token=self.cancellation_token,
-            )
-            if not revalidation.valid:
-                self.blocked.emit(revalidation)
-                return
-            result = RemoteDeploymentEngine().deploy(
-                sftp=sftp,
-                plan=self.stored.plan,
-                staging_root=Path(self.stored.staging_path),
-                remote_root=self.mapping.remote_root,
-                authorization=self.authorization,
-                file_mode=self.mapping.file_mode,
-                directory_mode=self.mapping.directory_mode,
-                progress_callback=self.progress.emit,
-                cancellation_token=self.cancellation_token,
-            )
-            if self.health_check_path is not None:
-                emit_status(
-                    OperationProgress(
-                        stage=5,
-                        total_stages=total_stages,
-                        message="HTTPS動作確認を実行中",
-                        detail=f"https://{self.project.domain}{self.health_check_path}",
-                    )
-                )
-                result = replace(
-                    result,
-                    health_check=perform_https_health_check(
-                        domain=self.project.domain,
-                        path=self.health_check_path,
-                    ),
-                )
-            self.completed.emit(result)
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class ForceOverwriteWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(int, int, str)
-    status_progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        project: Project,
-        mapping: SyncMapping,
-        passphrase: str | None,
-        selected_paths: tuple[str, ...],
-    ) -> None:
-        super().__init__()
-        self.project = project
-        self.mapping = mapping
-        self.passphrase = passphrase
-        self.selected_paths = selected_paths
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            self.cancellation_token.raise_if_cancelled()
-            emit_status = _ThrottledProgressEmitter(self.status_progress.emit)
-            emit_status(
-                OperationProgress(
-                    stage=1,
-                    total_stages=2,
-                    message="XServerへSSH接続中",
-                    summary_prefix="無条件上書き中…",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-
-            def report_started(current: int, total: int, path: str) -> None:
-                emit_status(
-                    OperationProgress(
-                        stage=2,
-                        total_stages=2,
-                        message=f"転送中: {path}",
-                        current=current,
-                        total=total,
-                        unit="files",
-                        phase_key=("force_overwrite", total),
-                        summary_prefix="無条件上書き中…",
-                    )
-                )
-
-            preset = get_preset(self.project.site_type)
-            result = ForceOverwriteEngine().overwrite(
-                sftp=sftp,
-                local_root=Path(self.mapping.local_root),
-                remote_root=self.mapping.remote_root,
-                exclude_patterns=preset.exclude_patterns + self.mapping.exclude_patterns,
-                protect_patterns=preset.protect_patterns + self.mapping.protect_patterns,
-                include_paths=self.selected_paths,
-                file_mode=self.mapping.file_mode,
-                directory_mode=self.mapping.directory_mode,
-                progress_callback=self.progress.emit,
-                file_started_callback=report_started,
-                cancellation_token=self.cancellation_token,
-            )
-            self.completed.emit(result)
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class RecoveryScanWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(self, project: Project, mapping: SyncMapping, passphrase: str | None) -> None:
-        super().__init__()
-        self.project = project
-        self.mapping = mapping
-        self.passphrase = passphrase
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            self.cancellation_token.raise_if_cancelled()
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(
-                OperationProgress(
-                    stage=1,
-                    total_stages=2,
-                    message="XServerへSSH接続中",
-                    summary_prefix="安全性確認を実行中…",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-
-            def report(current: int, total: int | None, detail: str) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=2,
-                        total_stages=2,
-                        message=(
-                            "XServerのフォルダを確認中"
-                            if total is None
-                            else "残存一時ファイルを照合中"
-                        ),
-                        current=current,
-                        total=total,
-                        unit="directories" if total is None else "files",
-                        detail=detail,
-                        summary_prefix="安全性確認を実行中…",
-                    )
-                )
-
-            self.completed.emit(
-                analyze_recovery_artifacts(
-                    sftp,
-                    self.mapping.remote_root,
-                    progress_callback=report,
-                    cancellation_token=self.cancellation_token,
-                )
-            )
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class RestoreWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        project: Project,
-        mapping: SyncMapping,
-        manifest_path: str,
-        expected_current_hashes: dict[str, str],
-        authorization: RestoreAuthorization,
-        passphrase: str | None,
-    ) -> None:
-        super().__init__()
-        self.project = project
-        self.mapping = mapping
-        self.manifest_path = manifest_path
-        self.expected_current_hashes = expected_current_hashes
-        self.authorization = authorization
-        self.passphrase = passphrase
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            self.cancellation_token.raise_if_cancelled()
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(
-                OperationProgress(
-                    stage=1,
-                    total_stages=3,
-                    message="XServerへSSH接続中",
-                    summary_prefix="バックアップから復元中…",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-
-            def report_recovery(current: int, total: int | None, detail: str) -> None:
-                emit_progress(
-                    OperationProgress(
-                        stage=2,
-                        total_stages=3,
-                        message="残存一時ファイルを確認中",
-                        current=current,
-                        total=total,
-                        unit="directories" if total is None else "files",
-                        detail=detail,
-                        summary_prefix="バックアップから復元中…",
-                    )
-                )
-
-            recovery = scan_recovery_artifacts(
-                sftp,
-                self.mapping.remote_root,
-                progress_callback=report_recovery,
-                cancellation_token=self.cancellation_token,
-            )
-            if recovery.temporary_files or recovery.issues:
-                raise RuntimeError(
-                    "残存一時ファイルまたは未確認領域があります。先に安全性確認を実行してください。"
-                )
-
-            def report_restore(current: int, total: int, detail: str) -> None:
-                phase_kind = detail.split(":", 1)[0].strip() if ":" in detail else detail
-                emit_progress(
-                    OperationProgress(
-                        stage=3,
-                        total_stages=3,
-                        message=detail,
-                        current=current,
-                        total=total,
-                        unit="files",
-                        phase_key=("restore", phase_kind, total),
-                        summary_prefix="バックアップから復元中…",
-                    )
-                )
-
-            result = RemoteRestoreEngine().restore(
-                sftp=sftp,
-                manifest_path=self.manifest_path,
-                destination_root=self.mapping.remote_root,
-                expected_current_hashes=self.expected_current_hashes,
-                authorization=self.authorization,
-                progress_callback=report_restore,
-                cancellation_token=self.cancellation_token,
-            )
-            self.completed.emit(result)
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(_format_worker_error(exc))
-        finally:
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class WordPressSetupWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    checkpoint = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        project: Project,
-        request: WordPressSetupRequest,
-        api_key: str | None,
-        servername: str | None,
-        passphrase: str | None,
-    ) -> None:
-        super().__init__()
-        self.project = project
-        self.request = request
-        self.api_key = api_key
-        self.servername = servername
-        self.passphrase = passphrase
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(
-                WordPressSetupProgress(
-                    step=1,
-                    total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
-                    message="XServerへSSH接続中",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-            result = WordPressSetupEngine().setup(
-                request=self.request,
-                api=(
-                    XServerApiClient(
-                        api_key=self.api_key,
-                        servername=self.servername or "",
-                    )
-                    if self.api_key
-                    else None
-                ),
-                ssh_client=client,
-                sftp=sftp,
-                ssh_username=self.project.ssh_username,
-                progress_callback=emit_progress,
-                checkpoint_callback=self.checkpoint.emit,
-                cancellation_token=self.cancellation_token,
-            )
-            emit_progress(
-                WordPressSetupProgress(
-                    step=10,
-                    total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
-                    message="HTTPSでトップページを確認中",
-                )
-            )
-            public_url = urlparse(result.public_url)
-            health_domain = public_url.netloc
-            base_path = public_url.path.rstrip("/")
-            homepage_path = f"{base_path}/" or "/"
-            login_path = f"{base_path}/wp-login.php"
-            homepage = perform_https_health_check(
-                domain=health_domain, path=homepage_path
-            )
-            emit_progress(
-                WordPressSetupProgress(
-                    step=10,
-                    total_steps=WORDPRESS_SETUP_TOTAL_STEPS,
-                    message="HTTPSでログイン画面を確認中",
-                )
-            )
-            login = perform_https_health_check(
-                domain=health_domain, path=login_path
-            )
-            self.completed.emit((result, homepage, login))
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            msg = str(exc).strip()
-            if not msg or msg.lower() == "failure":
-                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
-            self.failed.emit(msg)
-        finally:
-            self.api_key = ""
-            self.request = None
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
-class LaravelSetupWorker(QObject):
-    completed = Signal(object)
-    failed = Signal(str)
-    progress = Signal(object)
-    checkpoint = Signal(object)
-    cancelled = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        project: Project,
-        request: LaravelSetupRequest,
-        api_key: str | None,
-        servername: str | None,
-        passphrase: str | None,
-    ) -> None:
-        super().__init__()
-        self.project = project
-        self.request = request
-        self.api_key = api_key
-        self.servername = servername
-        self.passphrase = passphrase
-        self.cancellation_token = CancellationToken()
-
-    def cancel(self) -> None:
-        self.cancellation_token.cancel()
-
-    @Slot()
-    def run(self) -> None:
-        client = None
-        sftp = None
-        try:
-            emit_progress = _ThrottledProgressEmitter(self.progress.emit)
-            emit_progress(
-                LaravelSetupProgress(
-                    step=1,
-                    total_steps=LARAVEL_SETUP_TOTAL_STEPS,
-                    message="XServerへSSH接続中",
-                )
-            )
-            client, sftp = connect_sftp(
-                host=self.project.ssh_host,
-                port=self.project.ssh_port,
-                username=self.project.ssh_username,
-                private_key_path=self.project.private_key_reference,
-                host_key_fingerprint=self.project.host_key_fingerprint,
-                passphrase=self.passphrase,
-            )
-            result = LaravelSetupEngine().setup(
-                request=self.request,
-                api=(
-                    XServerApiClient(
-                        api_key=self.api_key,
-                        servername=self.servername or "",
-                    )
-                    if self.api_key
-                    else None
-                ),
-                ssh_client=client,
-                sftp=sftp,
-                ssh_username=self.project.ssh_username,
-                progress_callback=emit_progress,
-                checkpoint_callback=self.checkpoint.emit,
-                cancellation_token=self.cancellation_token,
-            )
-            emit_progress(
-                LaravelSetupProgress(
-                    step=10,
-                    total_steps=LARAVEL_SETUP_TOTAL_STEPS,
-                    message="HTTPSでサイトトップを確認中",
-                )
-            )
-            public_url = urlparse(result.public_url)
-            health_domain = public_url.netloc
-            base_path = public_url.path.rstrip("/")
-            homepage_path = f"{base_path}/" or "/"
-            homepage = perform_https_health_check(
-                domain=health_domain, path=homepage_path
-            )
-            self.completed.emit((result, homepage))
-        except OperationCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            msg = str(exc).strip()
-            if not msg or msg.lower() == "failure":
-                msg = f"SFTP/SSHファイル転送エラー ({type(exc).__name__}: SFTP Failure - サーバーまたはファイルアクセスでエラーが発生しました)"
-            self.failed.emit(msg)
-        finally:
-            self.api_key = ""
-            self.request = None
-            if sftp is not None:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -1366,6 +231,8 @@ class MainWindow(QMainWindow):
         self.resize(1040, 700)
         self._thread: QThread | None = None
         self._worker: QObject | None = None
+        self._update_thread: QThread | None = None
+        self._update_worker: QObject | None = None
         if store is None:
             state_override = os.environ.get("DXSYNC_STATE_DIR")
             state_directory = Path(
@@ -1434,9 +301,11 @@ class MainWindow(QMainWindow):
         self._auto_sync_stage: str | None = None
         self._auto_sync_preferences: AutoSyncPreferences | None = None
         self._auto_backup_skipped = False
+        self._auto_approved_delete_paths: tuple[str, ...] = ()
         self._auto_health_check_path: str | None = None
         self._deploy_total_stages: int = 4
         self._auto_dry_run_result: DryRunResult | None = None
+        self._session_passphrases: dict[str, str] = {}
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -1565,7 +434,8 @@ class MainWindow(QMainWindow):
         self.key_browse_button.clicked.connect(self._browse_key)
         self.passphrase_edit = QLineEdit()
         self.passphrase_edit.setEchoMode(QLineEdit.Password)
-        self.passphrase_edit.setPlaceholderText("保存しません")
+        self.passphrase_edit.setPlaceholderText("入力中はセッション内保持")
+        self.passphrase_edit.editingFinished.connect(self._persist_passphrase_if_enabled)
         self.dry_run_button = QPushButton("読み取り専用ドライラン")
         self.dry_run_button.clicked.connect(self._start_dry_run)
         self.auto_sync_button = QPushButton("安全同期を自動実行")
@@ -1586,6 +456,14 @@ class MainWindow(QMainWindow):
         self.mask_toggle = QCheckBox("接続情報のマスクを一時解除")
         self.mask_toggle.setToolTip("この画面を閉じるまでの表示だけを切り替えます")
         self.mask_toggle.toggled.connect(self._apply_connection_masks)
+        self.save_passphrase_check = QCheckBox("パスフレーズをOS資格情報ストアに保存")
+        self.save_passphrase_check.setChecked(False)
+        self.save_passphrase_check.setEnabled(False)
+        self.save_passphrase_check.setToolTip(
+            "チェックすると、選択中プロジェクトのSSH秘密鍵パスフレーズをOSの資格情報ストアに保存します。"
+            "チェックを外すと保存済みのパスフレーズを削除します。"
+        )
+        self.save_passphrase_check.toggled.connect(self._toggle_save_passphrase)
 
         connection_layout.addWidget(QLabel("ホスト"), 0, 0)
         connection_layout.addWidget(self.host_edit, 0, 1)
@@ -1606,7 +484,8 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.backup_button, 4, 3)
         connection_layout.addWidget(self.deploy_button, 4, 4)
         connection_layout.addWidget(self.dry_run_button, 4, 5)
-        connection_layout.addWidget(self.mask_toggle, 5, 1, 1, 4)
+        connection_layout.addWidget(self.mask_toggle, 5, 1, 1, 2)
+        connection_layout.addWidget(self.save_passphrase_check, 5, 3, 1, 2)
         connection_layout.addWidget(self.auto_sync_button, 5, 5)
         layout.addWidget(connection)
 
@@ -1688,6 +567,7 @@ class MainWindow(QMainWindow):
         self.recovery_button.setEnabled(has_project and self._thread is None)
         self.mapping_combo.blockSignals(True)
         self.mapping_combo.clear()
+        self.save_passphrase_check.blockSignals(True)
         if self._current_project is not None:
             project = self._current_project
             site_index = self.site_combo.findData(project.site_type.value)
@@ -1697,14 +577,140 @@ class MainWindow(QMainWindow):
             self.user_edit.setText(project.ssh_username)
             self.fingerprint_edit.setText(project.host_key_fingerprint)
             self.key_edit.setText(project.private_key_reference)
-            self.passphrase_edit.clear()
+            has_saved_passphrase = self.store.has_saved_ssh_passphrase(project.project_id)
+            self.save_passphrase_check.setEnabled(not self._auto_sync_active)
+            self.save_passphrase_check.setChecked(has_saved_passphrase)
+            cached_passphrase = self._session_passphrases.get(project.project_id)
+            if cached_passphrase is None and has_saved_passphrase:
+                try:
+                    cached_passphrase = self.store.get_ssh_passphrase(project.project_id)
+                except SecureStoreError:
+                    cached_passphrase = None
+                if cached_passphrase:
+                    self._session_passphrases[project.project_id] = cached_passphrase
+            self.passphrase_edit.setText(cached_passphrase or "")
+            self.passphrase_edit.setPlaceholderText(
+                "OS資格情報ストアに保存済み"
+                if has_saved_passphrase
+                else "入力中はセッション内保持"
+            )
             for mapping in project.mappings:
                 self.mapping_combo.addItem(mapping.name, mapping.mapping_id)
+        else:
+            self.save_passphrase_check.setChecked(False)
+            self.save_passphrase_check.setEnabled(False)
+            self.passphrase_edit.clear()
+            self.passphrase_edit.setPlaceholderText("入力中はセッション内保持")
+        self.save_passphrase_check.blockSignals(False)
         self.mapping_combo.blockSignals(False)
         self._mapping_selected(self.mapping_combo.currentIndex())
         self._apply_project_field_lock()
         self._apply_connection_masks()
         self._update_setup_panel()
+
+    def _resolve_gui_passphrase(self) -> str | None:
+        typed = self.passphrase_edit.text()
+        if typed:
+            if self._current_project is not None:
+                self._session_passphrases[self._current_project.project_id] = typed
+            return typed
+        if self._current_project is None:
+            return None
+        project_id = self._current_project.project_id
+        cached = self._session_passphrases.get(project_id)
+        if cached:
+            return cached
+        if self.store.has_saved_ssh_passphrase(project_id):
+            try:
+                saved = self.store.get_ssh_passphrase(project_id)
+            except SecureStoreError:
+                saved = None
+            if saved:
+                self._session_passphrases[project_id] = saved
+                self.passphrase_edit.setText(saved)
+                return saved
+        return None
+
+    def _cache_active_passphrase(self) -> None:
+        if self._current_project is None:
+            return
+        project_id = self._current_project.project_id
+        typed = self.passphrase_edit.text()
+        if not typed:
+            return
+        self._session_passphrases[project_id] = typed
+        if self.save_passphrase_check.isChecked():
+            try:
+                self.store.save_ssh_passphrase(project_id, typed)
+            except SecureStoreError:
+                pass
+
+    @Slot(bool)
+    def _toggle_save_passphrase(self, checked: bool) -> None:
+        if self._current_project is None:
+            return
+        project_id = self._current_project.project_id
+        if not checked:
+            try:
+                self.store.delete_ssh_passphrase(project_id)
+            except SecureStoreError as exc:
+                QMessageBox.warning(
+                    self,
+                    "パスフレーズ削除エラー",
+                    f"OS資格情報ストアから削除できませんでした: {exc}",
+                )
+                self.save_passphrase_check.blockSignals(True)
+                self.save_passphrase_check.setChecked(True)
+                self.save_passphrase_check.blockSignals(False)
+                return
+            self.passphrase_edit.setPlaceholderText("入力中はセッション内保持")
+            return
+        passphrase = self.passphrase_edit.text() or self._session_passphrases.get(
+            project_id, ""
+        )
+        if not passphrase:
+            QMessageBox.information(
+                self,
+                "パスフレーズを入力",
+                "保存するSSH秘密鍵のパスフレーズを先に入力してください。",
+            )
+            self.save_passphrase_check.blockSignals(True)
+            self.save_passphrase_check.setChecked(False)
+            self.save_passphrase_check.blockSignals(False)
+            return
+        try:
+            self.store.save_ssh_passphrase(project_id, passphrase)
+        except SecureStoreError as exc:
+            QMessageBox.warning(
+                self,
+                "パスフレーズ保存エラー",
+                f"OS資格情報ストアへ保存できませんでした: {exc}",
+            )
+            self.save_passphrase_check.blockSignals(True)
+            self.save_passphrase_check.setChecked(False)
+            self.save_passphrase_check.blockSignals(False)
+            return
+        self._session_passphrases[project_id] = passphrase
+        self.passphrase_edit.setPlaceholderText("OS資格情報ストアに保存済み")
+
+    @Slot()
+    def _persist_passphrase_if_enabled(self) -> None:
+        if self._current_project is None:
+            return
+        project_id = self._current_project.project_id
+        typed = self.passphrase_edit.text()
+        if not typed:
+            return
+        self._session_passphrases[project_id] = typed
+        if self.save_passphrase_check.isChecked():
+            try:
+                self.store.save_ssh_passphrase(project_id, typed)
+            except SecureStoreError as exc:
+                QMessageBox.warning(
+                    self,
+                    "パスフレーズ保存エラー",
+                    f"OS資格情報ストアへ保存できませんでした: {exc}",
+                )
 
     def _apply_project_field_lock(self) -> None:
         has_saved_project = self._current_project is not None
@@ -1810,6 +816,8 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("ヘルプ")
         self.manual_action = help_menu.addAction("オンラインマニュアル")
         self.manual_action.triggered.connect(self._open_online_manual)
+        self.check_updates_action = help_menu.addAction("アップデートを確認…")
+        self.check_updates_action.triggered.connect(self._check_for_updates)
         about_action = help_menu.addAction("バージョン情報")
         about_action.triggered.connect(self._show_about)
 
@@ -1884,10 +892,62 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _open_online_manual(self) -> None:
-        manual_url = (
-            "https://github.com/StayHomeLabNet/docker-xserver-sync/blob/main/docs/manual.md"
-        )
+        manual_url = "https://stayhomelab.net/help/docker-xserver-sync/"
         QDesktopServices.openUrl(QUrl(manual_url))
+
+    @Slot()
+    def _check_for_updates(self) -> None:
+        if self._update_thread is not None:
+            return
+        self.check_updates_action.setEnabled(False)
+        thread = QThread(self)
+        worker = UpdateCheckWorker(__version__)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._update_check_completed)
+        worker.failed.connect(self._update_check_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._update_check_finished)
+        self._update_thread = thread
+        self._update_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _update_check_completed(self, result: object) -> None:
+        if not isinstance(result, UpdateCheckResult):
+            return
+        if not result.update_available:
+            QMessageBox.information(
+                self,
+                "アップデートの確認",
+                f"現在お使いのバージョン ({result.current_version}) は最新です。",
+            )
+            return
+        notes_block = f"\n\n概要:\n{result.notes_excerpt}" if result.notes_excerpt else ""
+        answer = QMessageBox.question(
+            self,
+            "新しいバージョンがあります",
+            f"新しいバージョン {result.latest_version} が公開されています"
+            f"（現在のバージョン: {result.current_version}）。"
+            f"{notes_block}\n\nGitHub Releases ページをブラウザで開きますか？",
+        )
+        if answer == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl(result.release_url))
+
+    @Slot(str)
+    def _update_check_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "アップデートの確認", message)
+
+    @Slot()
+    def _update_check_finished(self) -> None:
+        self.check_updates_action.setEnabled(True)
+        if self._update_worker is not None:
+            self._update_worker.deleteLater()
+            self._update_worker = None
+        if self._update_thread is not None:
+            self._update_thread.deleteLater()
+            self._update_thread = None
 
     @Slot()
     def _show_about(self) -> None:
@@ -2195,7 +1255,7 @@ class MainWindow(QMainWindow):
             request=request,
             api_key=api_key,
             servername=servername,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -2287,7 +1347,7 @@ class MainWindow(QMainWindow):
             request=request,
             api_key=api_key,
             servername=servername,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -2343,32 +1403,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _format_progress_duration(seconds: float) -> str:
-        seconds = max(0, int(seconds))
-        if seconds < 60:
-            return f"{seconds}秒"
-        minutes, remaining_seconds = divmod(seconds, 60)
-        if minutes < 60:
-            return (
-                f"{minutes}分{remaining_seconds}秒"
-                if remaining_seconds
-                else f"{minutes}分"
-            )
-        hours, remaining_minutes = divmod(minutes, 60)
-        return (
-            f"{hours}時間{remaining_minutes}分"
-            if remaining_minutes
-            else f"{hours}時間"
-        )
+        return format_progress_duration(seconds)
 
     @staticmethod
     def _format_progress_amount(
         event: WordPressSetupProgress | LaravelSetupProgress | OperationProgress,
     ) -> str:
-        assert event.current is not None and event.total is not None
-        if event.unit == "bytes":
-            mib = 1024 * 1024
-            return f"{event.current / mib:.1f}/{event.total / mib:.1f} MiB"
-        return f"{event.current:,}/{event.total:,}"
+        return format_progress_amount(event)
 
     @Slot()
     def _refresh_wordpress_progress(self) -> None:
@@ -2957,6 +1998,7 @@ class MainWindow(QMainWindow):
                     f"プロジェクトを残しました。\n\n{exc}",
                 )
                 return
+            self._session_passphrases.pop(self._current_project.project_id, None)
             self._current_project = None
             self._reload_projects()
 
@@ -2967,6 +2009,8 @@ class MainWindow(QMainWindow):
         dialog.exec()
         if dialog.selected_backup_id:
             self._start_restore(dialog.selected_backup_id)
+        elif dialog.selected_delete_backup_ids:
+            self._start_backup_delete(dialog.selected_delete_backup_ids)
 
     def _latest_resumable_operation(self):
         project = self._current_project
@@ -3128,7 +2172,7 @@ class MainWindow(QMainWindow):
         worker = ForceOverwriteWorker(
             project=project,
             mapping=mapping,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
             selected_paths=remaining,
         )
         worker.moveToThread(thread)
@@ -3248,6 +2292,9 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(not locked)
         self.auto_sync_button.setEnabled(not locked)
+        self.save_passphrase_check.setEnabled(
+            not locked and self._current_project is not None
+        )
         if hasattr(self, "wordpress_setup_action"):
             self.wordpress_setup_action.setEnabled(not locked)
         if hasattr(self, "laravel_setup_action"):
@@ -3269,6 +2316,7 @@ class MainWindow(QMainWindow):
         self._auto_sync_stage = None
         self._auto_sync_preferences = None
         self._auto_backup_skipped = False
+        self._auto_approved_delete_paths = ()
         self._auto_health_check_path = None
         self._auto_dry_run_result = None
         self._set_auto_sync_controls_locked(False)
@@ -3295,6 +2343,7 @@ class MainWindow(QMainWindow):
             self.settings, project.project_id
         )
         self._auto_backup_skipped = False
+        self._auto_approved_delete_paths = ()
         self._auto_health_check_path = None
         self._auto_dry_run_result = None
         self._set_auto_sync_controls_locked(True)
@@ -3341,7 +2390,7 @@ class MainWindow(QMainWindow):
                 self, "自動実行を停止", "バックアップ対象の計画を取得できません。"
             )
             return
-        self._approved_delete_paths = ()
+        self._approved_delete_paths = self._auto_approved_delete_paths
         self._run_backup(project, mapping, stored)
 
     def _start_auto_deployment(self) -> None:
@@ -3366,6 +2415,7 @@ class MainWindow(QMainWindow):
                 self, "自動実行を停止", "この計画に対応するバックアップがありません。"
             )
             return
+        self._approved_delete_paths = self._auto_approved_delete_paths
         self._run_deployment(
             project,
             mapping,
@@ -3499,7 +2549,7 @@ class MainWindow(QMainWindow):
             private_key_path=str(key_path),
             fingerprint=fingerprint,
             remote_root=remote_root,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
             staging_parent=self.staging_parent,
             extra_excludes=extra_excludes,
             extra_protected=extra_protected,
@@ -3553,7 +2603,7 @@ class MainWindow(QMainWindow):
             stored=stored,
             project=project,
             mapping=mapping,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3635,7 +2685,7 @@ class MainWindow(QMainWindow):
             stored=stored,
             project=project,
             mapping=mapping,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
             backup_root=self._backup_root(),
             delete_paths=self._approved_delete_paths,
         )
@@ -3756,7 +2806,7 @@ class MainWindow(QMainWindow):
             stored=stored,
             project=project,
             mapping=mapping,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
             authorization=DeploymentAuthorization(
                 plan_id=stored.plan.plan_id,
                 backup_plan_id=backup.plan_id if backup is not None else None,
@@ -3855,7 +2905,7 @@ class MainWindow(QMainWindow):
         worker = ForceOverwriteWorker(
             project=project,
             mapping=mapping,
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
             selected_paths=selected_paths,
         )
         worker.moveToThread(thread)
@@ -3898,7 +2948,7 @@ class MainWindow(QMainWindow):
         self._begin_operation("recovery_scan")
         thread = QThread(self)
         worker = RecoveryScanWorker(
-            project, mapping, self.passphrase_edit.text() or None
+            project, mapping, self._resolve_gui_passphrase()
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -4000,7 +3050,7 @@ class MainWindow(QMainWindow):
                 destination_root=mapping.remote_root,
                 approved=True,
             ),
-            passphrase=self.passphrase_edit.text() or None,
+            passphrase=self._resolve_gui_passphrase(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -4008,6 +3058,63 @@ class MainWindow(QMainWindow):
         worker.completed.connect(self._restore_completed)
         worker.failed.connect(self._restore_failed)
         worker.cancelled.connect(self._restore_cancelled)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
+        thread.start()
+
+    def _start_backup_delete(self, backup_ids: Sequence[str]) -> None:
+        if self._thread is not None:
+            return
+        project = self._current_project
+        if project is None:
+            QMessageBox.warning(self, "削除できません", "プロジェクトが選択されていません。")
+            return
+        backups = [
+            backup
+            for backup_id in backup_ids
+            if (backup := self.store.get_backup(backup_id)) is not None
+            and backup.project_id == project.project_id
+            and backup.status != "deleted"
+        ]
+        if not backups:
+            QMessageBox.information(self, "削除対象なし", "削除できるバックアップがありません。")
+            return
+        self.scan_button.setEnabled(False)
+        self.dry_run_button.setEnabled(False)
+        self.revalidate_button.setEnabled(False)
+        self.backup_button.setEnabled(False)
+        self.deploy_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self._start_op_progress(
+            OperationProgress(
+                stage=1,
+                total_stages=2,
+                message="XServerへSSH接続中",
+                summary_prefix="古いバックアップを削除中…",
+            )
+        )
+        self._begin_operation(
+            "backup_cleanup",
+            details={"backup_ids": [b.backup_id for b in backups]},
+        )
+        thread = QThread(self)
+        worker = BackupDeleteWorker(
+            project=project,
+            backups=backups,
+            passphrase=self._resolve_gui_passphrase(),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._update_op_progress)
+        worker.completed.connect(self._backup_delete_completed)
+        worker.failed.connect(self._backup_delete_failed)
+        worker.cancelled.connect(self._backup_delete_cancelled)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
@@ -4155,7 +3262,17 @@ class MainWindow(QMainWindow):
             )
             self._stop_auto_sync()
             return
-        if changed_count == 0:
+        remote_only_paths = tuple(
+            change.relative_path
+            for change in result.plan.changes
+            if change.change_type == ChangeType.REMOTE_ONLY
+        )
+        can_ask_delete = (
+            preferences.remote_only_policy == "ask"
+            and bool(remote_only_paths)
+            and preferences.backup_mode != "skip"
+        )
+        if changed_count == 0 and not can_ask_delete:
             self.summary.setText(
                 "自動実行完了。ADD・UPDATEはなく、XServerへの書き込みは行いませんでした。"
             )
@@ -4172,7 +3289,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "自動実行設定を確認", str(exc))
             self._stop_auto_sync()
             return
-        backup_skipped = preferences.resolved_backup_skip(update_count)
+        initial_backup_skipped = preferences.resolved_backup_skip(update_count)
         approval = AutoSyncApprovalDialog(
             domain=project.domain,
             remote_root=mapping.remote_root,
@@ -4180,11 +3297,14 @@ class MainWindow(QMainWindow):
             update_count=update_count,
             remote_only_count=remote_only_count,
             upload_bytes=upload_bytes,
-            backup_skipped=backup_skipped,
+            backup_skipped=initial_backup_skipped,
             health_check_path=health_path,
             require_domain_confirmation=(
                 preferences.require_domain_confirmation
             ),
+            remote_only_paths=remote_only_paths,
+            allow_remote_only_deletion=(preferences.remote_only_policy == "ask"),
+            backup_mode=preferences.backup_mode,
             parent=self,
         )
         if approval.exec() != QDialog.Accepted:
@@ -4193,7 +3313,10 @@ class MainWindow(QMainWindow):
             )
             self._stop_auto_sync()
             return
-        self._approved_delete_paths = ()
+        selected_deletes = approval.selected_delete_paths()
+        backup_skipped = approval.should_skip_backup()
+        self._auto_approved_delete_paths = selected_deletes
+        self._approved_delete_paths = selected_deletes
         self._auto_backup_skipped = backup_skipped
         self._auto_health_check_path = health_path
         self._auto_sync_stage = "revalidation"
@@ -4646,6 +3769,48 @@ class MainWindow(QMainWindow):
         self._reset_write_state()
         self.summary.setText("バックアップからの復元を安全な区切りで停止しました。")
 
+    @Slot(object)
+    def _backup_delete_completed(self, payload: object) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        deleted_ids, missing_ids = payload
+        for backup_id in deleted_ids:
+            self.store.set_backup_status(backup_id, "deleted")
+            if self._current_backup_id == backup_id:
+                self._current_backup_id = None
+        self._cache_active_passphrase()
+        self._finish_operation(
+            "succeeded",
+            details={
+                "deleted_backup_ids": list(deleted_ids),
+                "already_missing_ids": list(missing_ids),
+            },
+        )
+        self._update_action_buttons()
+        extra = (
+            f"（うち {len(missing_ids)}件は既にリモートに存在しませんでした）"
+            if missing_ids
+            else ""
+        )
+        self.summary.setText(
+            f"古いバックアップを {len(deleted_ids)}件 削除しました。{extra}"
+        )
+
+    @Slot(str)
+    def _backup_delete_failed(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("failed", error=message)
+        self.summary.setText("バックアップの削除に失敗しました。")
+        QMessageBox.critical(self, "バックアップ削除エラー", message)
+
+    @Slot(str)
+    def _backup_delete_cancelled(self, message: str) -> None:
+        self._stop_op_progress()
+        self._set_progress_visible(False)
+        self._finish_operation("cancelled", error=message)
+        self.summary.setText("バックアップの削除を安全な区切りで停止しました。")
+
     @Slot()
     def _scan_finished(self) -> None:
         if self._dry_run_progress_timer.isActive():
@@ -4686,6 +3851,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self._thread is None:
+            if self._update_thread is not None:
+                self._update_thread.quit()
+                self._update_thread.wait(1000)
+            self._session_passphrases.clear()
+            self.passphrase_edit.clear()
             event.accept()
             return
         cancel = getattr(self._worker, "cancel", None)

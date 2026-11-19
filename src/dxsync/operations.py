@@ -4,16 +4,21 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
-from .backup import RemoteBackupEngine
+from .auto_sync_policy import AutoSyncPreferences, auto_sync_policy_issues
+from .backup import (
+    RemoteBackupEngine,
+    delete_remote_backup,
+    select_prune_candidates,
+)
 from .cancellation import CancellationToken
 from .deployment import (
     DeploymentAuthorization,
     DeployError,
     RemoteDeploymentEngine,
 )
-from .health import perform_https_health_check
+from .health import normalize_health_check_path, perform_https_health_check
 from .integrity import project_config_sha256
 from .models import ChangeType, Project, SyncMapping
 from .planner import DEFAULT_PLAN_VALIDITY_MINUTES, validate_plan_validity
@@ -21,6 +26,7 @@ from .recovery import is_dxsync_temporary_name, scan_recovery_artifacts
 from .remote import connect_sftp
 from .restore import RemoteRestoreEngine, RestoreAuthorization
 from .revalidation import PlanRevalidator
+from .secure_store import SecureStoreError
 from .service import DryRunProgress, DryRunService
 from .storage import BackupRecord, ProjectStore, get_default_store
 from .validation import custom_runtime_paths_issue
@@ -28,6 +34,18 @@ from .validation import custom_runtime_paths_issue
 
 class OperationError(RuntimeError):
     pass
+
+
+def _resolve_passphrase(
+    store: ProjectStore, project: Project, passphrase: str | None
+) -> str | None:
+    if passphrase:
+        return passphrase
+    try:
+        saved = store.get_ssh_passphrase(project.project_id)
+        return saved or None
+    except SecureStoreError:
+        return None
 
 
 def find_project(store: ProjectStore, identifier: str) -> Project | None:
@@ -182,7 +200,7 @@ def execute_dry_run(
         username=project.ssh_username,
         private_key_path=project.private_key_reference,
         host_key_fingerprint=project.host_key_fingerprint,
-        passphrase=passphrase,
+        passphrase=_resolve_passphrase(store, project, passphrase),
     )
     try:
         service = DryRunService()
@@ -253,7 +271,50 @@ def execute_auto_sync(
     mapping_name: str | None = None,
     staging_parent: Path | None = None,
     passphrase: str | None = None,
+    *,
+    backup_mode: str = "always",
+    remote_only_policy: str = "keep",
+    delete_paths: Sequence[str] = (),
+    health_check_enabled: bool = True,
+    health_check_path: str = "/",
+    plan_validity_minutes: int = DEFAULT_PLAN_VALIDITY_MINUTES,
+    max_changed_files: int = 1000,
+    max_update_files: int = 500,
+    max_upload_mib: int = 1024,
 ) -> dict[str, Any]:
+    if backup_mode not in {"always", "add_only", "skip"}:
+        raise OperationError(
+            f"Unsupported backup_mode '{backup_mode}'. Must be one of: always, add_only, skip."
+        )
+    if remote_only_policy not in {"keep", "stop", "ask"}:
+        raise OperationError(
+            f"Unsupported remote_only_policy '{remote_only_policy}'. Must be one of: keep, stop, ask."
+        )
+    if max_changed_files < 0 or max_update_files < 0 or max_upload_mib < 0:
+        raise OperationError("Auto-sync threshold limits must be zero or positive.")
+
+    plan_validity = validate_plan_validity(timedelta(minutes=plan_validity_minutes))
+    normalized_health_path = (
+        normalize_health_check_path(health_check_path) if health_check_enabled else "/"
+    )
+    requested_delete_paths = tuple(dict.fromkeys(delete_paths))
+    if requested_delete_paths and backup_mode == "skip":
+        raise OperationError("削除を含む同期ではバックアップを省略できません。")
+    if requested_delete_paths and remote_only_policy != "ask":
+        raise OperationError(
+            "リモートのみファイルを削除する場合は remote_only_policy='ask' を指定してください。"
+        )
+
+    preferences = AutoSyncPreferences(
+        backup_mode=backup_mode,
+        remote_only_policy=remote_only_policy,
+        health_check_enabled=health_check_enabled,
+        health_check_path=normalized_health_path,
+        max_changed_files=max_changed_files,
+        max_update_files=max_update_files,
+        max_upload_mib=max_upload_mib,
+    )
+
     mapping = select_mapping(project, mapping_name)
     _ensure_project_operational(store, project, mapping, require_runtime_paths=True)
     config_sha256 = project_config_sha256(project, mapping)
@@ -264,7 +325,12 @@ def execute_auto_sync(
         project_id=project.project_id,
         mapping_id=mapping.mapping_id,
         kind="auto_sync",
-        details={"mode": "write"},
+        details={
+            "mode": "write",
+            "backup_mode": backup_mode,
+            "remote_only_policy": remote_only_policy,
+            "plan_validity_minutes": plan_validity_minutes,
+        },
     )
     client, sftp = connect_sftp(
         host=project.ssh_host,
@@ -272,7 +338,7 @@ def execute_auto_sync(
         username=project.ssh_username,
         private_key_path=project.private_key_reference,
         host_key_fingerprint=project.host_key_fingerprint,
-        passphrase=passphrase,
+        passphrase=_resolve_passphrase(store, project, passphrase),
     )
     try:
         # Phase 1: Dry run & Staging
@@ -287,15 +353,47 @@ def execute_auto_sync(
             extra_protected=mapping.protect_patterns,
             staging_parent=staging_dir,
             config_sha256=config_sha256,
+            plan_validity=plan_validity,
         )
         if dry_result.has_blocking_issues:
             raise OperationError("Dry-run detected blocking issues. Auto-sync cannot proceed.")
 
         plan = dry_result.plan
+        add_count = sum(1 for c in plan.changes if c.change_type is ChangeType.ADD)
+        update_count = sum(1 for c in plan.changes if c.change_type is ChangeType.UPDATE)
+        remote_only_changes = [
+            c for c in plan.changes if c.change_type is ChangeType.REMOTE_ONLY
+        ]
+        remote_only_paths = {c.relative_path for c in remote_only_changes}
+        upload_bytes = sum(
+            c.local.size
+            for c in plan.changes
+            if c.change_type in {ChangeType.ADD, ChangeType.UPDATE} and c.local is not None
+        )
+
+        policy_issues = auto_sync_policy_issues(
+            preferences,
+            add_count=add_count,
+            update_count=update_count,
+            remote_only_count=len(remote_only_changes),
+            upload_bytes=upload_bytes,
+        )
+        if policy_issues:
+            raise OperationError("; ".join(policy_issues))
+
+        unknown_deletes = [
+            path for path in requested_delete_paths if path not in remote_only_paths
+        ]
+        if unknown_deletes:
+            raise OperationError(
+                "削除対象パスが REMOTE_ONLY 差分に見つかりません: "
+                + ", ".join(unknown_deletes)
+            )
+
         upload_changes = [
             c for c in plan.changes if c.change_type in {ChangeType.ADD, ChangeType.UPDATE}
         ]
-        if not upload_changes:
+        if not upload_changes and not requested_delete_paths:
             store.finish_operation(
                 op.operation_id,
                 status="succeeded",
@@ -307,6 +405,7 @@ def execute_auto_sync(
                 "mapping": mapping.name,
                 "message": "同期が必要なファイル差分はありません。本番環境は最新です。",
                 "counts": {kind.value: count for kind, count in plan.counts().items()},
+                "remote_only_paths": [c.relative_path for c in remote_only_changes],
             }
 
         if not dry_result.staging:
@@ -335,35 +434,44 @@ def execute_auto_sync(
             raise OperationError(f"Plan revalidation failed: {reasons}")
 
         # Phase 3: Backup
-        backup_engine = RemoteBackupEngine()
-        backup_result = backup_engine.create_backup(
-            sftp=sftp,
-            plan=plan,
-            project_id=project.project_id,
-            remote_root=mapping.remote_root,
-            backup_root=backup_root,
+        backup_skipped = preferences.resolved_backup_skip(
+            update_count, len(requested_delete_paths)
         )
-        backup_record = BackupRecord(
-            backup_id=backup_result.backup_id,
-            project_id=project.project_id,
-            mapping_id=mapping.mapping_id,
-            plan_id=plan.plan_id,
-            backup_directory=backup_result.backup_directory,
-            manifest_path=backup_result.manifest_path,
-            created_at=backup_result.created_at,
-            file_count=len(backup_result.files),
-            total_bytes=backup_result.total_bytes,
-        )
-        store.save_backup(backup_record)
+        backup_id: str | None = None
+        backup_files = 0
+        if not backup_skipped:
+            backup_engine = RemoteBackupEngine()
+            backup_result = backup_engine.create_backup(
+                sftp=sftp,
+                plan=plan,
+                project_id=project.project_id,
+                remote_root=mapping.remote_root,
+                backup_root=backup_root,
+                delete_paths=requested_delete_paths,
+            )
+            backup_record = BackupRecord(
+                backup_id=backup_result.backup_id,
+                project_id=project.project_id,
+                mapping_id=mapping.mapping_id,
+                plan_id=plan.plan_id,
+                backup_directory=backup_result.backup_directory,
+                manifest_path=backup_result.manifest_path,
+                created_at=backup_result.created_at,
+                file_count=len(backup_result.files),
+                total_bytes=backup_result.total_bytes,
+            )
+            store.save_backup(backup_record)
+            backup_id = backup_record.backup_id
+            backup_files = backup_record.file_count
 
         # Phase 4: Deploy
         auth = DeploymentAuthorization(
             plan_id=plan.plan_id,
-            backup_plan_id=backup_result.backup_id,
+            backup_plan_id=backup_id,
             remote_root=mapping.remote_root,
             approved=True,
-            backup_skipped=False,
-            delete_paths=(),
+            backup_skipped=backup_skipped,
+            delete_paths=requested_delete_paths,
         )
         deploy_engine = RemoteDeploymentEngine()
         deploy_result = deploy_engine.deploy(
@@ -378,55 +486,83 @@ def execute_auto_sync(
         store.set_plan_status(plan.plan_id, "used")
 
         # Phase 5: HTTPS Health Check
-        health = perform_https_health_check(domain=project.domain, path="/")
-        health_error = (
-            None
-            if health.ok
-            else (health.error or f"HTTPS check returned {health.status_code}")
-        )
-        health_summary = (
-            f"HTTPS {health.status_code}"
-            if health.status_code is not None
-            else f"HTTPSエラー ({health.error or '不明'})"
-        )
-
-        store.finish_operation(
-            op.operation_id,
-            status="succeeded",
-            details={
-                "plan_id": plan.plan_id,
-                "backup_id": backup_record.backup_id,
-                "transferred_files": len(deploy_result.files),
-                "total_bytes": deploy_result.total_bytes,
-                "health_status": health.status_code,
-                "health_check": {
-                    "url": health.url,
-                    "ok": health.ok,
-                    "status_code": health.status_code,
-                    "error": health.error,
-                },
-            },
-            error=health_error,
-        )
-        return {
-            "status": "success" if health.ok else "warning",
-            "project": project.name,
-            "mapping": mapping.name,
-            "plan_id": plan.plan_id,
-            "transferred_files": len(deploy_result.files),
-            "total_bytes": deploy_result.total_bytes,
-            "backup_id": backup_record.backup_id,
-            "backup_files": backup_record.file_count,
-            "health_check": {
+        if health_check_enabled:
+            health = perform_https_health_check(
+                domain=project.domain, path=normalized_health_path
+            )
+            health_error = (
+                None
+                if health.ok
+                else (health.error or f"HTTPS check returned {health.status_code}")
+            )
+            health_summary = (
+                f"HTTPS {health.status_code}"
+                if health.status_code is not None
+                else f"HTTPSエラー ({health.error or '不明'})"
+            )
+            health_payload = {
                 "ok": health.ok,
                 "healthy": health.ok,
                 "status_code": health.status_code,
                 "url": health.url,
                 "error": health.error,
+                "skipped": False,
+            }
+            overall_status = "success" if health.ok else "warning"
+        else:
+            health_error = None
+            health_summary = "HTTPS確認スキップ"
+            health_payload = {
+                "ok": True,
+                "healthy": True,
+                "status_code": None,
+                "url": f"https://{project.domain}{normalized_health_path}",
+                "error": None,
+                "skipped": True,
+            }
+            overall_status = "success"
+
+        backup_summary = (
+            f"バックアップ: {backup_id}"
+            if backup_id is not None
+            else "バックアップ: スキップ"
+        )
+        store.finish_operation(
+            op.operation_id,
+            status="succeeded",
+            details={
+                "plan_id": plan.plan_id,
+                "backup_id": backup_id,
+                "backup_skipped": backup_skipped,
+                "transferred_files": len(deploy_result.files),
+                "deleted_files": len(deploy_result.deleted_files),
+                "total_bytes": deploy_result.total_bytes,
+                "health_status": health_payload["status_code"],
+                "health_check": health_payload,
             },
+            error=health_error,
+        )
+        return {
+            "status": overall_status,
+            "project": project.name,
+            "mapping": mapping.name,
+            "plan_id": plan.plan_id,
+            "transferred_files": len(deploy_result.files),
+            "deleted_files": list(deploy_result.deleted_files),
+            "deleted_count": len(deploy_result.deleted_files),
+            "total_bytes": deploy_result.total_bytes,
+            "backup_id": backup_id,
+            "backup_files": backup_files,
+            "backup_skipped": backup_skipped,
+            "health_check": health_payload,
             "summary": (
-                f"{len(deploy_result.files)}件のファイルを同期しました / "
-                f"バックアップ: {backup_record.backup_id} / {health_summary}"
+                f"{len(deploy_result.files)}件のファイルを同期しました"
+                + (
+                    f"（{len(deploy_result.deleted_files)}件削除）"
+                    if deploy_result.deleted_files
+                    else ""
+                )
+                + f" / {backup_summary} / {health_summary}"
             ),
         }
     except Exception as exc:
@@ -452,7 +588,7 @@ def execute_verify(
         username=project.ssh_username,
         private_key_path=project.private_key_reference,
         host_key_fingerprint=project.host_key_fingerprint,
-        passphrase=passphrase,
+        passphrase=_resolve_passphrase(store, project, passphrase),
     )
     try:
         scan_res = scan_recovery_artifacts(sftp, mapping.remote_root)
@@ -570,7 +706,7 @@ def execute_restore(
         username=project.ssh_username,
         private_key_path=project.private_key_reference,
         host_key_fingerprint=project.host_key_fingerprint,
-        passphrase=passphrase,
+        passphrase=_resolve_passphrase(store, project, passphrase),
     )
     try:
         # Pre-scan for temporary files
@@ -616,3 +752,108 @@ def execute_restore(
     finally:
         sftp.close()
         client.close()
+
+
+def execute_prune_backups(
+    store: ProjectStore,
+    project: Project,
+    *,
+    keep_latest: int = 10,
+    max_age_days: int = 30,
+    dry_run: bool = False,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    store.initialize()
+    backups = store.list_backups(project.project_id)
+    candidates = select_prune_candidates(
+        backups,
+        keep_latest=keep_latest,
+        max_age_days=max_age_days,
+    )
+    candidate_payload = [
+        {
+            "backup_id": item.backup_id,
+            "created_at": item.created_at.isoformat(),
+            "file_count": item.file_count,
+            "total_bytes": item.total_bytes,
+            "status": item.status,
+            "backup_directory": item.backup_directory,
+        }
+        for item in candidates
+    ]
+    if dry_run or not candidates:
+        return {
+            "status": "dry_run" if dry_run else "no_changes",
+            "project": project.name,
+            "keep_latest": keep_latest,
+            "max_age_days": max_age_days,
+            "candidate_count": len(candidates),
+            "deleted_count": 0,
+            "candidates": candidate_payload,
+            "deleted": [],
+            "missing_remote": [],
+        }
+
+    security = store.security_status(project.project_id)
+    if security.state != "secure":
+        raise OperationError(
+            f"接続先の確認コードがOS資格情報ストアで保護されていないため実行できません: {security.message}"
+        )
+
+    mapping_id = project.mappings[0].mapping_id if project.mappings else "backup-prune"
+    op = store.start_operation(
+        project_id=project.project_id,
+        mapping_id=mapping_id,
+        kind="backup_delete",
+        details={
+            "mode": "write",
+            "keep_latest": keep_latest,
+            "max_age_days": max_age_days,
+            "candidate_count": len(candidates),
+        },
+    )
+    client, sftp = connect_sftp(
+        host=project.ssh_host,
+        port=project.ssh_port,
+        username=project.ssh_username,
+        private_key_path=project.private_key_reference,
+        host_key_fingerprint=project.host_key_fingerprint,
+        passphrase=_resolve_passphrase(store, project, passphrase),
+    )
+    deleted: list[str] = []
+    missing_remote: list[str] = []
+    try:
+        for candidate in candidates:
+            removed = delete_remote_backup(sftp, candidate.backup_directory)
+            store.set_backup_status(candidate.backup_id, "deleted")
+            deleted.append(candidate.backup_id)
+            if not removed:
+                missing_remote.append(candidate.backup_id)
+        store.finish_operation(
+            op.operation_id,
+            status="succeeded",
+            details={
+                "deleted_count": len(deleted),
+                "missing_remote_count": len(missing_remote),
+            },
+        )
+        return {
+            "status": "success",
+            "project": project.name,
+            "keep_latest": keep_latest,
+            "max_age_days": max_age_days,
+            "candidate_count": len(candidates),
+            "deleted_count": len(deleted),
+            "candidates": candidate_payload,
+            "deleted": deleted,
+            "missing_remote": missing_remote,
+        }
+    except Exception as exc:
+        for deleted_id in deleted:
+            store.set_backup_status(deleted_id, "deleted")
+        store.finish_operation(op.operation_id, status="failed", error=str(exc))
+        raise
+    finally:
+        sftp.close()
+        client.close()
+

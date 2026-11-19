@@ -6,6 +6,7 @@ from typing import Protocol
 
 SERVICE_NAME = "Docker XServer Sync"
 ACCOUNT_PREFIX = "host-key:"
+PASSPHRASE_PREFIX = "ssh-passphrase:"
 
 
 class SecureStoreError(RuntimeError):
@@ -25,6 +26,10 @@ def host_key_reference(project_id: str) -> str:
     return f"keyring://{ACCOUNT_PREFIX}{project_id}"
 
 
+def ssh_passphrase_reference(project_id: str) -> str:
+    return f"keyring://{PASSPHRASE_PREFIX}{project_id}"
+
+
 def _account_from_reference(reference: str) -> str:
     prefix = "keyring://"
     if not reference.startswith(prefix):
@@ -32,6 +37,16 @@ def _account_from_reference(reference: str) -> str:
     account = reference[len(prefix) :]
     if not account.startswith(ACCOUNT_PREFIX):
         raise SecureStoreError("Secure-store reference is not a host-key entry")
+    return account
+
+
+def _passphrase_account_from_reference(reference: str) -> str:
+    prefix = "keyring://"
+    if not reference.startswith(prefix):
+        raise SecureStoreError(f"Unsupported secure-store reference: {reference!r}")
+    account = reference[len(prefix) :]
+    if not account.startswith(PASSPHRASE_PREFIX):
+        raise SecureStoreError("Secure-store reference is not an SSH passphrase entry")
     return account
 
 
@@ -79,6 +94,34 @@ class KeyringHostKeyStore:
         except Exception as exc:
             raise SecureStoreError(f"Cannot delete from the OS credential store: {exc}") from exc
 
+    def store_passphrase(self, project_id: str, passphrase: str) -> str:
+        reference = ssh_passphrase_reference(project_id)
+        account = _passphrase_account_from_reference(reference)
+        try:
+            self._keyring.set_password(SERVICE_NAME, account, passphrase)
+            verified = self._keyring.get_password(SERVICE_NAME, account)
+        except Exception as exc:
+            raise SecureStoreError(f"Cannot write SSH passphrase to the OS credential store: {exc}") from exc
+        if verified != passphrase:
+            raise SecureStoreError("OS credential-store verification failed")
+        return reference
+
+    def retrieve_passphrase(self, reference: str) -> str | None:
+        account = _passphrase_account_from_reference(reference)
+        try:
+            return self._keyring.get_password(SERVICE_NAME, account)
+        except Exception as exc:
+            raise SecureStoreError(f"Cannot read SSH passphrase from the OS credential store: {exc}") from exc
+
+    def delete_passphrase(self, reference: str) -> None:
+        account = _passphrase_account_from_reference(reference)
+        try:
+            current = self._keyring.get_password(SERVICE_NAME, account)
+            if current is not None:
+                self._keyring.delete_password(SERVICE_NAME, account)
+        except Exception as exc:
+            raise SecureStoreError(f"Cannot delete SSH passphrase from the OS credential store: {exc}") from exc
+
 
 @dataclass
 class MemoryHostKeyStore:
@@ -103,4 +146,21 @@ class MemoryHostKeyStore:
         return self.values.get(reference)
 
     def delete(self, reference: str) -> None:
+        self.values.pop(reference, None)
+
+    def store_passphrase(self, project_id: str, passphrase: str) -> str:
+        if self.fail_writes:
+            raise SecureStoreError("Injected secure-store write failure")
+        reference = ssh_passphrase_reference(project_id)
+        self.values[reference] = passphrase
+        return reference
+
+    def retrieve_passphrase(self, reference: str) -> str | None:
+        if self.fail_reads:
+            raise SecureStoreError("Injected secure-store read failure")
+        _passphrase_account_from_reference(reference)
+        return self.values.get(reference)
+
+    def delete_passphrase(self, reference: str) -> None:
+        _passphrase_account_from_reference(reference)
         self.values.pop(reference, None)

@@ -66,3 +66,72 @@ def test_plan_rejects_validity_minutes_over_60(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.code == 2
+
+
+def test_auto_sync_cli_accepts_full_policy_flags() -> None:
+    from dxsync.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "auto-sync",
+            "my-site",
+            "--backup-mode",
+            "add_only",
+            "--remote-only-policy",
+            "ask",
+            "--delete-path",
+            "old/a.js",
+            "--delete-path",
+            "old/b.css",
+            "--no-health-check",
+            "--health-check-path",
+            "/healthz",
+            "--validity-minutes",
+            "45",
+            "--max-changed-files",
+            "200",
+            "--max-update-files",
+            "50",
+            "--max-upload-mib",
+            "128",
+            "--yes",
+            "--json",
+        ]
+    )
+    assert args.backup_mode == "add_only"
+    assert args.remote_only_policy == "ask"
+    assert args.delete_path == ["old/a.js", "old/b.css"]
+    assert args.no_health_check is True
+    assert args.health_check_path == "/healthz"
+    assert args.validity_minutes == 45
+    assert args.max_changed_files == 200
+    assert args.max_update_files == 50
+    assert args.max_upload_mib == 128
+    assert args.yes is True
+    assert args.json is True
+
+
+def test_backup_prune_cli_flags_and_dry_run_vs_confirm() -> None:
+    from dxsync.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "backup",
+            "prune",
+            "my-site",
+            "--keep-latest",
+            "5",
+            "--max-age-days",
+            "14",
+            "--dry-run",
+            "--json",
+        ]
+    )
+    assert args.keep_latest == 5
+    assert args.max_age_days == 14
+    assert args.dry_run is True
+    assert args.json is True
+

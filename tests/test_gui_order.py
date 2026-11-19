@@ -464,7 +464,7 @@ def test_main_window_help_menu_has_online_manual(tmp_path: Path, monkeypatch) ->
     window._open_online_manual()
 
     assert len(opened_urls) == 1
-    assert "StayHomeLabNet/docker-xserver-sync/blob/main/docs/manual.md" in opened_urls[0]
+    assert opened_urls[0] == "https://stayhomelab.net/help/docker-xserver-sync/"
     window.close()
 
 
@@ -1300,3 +1300,160 @@ def test_refresh_ready_plan_updates_summary_when_validated_plan_expires(
     assert not window.deploy_button.isEnabled()
     assert "計画の有効期限が切れました" in window.summary.text()
     window.close()
+
+
+def test_passphrase_session_cache_and_opt_in_keyring(tmp_path: Path) -> None:
+    app()
+    secure_store = MemoryHostKeyStore()
+    store = ProjectStore(tmp_path / "state.db", secure_store)
+    mapping_a = SyncMapping.create("a", str(tmp_path), "/home/user/a")
+    project_a = Project.create(
+        name="Alpha",
+        site_type=SiteType.STATIC_SITE,
+        domain="a.example.com",
+        ssh_host="sv1.xsrv.jp",
+        ssh_username="user",
+        host_key_fingerprint="SHA256:aaa",
+        private_key_reference="/tmp/key_a",
+        mappings=(mapping_a,),
+    )
+    mapping_b = SyncMapping.create("b", str(tmp_path), "/home/user/b")
+    project_b = Project.create(
+        name="Beta",
+        site_type=SiteType.STATIC_SITE,
+        domain="b.example.com",
+        ssh_host="sv1.xsrv.jp",
+        ssh_username="user",
+        host_key_fingerprint="SHA256:bbb",
+        private_key_reference="/tmp/key_b",
+        mappings=(mapping_b,),
+    )
+    store.save(project_a)
+    store.save(project_b)
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    idx_a = window.project_combo.findData(project_a.project_id)
+    idx_b = window.project_combo.findData(project_b.project_id)
+
+    window.project_combo.setCurrentIndex(idx_a)
+    assert not window.save_passphrase_check.isChecked()
+    assert window.save_passphrase_check.isEnabled()
+
+    window.passphrase_edit.setText("alpha-session")
+    assert window._resolve_gui_passphrase() == "alpha-session"
+    assert not store.has_saved_ssh_passphrase(project_a.project_id)
+
+    # Switch to Beta and back to Alpha: session cache restores Alpha without saving to keyring
+    window.project_combo.setCurrentIndex(idx_b)
+    assert window.passphrase_edit.text() == ""
+    window.project_combo.setCurrentIndex(idx_a)
+    assert window.passphrase_edit.text() == "alpha-session"
+    assert not window.save_passphrase_check.isChecked()
+
+    # Opt in to OS credential store
+    window.save_passphrase_check.setChecked(True)
+    assert store.has_saved_ssh_passphrase(project_a.project_id)
+    assert store.get_ssh_passphrase(project_a.project_id) == "alpha-session"
+
+    # Re-open window: persisted passphrase loads automatically when opted in
+    window.close()
+    assert window._session_passphrases == {}
+
+    window2 = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window2.project_combo.setCurrentIndex(window2.project_combo.findData(project_a.project_id))
+    assert window2.save_passphrase_check.isChecked()
+    assert window2.passphrase_edit.text() == "alpha-session"
+
+    # Opt out deletes from OS credential store
+    window2.save_passphrase_check.setChecked(False)
+    assert not store.has_saved_ssh_passphrase(project_a.project_id)
+    assert store.get_ssh_passphrase(project_a.project_id) is None
+    window2.close()
+
+
+def test_history_dialog_retention_selection_and_backup_delete_handler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from PySide6.QtCore import Qt
+    from dxsync.history_dialog import HistoryDialog
+    from dxsync.storage import BackupRecord
+
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    mapping = SyncMapping.create("main", str(tmp_path), "/home/user/site")
+    project = Project.create(
+        name="Static Site",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="sv1.xsrv.jp",
+        ssh_username="user",
+        host_key_fingerprint="SHA256:aaa",
+        private_key_reference="/tmp/key",
+        mappings=(mapping,),
+    )
+    store.save(project)
+
+    now = datetime.now(timezone.utc)
+    recent_bk = BackupRecord(
+        "bk-recent",
+        project.project_id,
+        mapping.mapping_id,
+        "plan-1",
+        "/home/user/.dxsync/backups/p/bk-recent",
+        "/home/user/.dxsync/backups/p/bk-recent/manifest.json",
+        now - timedelta(days=2),
+        1,
+        100,
+    )
+    old_bk = BackupRecord(
+        "bk-old",
+        project.project_id,
+        mapping.mapping_id,
+        "plan-2",
+        "/home/user/.dxsync/backups/p/bk-old",
+        "/home/user/.dxsync/backups/p/bk-old/manifest.json",
+        now - timedelta(days=45),
+        2,
+        200,
+    )
+    store.save_backup(recent_bk)
+    store.save_backup(old_bk)
+
+    dialog = HistoryDialog(store, project.project_id)
+    assert dialog.backups_table.rowCount() == 2
+    assert not dialog.delete_backups_button.isEnabled()
+
+    dialog.keep_latest_spin.setValue(1)
+    dialog.max_age_days_spin.setValue(30)
+    dialog.select_prune_button.click()
+
+    assert dialog.checked_delete_backup_ids() == ("bk-old",)
+    assert dialog.delete_backups_button.isEnabled()
+
+    monkeypatch.setattr(
+        "dxsync.history_dialog.QMessageBox.question",
+        lambda *_args, **_kwargs: QMessageBox.Yes,
+    )
+    dialog.delete_backups_button.click()
+    assert dialog.selected_delete_backup_ids == ("bk-old",)
+    assert dialog.result() == QDialog.Accepted
+
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window._current_backup_id = "bk-old"
+    window._backup_delete_completed((("bk-old",), ()))
+    assert store.get_backup("bk-old").status == "deleted"
+    assert window._current_backup_id is None
+    assert "1件 削除しました" in window.summary.text()
+    window.close()
+
+

@@ -20,6 +20,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read project version
+        id: meta
+        run: |
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Install system build dependencies
         run: |
           sudo apt-get update
@@ -39,7 +45,7 @@ jobs:
       - name: Upload Linux release file
         uses: actions/upload-artifact@v7
         with:
-          name: docker-xserver-sync-linux-v1.0.0
+          name: docker-xserver-sync-linux-v${{ steps.meta.outputs.version }}
           path: dist/Docker XServer Sync-Linux-x64.tar.gz
           if-no-files-found: error
           retention-days: 14

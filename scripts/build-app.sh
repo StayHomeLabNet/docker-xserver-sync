@@ -9,6 +9,7 @@ build_root=$(/usr/bin/mktemp -d /private/tmp/dxsync-macos-build.XXXXXX)
 trap '/bin/rm -rf "$build_root"' EXIT
 build_venv="$build_root/venv"
 UV_PROJECT_ENVIRONMENT="$build_venv" uv sync --python 3.12 --extra dev --extra gui --extra ssh --extra build
+app_version=$("$build_venv/bin/python" -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 "$build_venv/bin/pytest" -v
 
 "$build_venv/bin/python" -m nuitka \
@@ -17,9 +18,9 @@ UV_PROJECT_ENVIRONMENT="$build_venv" uv sync --python 3.12 --extra dev --extra g
   --macos-create-app-bundle \
   --macos-app-mode=gui \
   --macos-app-name="Docker XServer Sync" \
-  --macos-app-version="1.0.0" \
+  --macos-app-version="$app_version" \
   --product-name="Docker XServer Sync" \
-  --product-version="1.0.0" \
+  --product-version="$app_version" \
   --output-filename="Docker XServer Sync" \
   --macos-app-icon="$repo_root/assets/app-icon.icns" \
   --enable-plugin=pyside6 \
@@ -40,6 +41,14 @@ fi
 executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")
 DXSYNC_STATE_DIR="$build_root/state" "$app_path/Contents/MacOS/$executable" --smoke-test
 
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  print "Signing macOS bundle with identity: $APPLE_SIGNING_IDENTITY"
+  /usr/bin/codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path"
+  /usr/bin/codesign --verify --deep --strict "$app_path"
+else
+  print "APPLE_SIGNING_IDENTITY is not set; skipping Apple codesign."
+fi
+
 mkdir -p "$repo_root/dist"
 zip_path="$repo_root/dist/Docker XServer Sync-macOS-arm64.zip"
 if [[ -e "$zip_path" ]]; then
@@ -47,4 +56,19 @@ if [[ -e "$zip_path" ]]; then
 fi
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
 
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" && -n "${APPLE_NOTARY_KEY:-}" && -n "${APPLE_NOTARY_KEY_ID:-}" && -n "${APPLE_NOTARY_ISSUER_ID:-}" ]]; then
+  notary_key_file="$build_root/AuthKey.p8"
+  print -r -- "$APPLE_NOTARY_KEY" > "$notary_key_file"
+  /bin/chmod 600 "$notary_key_file"
+  /usr/bin/xcrun notarytool submit "$zip_path" \
+    --key "$notary_key_file" \
+    --key-id "$APPLE_NOTARY_KEY_ID" \
+    --issuer "$APPLE_NOTARY_ISSUER_ID" \
+    --wait
+  /usr/bin/xcrun stapler staple "$app_path"
+  /bin/rm "$zip_path"
+  /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
+fi
+
+/usr/bin/shasum -a 256 "$zip_path"
 print "$zip_path"

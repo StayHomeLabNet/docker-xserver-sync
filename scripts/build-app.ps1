@@ -12,11 +12,17 @@ if (-not $IsWindows) {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+$pyprojectContent = Get-Content -LiteralPath (Join-Path $repoRoot "pyproject.toml") -Raw
+if ($pyprojectContent -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+    throw "Could not parse project version from pyproject.toml."
+}
+$appVersion = $Matches[1]
+
 $buildRoot = Join-Path $env:TEMP ("dxsync-windows-build-" + [guid]::NewGuid().ToString("N"))
 $buildVenv = Join-Path $buildRoot "venv"
 $distDirectory = Join-Path $repoRoot "dist"
 $zipPath = Join-Path $distDirectory "Docker XServer Sync-Windows-x64.zip"
-$installerPath = Join-Path $distDirectory "Docker-XServer-Sync-Setup-v1.0.0.exe"
+$installerPath = Join-Path $distDirectory "Docker-XServer-Sync-Setup-v$appVersion.exe"
 
 New-Item -ItemType Directory -Path $buildRoot | Out-Null
 
@@ -31,8 +37,8 @@ try {
         --standalone `
         --windows-console-mode=disable `
         --product-name="Docker XServer Sync" `
-        --product-version="1.0.0" `
-        --file-version="1.0.0" `
+        --product-version="$appVersion" `
+        --file-version="$appVersion" `
         --windows-icon-from-ico="$repoRoot/assets/app-icon.ico" `
         --output-filename="Docker XServer Sync.exe" `
         --enable-plugin=pyside6 `
@@ -94,7 +100,7 @@ try {
 
         $env:DXSYNC_APP_SOURCE = $appDirectory
         $env:DXSYNC_OUTPUT_DIR = $distDirectory
-        & $iscc scripts/windows-installer.iss
+        & $iscc "/DMyAppVersion=$appVersion" scripts/windows-installer.iss
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
             throw "Windows installer compilation failed."
         }

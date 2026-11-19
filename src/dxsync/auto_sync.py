@@ -2,71 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
 )
 
+from .auto_sync_policy import AutoSyncPreferences, auto_sync_policy_issues
 from .health import normalize_health_check_path
-
-
-@dataclass(frozen=True)
-class AutoSyncPreferences:
-    backup_mode: str = "always"
-    remote_only_policy: str = "keep"
-    health_check_enabled: bool = True
-    health_check_path: str = "/"
-    max_changed_files: int = 1000
-    max_update_files: int = 500
-    max_upload_mib: int = 1024
-    require_domain_confirmation: bool = True
-
-    def resolved_backup_skip(self, update_count: int) -> bool:
-        if self.backup_mode == "skip":
-            return True
-        return self.backup_mode == "add_only" and update_count == 0
-
-
-def auto_sync_policy_issues(
-    preferences: AutoSyncPreferences,
-    *,
-    add_count: int,
-    update_count: int,
-    remote_only_count: int,
-    upload_bytes: int,
-) -> tuple[str, ...]:
-    issues: list[str] = []
-    changed_count = add_count + update_count
-    if preferences.remote_only_policy == "stop" and remote_only_count:
-        issues.append(
-            f"REMOTE_ONLYが{remote_only_count}件あるため停止設定に該当しました。"
-        )
-    if preferences.max_changed_files and changed_count > preferences.max_changed_files:
-        issues.append(
-            f"ADD＋UPDATE {changed_count}件が上限"
-            f"{preferences.max_changed_files}件を超えています。"
-        )
-    if preferences.max_update_files and update_count > preferences.max_update_files:
-        issues.append(
-            f"UPDATE {update_count}件が上限"
-            f"{preferences.max_update_files}件を超えています。"
-        )
-    max_upload_bytes = preferences.max_upload_mib * 1024 * 1024
-    if max_upload_bytes and upload_bytes > max_upload_bytes:
-        issues.append(
-            f"転送量{upload_bytes:,} bytesが上限"
-            f"{preferences.max_upload_mib} MiBを超えています。"
-        )
-    return tuple(issues)
 
 
 def _prefix(project_id: str) -> str:
@@ -130,7 +85,7 @@ class AutoSyncSettingsDialog(QDialog):
     def __init__(self, preferences: AutoSyncPreferences, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("自動実行設定")
-        self.resize(620, 440)
+        self.resize(650, 470)
         layout = QVBoxLayout(self)
         note = QLabel(
             "この設定は選択中のプロジェクトに保存されます。自動実行でも、"
@@ -151,6 +106,10 @@ class AutoSyncSettingsDialog(QDialog):
 
         self.remote_only_policy = QComboBox()
         self.remote_only_policy.addItem("削除せず残す（推奨）", "keep")
+        self.remote_only_policy.addItem(
+            "確認画面で削除候補を選択する（削除時は自動バックアップ）",
+            "ask",
+        )
         self.remote_only_policy.addItem("存在したら自動実行を停止", "stop")
         self.remote_only_policy.setCurrentIndex(
             max(
@@ -187,8 +146,8 @@ class AutoSyncSettingsDialog(QDialog):
         layout.addLayout(form)
 
         warning = QLabel(
-            "自動実行ではREMOTE_ONLYを削除しません。設定上限を超えた場合、"
-            "バックアップ・再検証・HTTPS確認に失敗した場合は自動的に停止します。"
+            "「削除せず残す」または「常にスキップ」設定時はREMOTE_ONLYを削除しません。"
+            "設定上限を超えた場合、バックアップ・再検証・HTTPS確認に失敗した場合は自動的に停止します。"
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #8a4b08;")
@@ -250,13 +209,26 @@ class AutoSyncApprovalDialog(QDialog):
         backup_skipped: bool,
         health_check_path: str | None,
         require_domain_confirmation: bool = True,
+        remote_only_paths: tuple[str, ...] = (),
+        allow_remote_only_deletion: bool = False,
+        backup_mode: str = "always",
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.domain = domain
+        self._add_count = add_count
+        self._update_count = update_count
+        self._remote_only_count = remote_only_count
+        self._backup_skipped = backup_skipped
+        self._backup_mode = backup_mode
+        self._allow_remote_only_deletion = (
+            allow_remote_only_deletion
+            and bool(remote_only_paths)
+            and backup_mode != "skip"
+        )
         self.require_domain_confirmation = require_domain_confirmation
         self.setWindowTitle("安全同期の自動実行を確認")
-        self.resize(640, 460)
+        self.resize(700, 680 if self._allow_remote_only_deletion else 460)
         layout = QVBoxLayout(self)
         title = QLabel(
             "ドライランが完了しました。承認後は再検証・バックアップ・同期を"
@@ -271,17 +243,103 @@ class AutoSyncApprovalDialog(QDialog):
         form.addRow("転送先", QLabel(remote_root))
         form.addRow("ADD", QLabel(f"{add_count}件"))
         form.addRow("UPDATE", QLabel(f"{update_count}件"))
-        form.addRow("REMOTE_ONLY", QLabel(f"{remote_only_count}件（削除しません）"))
+        self.remote_only_label = QLabel(f"{remote_only_count}件（削除しません）")
+        form.addRow("REMOTE_ONLY", self.remote_only_label)
         form.addRow("転送量", QLabel(f"{upload_bytes:,} bytes"))
-        form.addRow(
-            "バックアップ",
-            QLabel("スキップ（復元不可）" if backup_skipped else "作成する"),
+        self.backup_label = QLabel(
+            "スキップ（復元不可）" if backup_skipped else "作成する"
         )
+        form.addRow("バックアップ", self.backup_label)
         form.addRow(
             "HTTPS確認",
             QLabel(health_check_path or "実行しない"),
         )
         layout.addLayout(form)
+
+        self.deletion_table = QTableWidget(0, 1)
+        self.deletion_table.setHorizontalHeaderLabels(
+            ("削除候補（初期状態はすべて未選択）",)
+        )
+        self.deletion_table.horizontalHeader().setStretchLastSection(True)
+        self.deletion_table.setMaximumHeight(160)
+        self.deletion_table.setVisible(self._allow_remote_only_deletion)
+        if self._allow_remote_only_deletion:
+            self.deletion_table.setRowCount(len(remote_only_paths))
+            for row, path in enumerate(remote_only_paths):
+                item = QTableWidgetItem(path)
+                item.setFlags(
+                    (item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                )
+                item.setCheckState(Qt.Unchecked)
+                self.deletion_table.setItem(row, 0, item)
+        self.deletion_table.itemChanged.connect(self._deletion_selection_changed)
+
+        preserved_folders = (
+            tuple(
+                sorted(
+                    {
+                        path.rsplit("/", 1)[0] + "/"
+                        for path in remote_only_paths
+                        if "/" in path
+                    }
+                )
+            )
+            if self._allow_remote_only_deletion
+            else ()
+        )
+        self.preserve_table = QTableWidget(len(preserved_folders), 1)
+        self.preserve_table.setHorizontalHeaderLabels(("削除しないフォルダー",))
+        self.preserve_table.horizontalHeader().setStretchLastSection(True)
+        self.preserve_table.setMaximumHeight(120)
+        self.preserve_table.setVisible(bool(preserved_folders))
+        for row, path in enumerate(preserved_folders):
+            item = QTableWidgetItem(path)
+            item.setFlags(
+                (item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+            )
+            item.setCheckState(Qt.Unchecked)
+            self.preserve_table.setItem(row, 0, item)
+        self.preserve_table.itemChanged.connect(self._preserved_folders_changed)
+
+        if self._allow_remote_only_deletion:
+            deletion_note = QLabel(
+                "削除するファイルだけを選択してください。選択したファイルは先にバックアップされ、"
+                "再検証と最終同期で公開領域から削除されます。"
+            )
+            deletion_note.setWordWrap(True)
+            layout.addWidget(deletion_note)
+        elif allow_remote_only_deletion and remote_only_paths and backup_mode == "skip":
+            skip_note = QLabel(
+                "バックアップ設定が「常にスキップ」のため、自動実行ではREMOTE_ONLYを削除できません。"
+            )
+            skip_note.setWordWrap(True)
+            skip_note.setStyleSheet("color: #8a4b08;")
+            layout.addWidget(skip_note)
+
+        layout.addWidget(self.deletion_table)
+        deletion_buttons = QHBoxLayout()
+        self.select_all_deletions_button = QPushButton("削除候補をすべて選択")
+        self.clear_all_deletions_button = QPushButton("削除候補をすべて解除")
+        self.select_all_deletions_button.clicked.connect(
+            self._select_all_deletions
+        )
+        self.clear_all_deletions_button.clicked.connect(
+            self._clear_all_deletions
+        )
+        self.select_all_deletions_button.setVisible(self._allow_remote_only_deletion)
+        self.clear_all_deletions_button.setVisible(self._allow_remote_only_deletion)
+        deletion_buttons.addWidget(self.select_all_deletions_button)
+        deletion_buttons.addWidget(self.clear_all_deletions_button)
+        deletion_buttons.addStretch(1)
+        layout.addLayout(deletion_buttons)
+
+        if preserved_folders:
+            preserve_note = QLabel(
+                "チェックしたフォルダー以下は、上の削除候補で選択しても削除されません。"
+            )
+            preserve_note.setWordWrap(True)
+            layout.addWidget(preserve_note)
+        layout.addWidget(self.preserve_table)
 
         self.destination_check = QCheckBox(
             "転送先と変更件数を確認しました"
@@ -289,8 +347,11 @@ class AutoSyncApprovalDialog(QDialog):
         self.workflow_check = QCheckBox(
             "承認後は各段階を自動実行し、途中の確認画面を表示しないことを理解しました"
         )
+        self.delete_check = QCheckBox("選択したファイルを削除することを確認しました")
+        self.delete_check.setVisible(False)
         layout.addWidget(self.destination_check)
         layout.addWidget(self.workflow_check)
+        layout.addWidget(self.delete_check)
         self.domain_prompt = QLabel(
             f"確認のため「{domain}」と入力してください。"
         )
@@ -313,15 +374,120 @@ class AutoSyncApprovalDialog(QDialog):
         self.apply_button.setEnabled(False)
         self.destination_check.toggled.connect(self._update_enabled)
         self.workflow_check.toggled.connect(self._update_enabled)
+        self.delete_check.toggled.connect(self._update_enabled)
         self.domain_edit.textChanged.connect(self._update_enabled)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
+    def selected_delete_paths(self) -> tuple[str, ...]:
+        if not self._allow_remote_only_deletion:
+            return ()
+        preserved = self.preserved_folder_paths()
+        return tuple(
+            item.text()
+            for row in range(self.deletion_table.rowCount())
+            if (item := self.deletion_table.item(row, 0)) is not None
+            and item.checkState() == Qt.Checked
+            and not any(item.text().startswith(folder) for folder in preserved)
+        )
+
+    def preserved_folder_paths(self) -> tuple[str, ...]:
+        return tuple(
+            item.text()
+            for row in range(self.preserve_table.rowCount())
+            if (item := self.preserve_table.item(row, 0)) is not None
+            and item.checkState() == Qt.Checked
+        )
+
+    def should_skip_backup(self) -> bool:
+        if self._backup_mode == "skip":
+            return True
+        if self._backup_mode == "add_only":
+            return self._update_count == 0 and not self.selected_delete_paths()
+        if self._backup_skipped and not self.selected_delete_paths():
+            return True
+        return False
+
+    def _select_all_deletions(self) -> None:
+        self.deletion_table.blockSignals(True)
+        try:
+            for row in range(self.deletion_table.rowCount()):
+                item = self.deletion_table.item(row, 0)
+                if item is not None and (item.flags() & Qt.ItemIsEnabled):
+                    item.setCheckState(Qt.Checked)
+        finally:
+            self.deletion_table.blockSignals(False)
+        self._deletion_selection_changed()
+
+    def _clear_all_deletions(self) -> None:
+        self.deletion_table.blockSignals(True)
+        try:
+            for row in range(self.deletion_table.rowCount()):
+                item = self.deletion_table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(Qt.Unchecked)
+        finally:
+            self.deletion_table.blockSignals(False)
+        self._deletion_selection_changed()
+
+    def _preserved_folders_changed(self, *_args) -> None:
+        preserved = self.preserved_folder_paths()
+        self.deletion_table.blockSignals(True)
+        try:
+            for row in range(self.deletion_table.rowCount()):
+                item = self.deletion_table.item(row, 0)
+                if item is None:
+                    continue
+                blocked = any(item.text().startswith(folder) for folder in preserved)
+                if blocked:
+                    item.setCheckState(Qt.Unchecked)
+                flags = item.flags()
+                item.setFlags(
+                    flags & ~Qt.ItemIsEnabled
+                    if blocked
+                    else flags | Qt.ItemIsEnabled
+                )
+        finally:
+            self.deletion_table.blockSignals(False)
+        self._deletion_selection_changed()
+
+    def _deletion_selection_changed(self, *_args) -> None:
+        selected = self.selected_delete_paths()
+        delete_count = len(selected)
+        if delete_count > 0:
+            self.remote_only_label.setText(
+                f"{self._remote_only_count}件（うち {delete_count}件を削除）"
+            )
+            self.delete_check.setText(
+                f"選択した{delete_count}件を削除することを確認しました"
+            )
+            self.delete_check.setVisible(True)
+            if self._backup_mode == "add_only" and self._update_count == 0:
+                self.backup_label.setText("作成する（削除対象の退避が必要）")
+            else:
+                self.backup_label.setText(
+                    "スキップ（復元不可）" if self.should_skip_backup() else "作成する"
+                )
+        else:
+            self.remote_only_label.setText(
+                f"{self._remote_only_count}件（削除しません）"
+            )
+            self.delete_check.setChecked(False)
+            self.delete_check.setVisible(False)
+            self.backup_label.setText(
+                "スキップ（復元不可）" if self.should_skip_backup() else "作成する"
+            )
+        self._update_enabled()
+
     def _update_enabled(self) -> None:
+        selected_count = len(self.selected_delete_paths())
+        has_work = (self._add_count + self._update_count + selected_count) > 0
         self.apply_button.setEnabled(
-            self.destination_check.isChecked()
+            has_work
+            and self.destination_check.isChecked()
             and self.workflow_check.isChecked()
+            and (selected_count == 0 or self.delete_check.isChecked())
             and (
                 not self.require_domain_confirmation
                 or self.domain_edit.text().strip() == self.domain

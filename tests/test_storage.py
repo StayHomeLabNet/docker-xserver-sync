@@ -218,3 +218,37 @@ def test_operation_journal_and_backup_history(tmp_path: Path) -> None:
     assert store.get_backup(backup.backup_id) == backup
     assert store.set_backup_status(backup.backup_id, "restored")
     assert store.get_backup(backup.backup_id).status == "restored"
+
+
+def test_project_store_ssh_passphrase_opt_in_and_cleanup(tmp_path: Path) -> None:
+    mapping = SyncMapping.create("public", str(tmp_path), "/home/example/public_html")
+    project = Project.create(
+        name="Example",
+        site_type=SiteType.WORDPRESS,
+        domain="example.com",
+        ssh_host="example.xsrv.jp",
+        ssh_username="example",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference="/tmp/key",
+        mappings=(mapping,),
+    )
+    secure_store = MemoryHostKeyStore()
+    store = ProjectStore(tmp_path / "state.db", secure_store)
+    store.save(project)
+
+    assert not store.has_saved_ssh_passphrase(project.project_id)
+    assert store.get_ssh_passphrase(project.project_id) is None
+
+    ref = store.save_ssh_passphrase(project.project_id, "s3cr3t-pass")
+    assert ref == f"keyring://ssh-passphrase:{project.project_id}"
+    assert store.has_saved_ssh_passphrase(project.project_id)
+    assert store.get_ssh_passphrase(project.project_id) == "s3cr3t-pass"
+
+    store.delete_ssh_passphrase(project.project_id)
+    assert not store.has_saved_ssh_passphrase(project.project_id)
+    assert store.get_ssh_passphrase(project.project_id) is None
+
+    store.save_ssh_passphrase(project.project_id, "s3cr3t-again")
+    assert store.delete(project.project_id)
+    assert secure_store.values == {}
+

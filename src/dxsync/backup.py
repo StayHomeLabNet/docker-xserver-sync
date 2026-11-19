@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import re
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Any, BinaryIO, Callable, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Protocol, Sequence
 
 from .cancellation import CancellationToken
 from .models import ChangeType, SyncPlan
 from .validation import normalize_remote_root
+
+if TYPE_CHECKING:
+    from .storage import BackupRecord
 
 
 MANIFEST_NAME = ".dxsync-backup-manifest.json"
@@ -268,3 +272,100 @@ class RemoteBackupEngine:
             total_bytes=total_bytes,
             created_at=created_at,
         )
+
+
+def select_prune_candidates(
+    backups: Sequence["BackupRecord"],
+    *,
+    keep_latest: int = 10,
+    max_age_days: int = 30,
+    now: datetime | None = None,
+) -> tuple["BackupRecord", ...]:
+    if keep_latest < 0 or max_age_days < 0:
+        raise ValueError("keep_latest and max_age_days must be zero or positive")
+    if keep_latest == 0 and max_age_days == 0:
+        return ()
+    reference_now = now or datetime.now(timezone.utc)
+    if reference_now.tzinfo is None:
+        reference_now = reference_now.replace(tzinfo=timezone.utc)
+
+    active = sorted(
+        (backup for backup in backups if backup.status in {"available", "restored"}),
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    max_age = timedelta(days=max_age_days) if max_age_days > 0 else None
+    candidates: list["BackupRecord"] = []
+    for index, backup in enumerate(active):
+        if keep_latest > 0 and index < keep_latest:
+            continue
+        created_at = backup.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if max_age is not None and (reference_now - created_at) <= max_age:
+            continue
+        candidates.append(backup)
+    return tuple(candidates)
+
+
+def validate_backup_directory_for_delete(backup_directory: str) -> str:
+    normalized = normalize_remote_root(backup_directory)
+    parts = PurePosixPath(normalized).parts
+    if ".dxsync" not in parts:
+        raise BackupError(
+            f"Refusing to delete directory outside .dxsync/backups: {backup_directory}"
+        )
+    idx = parts.index(".dxsync")
+    if idx + 3 >= len(parts) or parts[idx + 1] != "backups":
+        raise BackupError(
+            f"Refusing to delete non-backup directory: {backup_directory}"
+        )
+    return normalized
+
+
+def delete_remote_backup(
+    sftp: Any,
+    backup_directory: str,
+    cancellation_token: CancellationToken | None = None,
+) -> bool:
+    cancel = cancellation_token or CancellationToken()
+    cancel.raise_if_cancelled()
+    normalized = validate_backup_directory_for_delete(backup_directory)
+
+    lstat_fn = getattr(sftp, "lstat", None) or getattr(sftp, "stat")
+    try:
+        root_stat = lstat_fn(normalized)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.ENOENT:
+            return False
+        raise
+    if stat.S_ISLNK(root_stat.st_mode):
+        raise BackupError(f"Refusing to delete symbolic link: {normalized}")
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise BackupError(f"Backup path is not a directory: {normalized}")
+
+    def _remove_dir_recursive(path: str) -> None:
+        cancel.raise_if_cancelled()
+        listdir_attr = getattr(sftp, "listdir_attr")
+        for entry in listdir_attr(path):
+            cancel.raise_if_cancelled()
+            name = getattr(entry, "filename", "")
+            if name in {"", ".", ".."}:
+                continue
+            child = f"{path}/{name}"
+            mode = entry.st_mode
+            if stat.S_ISLNK(mode):
+                raise BackupError(f"Refusing to delete symbolic link inside backup: {child}")
+            if stat.S_ISDIR(mode):
+                _remove_dir_recursive(child)
+            else:
+                sftp.remove(child)
+        rmdir_fn = getattr(sftp, "rmdir", None)
+        if callable(rmdir_fn):
+            rmdir_fn(path)
+
+    _remove_dir_recursive(normalized)
+    return True
+
