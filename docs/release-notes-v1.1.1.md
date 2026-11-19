@@ -37,3 +37,14 @@ Docker → XServer Sync **v1.1.1** improves discoverability, configuration acces
 
 ### 🧪 Tests
 - Added unit and end-to-end `MainWindow` tests covering the settings shortcut, policy summary label, dynamic warnings, approval-dialog skip toggles/persistence, and backup-skipped deployment (`212 passed`).
+
+---
+
+## SHA-256
+
+```text
+b1e60212c685abfb542410dffe52e3bbeec4087a63cf4ea4f96f139b7c7c2f5a  Docker XServer Sync-macOS-arm64.zip
+f4af7b50e3c98374245a1fdbee0c85e692fa480cff7375573c83e77ec1564e44  Docker XServer Sync-Windows-x64.zip
+2fc45c1de8f4bbc953f9aa34b263c910db40e8dfedb0d216cd92ce08611f223d  Docker-XServer-Sync-Setup-v1.1.1.exe
+fced709be35e254cca21c9ce943aa837dc89837761d4078011a68996b6859188  Docker XServer Sync-Linux-x64.tar.gz
+```
