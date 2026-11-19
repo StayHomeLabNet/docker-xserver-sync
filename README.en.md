@@ -51,6 +51,7 @@ Docker XServer Sync is a cross-platform desktop application designed to safely d
   - Atomic two-stage deployment: upload to temporary filenames, verify SHA-256 digests, and switch into place (with automatic rollback on failure)
   - Protection rules for production-generated directories (e.g. `uploads`, `storage`)
   - Auto-sync `REMOTE_ONLY` interactive deletion policy (`ask`) with "Do Not Delete Folders" safeguards (ideal for hashed static site builds)
+  - Direct main-window **Auto-Sync Settings…** shortcut & live policy summary, plus per-run backup skip toggle and preference persistence in the Auto-Sync confirmation dialog
   - Backup retention & approved cleanup UI in the History dialog (keep latest N / max age days)
   - In-session SSH key passphrase caching and explicit opt-in OS credential store persistence
   - Built-in update checker under the Help menu (GitHub Releases)

@@ -85,7 +85,8 @@ Docker → XServer Sync was designed specifically to bridge the gap between loca
 | │ Private Key: [ C:/Users/.../server_id.key              ] [Select Key…] [Passphrase not saved      ] │ |
 | │                                                                                                     │ |
 | │ [Force Overwrite] [Revalidate Plan] [Create Backup] [Approved Sync]         [Read-Only Dry Run]     │ |
-| │ [ ] Temporarily Unmask Credentials                                          [★ Auto Safe Sync]      │ |
+| │ [ ] Temporarily Unmask Credentials  [ ] Save Passphrase in OS Store           [★ Auto Safe Sync]      │ |
+| │                                    Auto-Sync Settings — Backup: Always…     [Auto-Sync Settings…]   │ |
 | └─────────────────────────────────────────────────────────────────────────────────────────────────────┘ |
 |                                                                                                       |
 | Status: Ready (or 4/4 Executing approved sync...)                                     [ Stop Process ]|
@@ -106,6 +107,7 @@ Docker → XServer Sync was designed specifically to bridge the gap between loca
 - **Verify (安全性確認)**: Inspects remote XServer storage for orphaned `.new` temporary files and legacy `.bak` archives.
 - **History…**: Opens the audit log and enables 1-click rollbacks from historical backups.
 - **Auto Safe Sync (安全同期を自動実行)**: Recommended standard workflow. Executes Dry Run → Revalidation → Backup → Sync in sequence.
+- **Auto-Sync Settings… (自動実行設定…)**: Opens per-project Auto Safe Sync settings (backup mode, `REMOTE_ONLY` policy, HTTPS health check, safety limits). The active policy summary is displayed directly next to the button.
 - **Read-Only Dry Run (読み取り専用ドライラン)**: Performs a remote differential scan without altering remote storage.
 - **Stop Process (処理を停止)**: Safely cancels ongoing transfers at the next file boundary.
 
