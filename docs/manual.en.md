@@ -224,11 +224,11 @@ Facilitates setting up multiple domains, staging environments, or similar config
 ## 6. Synchronization Modes & Execution Pipeline
 
 ### 1. Auto Safe Sync (安全同期を自動実行 - Recommended)
-Executes a 4-phase safe deployment (configurable per project via **Settings → Auto-Sync Settings…** for backup mode, `REMOTE_ONLY` handling (`keep` / `ask` / `stop`), HTTPS health-check path, and safety limits):
+Executes a 4-phase safe deployment (configurable per project via the **Auto-Sync Settings… (自動実行設定…)** button on the main window or **Settings → Auto-Sync Settings…** for backup mode (`always` / `add_only` / `skip`), `REMOTE_ONLY` handling (`keep` / `ask` / `stop`), HTTPS health-check path, and safety limits; the active policy summary is displayed directly next to the button):
 1. **Phase 1/4 (Dry Run)**: Discovers local and remote file differences and generates an immutable Sync Plan.
-2. **Unified Confirmation Dialog**: Review changes and safety thresholds. When `remote_only_policy` is `ask`, select `REMOTE_ONLY` deletion candidates individually or in bulk (folders under "Do Not Delete Folders" remain protected; any scheduled deletion forces a pre-sync backup).
+2. **Unified Confirmation Dialog**: Review changes and safety thresholds. You can toggle **Skip Backup Creation** for the current run and optionally check **Always skip backups in this project's Auto-Sync settings going forward** to persist `backup_mode="skip"`. When `remote_only_policy` is `ask`, selecting any `REMOTE_ONLY` deletion candidates automatically enforces a pre-sync backup and keeps protected folders intact.
 3. **Phase 2/4 (Revalidation)**: Validates that remote files have not drifted since the plan was staged.
-4. **Phase 3/4 (Create Backup)**: Archives files slated for modification or deletion into remote `.bak` files.
+4. **Phase 3/4 (Create Backup)**: Archives files slated for modification or deletion into remote `.bak` files (skipped when backup skip is active).
 5. **Phase 4/4 (Approved Sync)**: Uploads files via `.new` temporary buffers, atomically swaps them, and runs the optional HTTPS health check.
 
 ### 2. Read-Only Dry Run
@@ -382,4 +382,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.1.0 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.1 / StayHomeLabNet*

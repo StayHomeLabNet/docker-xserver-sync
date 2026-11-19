@@ -14,7 +14,7 @@
 
 <br>
 
-![version](https://img.shields.io/badge/version-1.1.0-blue)
+![version](https://img.shields.io/badge/version-1.1.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -82,7 +82,7 @@ Download the latest release from [GitHub Releases](https://github.com/StayHomeLa
 2. Extract and move `Docker XServer Sync.app` to your `/Applications` folder.
 
 ### Windows
-- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v1.1.0.exe`.
+- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v1.1.1.exe`.
 - **Portable**: Extract `Docker XServer Sync-Windows-x64.zip` and launch `Docker XServer Sync.exe`.
 
 ### Linux
@@ -179,7 +179,7 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 # Install dependencies
 uv sync --extra dev --extra gui --extra ssh --extra build
 
-# Run unit tests (207 passing tests)
+# Run unit tests (212 passing tests)
 uv run pytest
 
 # Launch GUI
@@ -189,7 +189,7 @@ uv run dxsync-gui
 ### Building Application Packages
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.0.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.1.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---

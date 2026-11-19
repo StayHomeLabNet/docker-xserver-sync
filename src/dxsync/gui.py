@@ -69,6 +69,7 @@ from .auto_sync import (
     AutoSyncPreferences,
     AutoSyncSettingsDialog,
     auto_sync_policy_issues,
+    format_auto_sync_summary,
     load_auto_sync_preferences,
     save_auto_sync_preferences,
 )
@@ -441,6 +442,12 @@ class MainWindow(QMainWindow):
         self.auto_sync_button = QPushButton("安全同期を自動実行")
         self.auto_sync_button.clicked.connect(self._start_auto_sync)
         self.auto_sync_button.setEnabled(False)
+        self.auto_sync_settings_button = QPushButton("自動実行設定…")
+        self.auto_sync_settings_button.clicked.connect(self._show_auto_sync_settings)
+        self.auto_sync_settings_button.setEnabled(False)
+        self.auto_sync_policy_label = QLabel()
+        self.auto_sync_policy_label.setWordWrap(True)
+        self.auto_sync_policy_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.revalidate_button = QPushButton("計画を再検証")
         self.revalidate_button.clicked.connect(self._start_revalidation)
         self.revalidate_button.setEnabled(False)
@@ -487,6 +494,8 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.mask_toggle, 5, 1, 1, 2)
         connection_layout.addWidget(self.save_passphrase_check, 5, 3, 1, 2)
         connection_layout.addWidget(self.auto_sync_button, 5, 5)
+        connection_layout.addWidget(self.auto_sync_policy_label, 6, 1, 1, 4)
+        connection_layout.addWidget(self.auto_sync_settings_button, 6, 5)
         layout.addWidget(connection)
 
         self.summary = QLabel("フォルダを選択して検査してください。")
@@ -607,6 +616,7 @@ class MainWindow(QMainWindow):
         self._apply_project_field_lock()
         self._apply_connection_masks()
         self._update_setup_panel()
+        self._update_auto_sync_summary()
 
     def _resolve_gui_passphrase(self) -> str | None:
         typed = self.passphrase_edit.text()
@@ -863,11 +873,34 @@ class MainWindow(QMainWindow):
             project.project_id,
             dialog.selected_preferences(),
         )
+        self._update_auto_sync_summary()
         QMessageBox.information(
             self,
             "自動実行設定",
             f"「{project.name}」の自動実行設定を保存しました。",
         )
+
+    def _update_auto_sync_summary(self) -> None:
+        if self._current_project is None:
+            self.auto_sync_policy_label.setText(
+                "自動実行設定: 保存済みプロジェクトを選択すると変更できます"
+            )
+            self.auto_sync_policy_label.setStyleSheet("color: #57606a;")
+            self.auto_sync_button.setToolTip(
+                "保存済みプロジェクトを選択すると利用できます"
+            )
+            return
+        preferences = load_auto_sync_preferences(
+            self.settings, self._current_project.project_id
+        )
+        summary_text = format_auto_sync_summary(preferences)
+        self.auto_sync_policy_label.setText(summary_text)
+        self.auto_sync_policy_label.setStyleSheet(
+            "color: #8a4b08;"
+            if preferences.backup_mode == "skip"
+            else "color: #57606a;"
+        )
+        self.auto_sync_button.setToolTip(summary_text)
 
     @Slot()
     def _show_plan_validity_settings(self) -> None:
@@ -1087,6 +1120,9 @@ class MainWindow(QMainWindow):
             and not self._auto_sync_active
             and self._current_project is not None
             and self._selected_mapping() is not None
+        )
+        self.auto_sync_settings_button.setEnabled(
+            idle and self._current_project is not None
         )
         self._update_setup_panel()
         resumable = self._latest_resumable_operation()
@@ -2292,6 +2328,9 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(not locked)
         self.auto_sync_button.setEnabled(not locked)
+        self.auto_sync_settings_button.setEnabled(
+            not locked and self._current_project is not None
+        )
         self.save_passphrase_check.setEnabled(
             not locked and self._current_project is not None
         )
@@ -3315,6 +3354,13 @@ class MainWindow(QMainWindow):
             return
         selected_deletes = approval.selected_delete_paths()
         backup_skipped = approval.should_skip_backup()
+        if getattr(approval, "should_save_skip_backup_preference", lambda: False)():
+            updated_preferences = replace(preferences, backup_mode="skip")
+            save_auto_sync_preferences(
+                self.settings, project.project_id, updated_preferences
+            )
+            self._auto_sync_preferences = updated_preferences
+            self._update_auto_sync_summary()
         self._auto_approved_delete_paths = selected_deletes
         self._approved_delete_paths = selected_deletes
         self._auto_backup_skipped = backup_skipped
