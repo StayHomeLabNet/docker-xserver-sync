@@ -699,13 +699,13 @@ def test_operation_progress_covers_sync_and_local_scan_states(
     assert "about.html" in window.summary.text()
 
     # Deployment preparation -> publish pass resets phase ETA cleanly
-    window._op_progress_phase_started_at = time.monotonic() - 20
     window._deployment_progress(10, 10, "転送準備: app.js")
-    first_phase_started = window._op_progress_phase_started_at
     assert "この工程は完了" in window.summary.text()
+    previous_phase_started = (window._op_progress_phase_started_at or time.monotonic()) - 20
+    window._op_progress_phase_started_at = previous_phase_started
 
     window._deployment_progress(1, 10, "公開切り替え: app.js")
-    assert window._op_progress_phase_started_at != first_phase_started
+    assert window._op_progress_phase_started_at > previous_phase_started
     assert "公開切り替え: app.js" in window.summary.text()
 
     # Restore progress with server heartbeat
