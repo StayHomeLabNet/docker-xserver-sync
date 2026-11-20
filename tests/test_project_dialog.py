@@ -51,6 +51,44 @@ def test_remote_picker_can_protect_a_file_or_a_directory() -> None:
     assert picker.selected_patterns() == (".htaccess", "uploads/")
 
 
+def test_remote_picker_can_load_subfolders_and_preserve_selection() -> None:
+    app()
+    picker = RemoteProtectionPickerDialog(
+        (
+            RemoteProtectionEntry("index.html", False),
+            RemoteProtectionEntry("uploads", True),
+        ),
+        (),
+        lambda: (),
+    )
+    picker.tree.topLevelItem(1).setCheckState(0, Qt.Checked)
+
+    picker._selected_patterns = picker.selected_patterns()
+    picker._recursive_entries_loaded(
+        (
+            RemoteProtectionEntry("index.html", False),
+            RemoteProtectionEntry("uploads", True),
+            RemoteProtectionEntry("uploads/photo.jpg", False),
+        )
+    )
+
+    assert picker.selected_patterns() == ("uploads/",)
+    assert picker.load_recursive_button.text() == "サブフォルダ取得済み"
+    assert not picker.load_recursive_button.isEnabled()
+
+
+def test_remote_picker_offers_optional_recursive_loading() -> None:
+    app()
+    picker = RemoteProtectionPickerDialog(
+        (RemoteProtectionEntry("uploads", True),),
+        (),
+        lambda: (),
+    )
+
+    assert picker.load_recursive_button.text() == "サブフォルダも含めて取得…"
+    assert picker.load_recursive_button.isEnabled()
+
+
 def test_runtime_paths_dialog_preserves_a_remote_file_pattern() -> None:
     app()
     dialog = RuntimePathsDialog(patterns=(".htaccess",), require_confirmation=False)

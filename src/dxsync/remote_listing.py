@@ -22,6 +22,7 @@ def list_remote_protection_entries(
     sftp: Any,
     remote_root: str,
     *,
+    recursive: bool = False,
     limit: int = 5000,
 ) -> tuple[RemoteProtectionEntry, ...]:
     """List regular files and directories without reading remote file contents."""
@@ -45,7 +46,8 @@ def list_remote_protection_entries(
             absolute_path = str(PurePosixPath(absolute_directory) / entry.filename)
             if stat.S_ISDIR(entry.st_mode):
                 result.append(RemoteProtectionEntry(relative_path, True))
-                pending.append((absolute_path, relative_path))
+                if recursive:
+                    pending.append((absolute_path, relative_path))
             elif stat.S_ISREG(entry.st_mode):
                 result.append(RemoteProtectionEntry(relative_path, False))
             else:

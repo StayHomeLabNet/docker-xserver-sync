@@ -23,10 +23,23 @@ class FakeSftp:
         return self.directories[path]
 
 
-def test_lists_remote_files_and_directories_without_following_symlinks() -> None:
+def test_lists_only_root_files_and_directories_by_default() -> None:
     entries = list_remote_protection_entries(
         FakeSftp(),
         "/home/user/public_html",
+    )
+
+    assert tuple(entry.protection_pattern for entry in entries) == (
+        "index.html",
+        "uploads/",
+    )
+
+
+def test_recursively_lists_remote_entries_without_following_symlinks() -> None:
+    entries = list_remote_protection_entries(
+        FakeSftp(),
+        "/home/user/public_html",
+        recursive=True,
     )
 
     assert tuple(entry.protection_pattern for entry in entries) == (
@@ -41,5 +54,6 @@ def test_remote_listing_has_a_safety_limit() -> None:
         list_remote_protection_entries(
             FakeSftp(),
             "/home/user/public_html",
+            recursive=True,
             limit=1,
         )

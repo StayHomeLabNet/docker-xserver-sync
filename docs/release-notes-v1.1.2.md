@@ -8,7 +8,8 @@ Docker → XServer Sync **v1.1.2** は、XServer側の同期先にあるファ�
 
 - **XServer側の保護対象を一覧から選択**:
   - 「XServer側の保護対象を設定…」画面に **「XServerから一覧を取得…」** を追加しました。
-  - XServer側の同期先をSFTPで読み取り、ファイルとフォルダをチェック付きツリーで選択できます。
+  - 初回はXServer側の同期先ルート直下だけをSFTPで読み取り、ファイルとフォルダをチェック付きツリーで素早く選択できます。
+  - 配下の項目を個別に選ぶ場合だけ **「サブフォルダも含めて取得…」** で再帰取得でき、取得後も既存のチェック状態を維持します。
   - フォルダを選択した場合は配下全体、ファイルを選択した場合はそのファイルだけを保護します。
   - 一覧取得はファイル内容を読まず、SSHホスト鍵フィンガープリントを照合した上でバックグラウンド実行します。
 - **画面表現の明確化**:
@@ -19,7 +20,7 @@ Docker → XServer Sync **v1.1.2** は、XServer側の同期先にあるファ�
 
 ### 🧪 テスト
 
-- XServer側のファイル／フォルダ列挙、シンボリックリンク非追跡、安全上限、ツリー選択、ファイル保護パターンのテストを追加し、全 **216件** のテスト合格を確認しました。
+- XServer側のルート直下／再帰ファイル列挙、シンボリックリンク非追跡、安全上限、ツリー選択、選択状態維持、ファイル保護パターンのテストを追加し、全 **219件** のテスト合格を確認しました。
 
 ---
 
@@ -31,7 +32,8 @@ Docker → XServer Sync **v1.1.2** adds an XServer destination browser for selec
 
 - **Select XServer Protection Targets from a Remote Listing**:
   - Added **Load List from XServer… (XServerから一覧を取得…)** to the protection settings dialog.
-  - Lists files and directories under the XServer synchronization destination over SFTP in a checkable tree.
+  - Initially lists only files and directories directly under the XServer synchronization destination root over SFTP for a fast first response.
+  - **Include Subfolders… (サブフォルダも含めて取得…)** performs optional recursive loading while preserving existing selections.
   - Selecting a directory protects its complete subtree; selecting a file protects only that file.
   - Listing reads names and entry types only, verifies the configured SSH host-key fingerprint, and runs in the background to keep the UI responsive.
 - **Clearer Destination and Protection Terminology**:
@@ -42,7 +44,7 @@ Docker → XServer Sync **v1.1.2** adds an XServer destination browser for selec
 
 ### 🧪 Tests
 
-- Added coverage for remote file/directory listing, symlink avoidance, entry limits, tree selection, and exact-file protection patterns (`216 passed`).
+- Added coverage for root-only and recursive remote listing, symlink avoidance, entry limits, tree selection preservation, and exact-file protection patterns (`219 passed`).
 
 ---
 

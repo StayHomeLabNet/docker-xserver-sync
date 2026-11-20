@@ -86,9 +86,18 @@ class RemoteProtectionPickerDialog(QDialog):
         self,
         entries: tuple[RemoteProtectionEntry, ...],
         selected_patterns: tuple[str, ...],
+        recursive_listing_provider: Callable[
+            [], tuple[RemoteProtectionEntry, ...]
+        ]
+        | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self.entries = entries
+        self._selected_patterns = selected_patterns
+        self.recursive_listing_provider = recursive_listing_provider
+        self._listing_thread: QThread | None = None
+        self._listing_worker: RemoteListingWorker | None = None
         self.setWindowTitle("XServer側の保護対象を選択")
         self.resize(620, 560)
         layout = QVBoxLayout(self)
@@ -104,11 +113,25 @@ class RemoteProtectionPickerDialog(QDialog):
         layout.addWidget(self.tree, 1)
         self._populate(entries, selected_patterns)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("選択内容を反映")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        recursive_row = QHBoxLayout()
+        recursive_row.addWidget(
+            _hint(
+                "フォルダを選ぶだけなら、配下の一覧取得は不要です。"
+                "配下の項目を個別に選ぶ場合のみ取得してください。"
+            ),
+            1,
+        )
+        self.load_recursive_button = QPushButton("サブフォルダも含めて取得…")
+        self.load_recursive_button.setEnabled(recursive_listing_provider is not None)
+        self.load_recursive_button.clicked.connect(self._load_recursive_entries)
+        recursive_row.addWidget(self.load_recursive_button)
+        layout.addLayout(recursive_row)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("選択内容を反映")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
 
     def _populate(
         self,
@@ -117,6 +140,7 @@ class RemoteProtectionPickerDialog(QDialog):
     ) -> None:
         self.tree.blockSignals(True)
         try:
+            self.tree.clear()
             items: dict[str, QTreeWidgetItem] = {}
             entry_types = {entry.relative_path: entry.is_directory for entry in entries}
 
@@ -153,6 +177,63 @@ class RemoteProtectionPickerDialog(QDialog):
             self.tree.expandToDepth(1)
         finally:
             self.tree.blockSignals(False)
+
+    @Slot()
+    def _load_recursive_entries(self) -> None:
+        if self.recursive_listing_provider is None or self._listing_thread is not None:
+            return
+        available = {entry.protection_pattern for entry in self.entries}
+        preserved = tuple(
+            pattern for pattern in self._selected_patterns if pattern not in available
+        )
+        self._selected_patterns = tuple(
+            dict.fromkeys((*preserved, *self.selected_patterns()))
+        )
+        self.load_recursive_button.setEnabled(False)
+        self.load_recursive_button.setText("サブフォルダを取得中…")
+        self.buttons.setEnabled(False)
+
+        thread = QThread(self)
+        worker = RemoteListingWorker(self.recursive_listing_provider)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._recursive_entries_loaded)
+        worker.failed.connect(self._recursive_entries_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._recursive_listing_finished)
+        self._listing_thread = thread
+        self._listing_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _recursive_entries_loaded(
+        self,
+        entries: tuple[RemoteProtectionEntry, ...],
+    ) -> None:
+        self.entries = entries
+        self._populate(entries, self._selected_patterns)
+        self.recursive_listing_provider = None
+        self.load_recursive_button.setText("サブフォルダ取得済み")
+        self.load_recursive_button.setEnabled(False)
+
+    @Slot(str)
+    def _recursive_entries_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "サブフォルダを取得できません", message)
+
+    @Slot()
+    def _recursive_listing_finished(self) -> None:
+        self._listing_thread = None
+        self._listing_worker = None
+        self.buttons.setEnabled(True)
+        if self.recursive_listing_provider is not None:
+            self.load_recursive_button.setText("サブフォルダも含めて取得…")
+            self.load_recursive_button.setEnabled(True)
+        else:
+            self.load_recursive_button.setEnabled(False)
 
     def selected_patterns(self) -> tuple[str, ...]:
         result: list[str] = []
@@ -200,7 +281,7 @@ class RuntimePathsDialog(QDialog):
         confirmed: bool = False,
         require_confirmation: bool = True,
         remote_listing_provider: Callable[
-            [], tuple[RemoteProtectionEntry, ...]
+            [bool], tuple[RemoteProtectionEntry, ...]
         ]
         | None = None,
         parent=None,
@@ -306,7 +387,7 @@ class RuntimePathsDialog(QDialog):
         self.buttons.setEnabled(False)
 
         thread = QThread(self)
-        worker = RemoteListingWorker(self.remote_listing_provider)
+        worker = RemoteListingWorker(lambda: self.remote_listing_provider(False))
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.completed.connect(self._remote_entries_loaded)
@@ -338,10 +419,16 @@ class RuntimePathsDialog(QDialog):
             for line in self.paths_edit.toPlainText().splitlines()
             if line.strip()
         )
-        picker = RemoteProtectionPickerDialog(entries, current_patterns, self)
+        picker = RemoteProtectionPickerDialog(
+            entries,
+            current_patterns,
+            lambda: self.remote_listing_provider(True),
+            self,
+        )
         if picker.exec() != QDialog.Accepted:
             return
 
+        entries = picker.entries
         available_patterns = {entry.protection_pattern for entry in entries}
         preserved = [
             pattern for pattern in current_patterns if pattern not in available_patterns
@@ -812,7 +899,7 @@ class ProjectDialog(QDialog):
     def _remote_listing_provider(
         self,
         row: int,
-    ) -> Callable[[], tuple[RemoteProtectionEntry, ...]]:
+    ) -> Callable[[bool], tuple[RemoteProtectionEntry, ...]]:
         remote_item = self.mapping_table.item(row, 2)
         remote_root = remote_item.text().strip() if remote_item else ""
         host = self.host_edit.text().strip()
@@ -822,7 +909,7 @@ class ProjectDialog(QDialog):
         fingerprint = self.fingerprint_edit.text().strip()
         passphrase = self.passphrase
 
-        def load() -> tuple[RemoteProtectionEntry, ...]:
+        def load(recursive: bool) -> tuple[RemoteProtectionEntry, ...]:
             missing = [
                 label
                 for label, value in (
@@ -847,7 +934,11 @@ class ProjectDialog(QDialog):
                     host_key_fingerprint=fingerprint,
                     passphrase=passphrase,
                 )
-                return list_remote_protection_entries(sftp, remote_root)
+                return list_remote_protection_entries(
+                    sftp,
+                    remote_root,
+                    recursive=recursive,
+                )
             finally:
                 if sftp is not None:
                     try:

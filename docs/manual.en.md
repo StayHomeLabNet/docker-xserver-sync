@@ -121,7 +121,8 @@ For standard PHP projects outside the WordPress or Laravel frameworks.
 1. **Configuration**:
    - Set Site Type to **Custom PHP (独自 PHP)**.
    - Click **Configure XServer Protection Targets… (XServer側の保護対象を設定…)**.
-   - Click **Load List from XServer… (XServerから一覧を取得…)** to select files or directories directly from the synchronization destination.
+   - Click **Load List from XServer… (XServerから一覧を取得…)** to first display only files and directories directly under the synchronization destination root.
+   - To select individual nested items, click **Include Subfolders… (サブフォルダも含めて取得…)** in the list. Selecting a directory already protects its entire subtree, so loading subfolders is unnecessary in that case.
    - `uploads/`, `storage/`, `cache/`, `logs/`, and `tmp/` are automatically safeguarded.
    - Add site-specific runtime directories (e.g. `userfiles/`, `data/sessions/`) relative to the root.
    - Check the agreement box to confirm runtime directory preservation.
@@ -195,7 +196,7 @@ Tailored for static HTML/CSS/JS sites and pre-built outputs (e.g., Astro, Next.j
 1. **Defaults & Behavior**:
    - **No Automatic Protected Paths (No Confirmation Required)**: Unlike PHP frameworks, directories/files such as `uploads/`, `wp-content/uploads/`, `wp-config.php`, or `.htaccess` are not automatically protected—build artifacts and static `.htaccess` files sync directly.
    - **Public Directory Friendly Excludes**: Only secrets, VCS metadata, dependencies, and dev files (`.git/`, `.env`, `node_modules/`, `docker-compose*.yml`, `.DS_Store`, etc.) are excluded. Public paths such as `/docs/`, `/test/`, `/README*`, and `/LICENSE*` are not excluded.
-   - **Optional XServer Protection**: If you need to keep server-managed files or directories (e.g., `.htaccess`, `.well-known/`, `cgi-bin/`), click **Configure XServer Protection Targets… (XServer側の保護対象を設定…)** in the project editor. Use **Load List from XServer… (XServerから一覧を取得…)** to select them from the actual destination.
+   - **Optional XServer Protection**: If you need to keep server-managed files or directories (e.g., `.htaccess`, `.well-known/`, `cgi-bin/`), click **Configure XServer Protection Targets… (XServer側の保護対象を設定…)** in the project editor. Use **Load List from XServer… (XServerから一覧を取得…)** to select them from the destination root, and load subfolders only when necessary.
 2. **Bulk Selection for Deletion Candidates & Auto Safe Sync**:
    - When hashed build assets change between builds, use **Select All Deletions (削除候補をすべて選択)** / **Clear All Deletions (削除候補をすべて解除)** in manual or Auto Safe Sync confirmation dialogs (when **Remote-Only Policy** is set to **Select candidates in confirmation dialog (`ask`)**) to quickly mark or clear remote-only files for deletion (folders listed under "Do Not Delete Folders" remain safely disabled).
 
