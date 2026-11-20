@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStyleFactory,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -108,6 +109,9 @@ class RemoteProtectionPickerDialog(QDialog):
             )
         )
         self.tree = QTreeWidget()
+        self._tree_style = QStyleFactory.create("Fusion")
+        if self._tree_style is not None:
+            self.tree.setStyle(self._tree_style)
         self.tree.setHeaderLabels(("XServer側のファイルとフォルダ",))
         self.tree.itemChanged.connect(self._item_changed)
         layout.addWidget(self.tree, 1)

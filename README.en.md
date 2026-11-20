@@ -96,7 +96,7 @@ Extract `Docker XServer Sync-Linux-x64.tar.gz` and run the executable.
 
 1. Launch the app and click **New Project** to configure your site.
 2. Select the site type (WordPress / Laravel / Custom PHP / Static Site) and provide your local directory and XServer connection details.
-   - To preserve files or directories already on XServer, open **Configure XServer Protection Targets…** and choose them through **Load List from XServer…**. The first load shows only the destination root for speed; use **Include Subfolders…** only when selecting individual nested items. Selecting a directory protects its complete subtree without loading it.
+   - To preserve files or directories already on XServer, open **Configure XServer Protection Targets…**, choose **Load List from XServer…**, and select items using the displayed checkboxes. The first load shows only the destination root for speed; use **Include Subfolders…** only when selecting individual nested items. Selecting a directory protects its complete subtree without loading it.
 3. **Safe Synchronization Workflow**:
    - **Dry Run**: Compares local files against XServer and generates a staged diff plan.
    - **Revalidate Plan**: Verifies that remote files haven't drifted before applying changes.

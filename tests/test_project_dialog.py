@@ -48,6 +48,7 @@ def test_remote_picker_can_protect_a_file_or_a_directory() -> None:
     picker.tree.topLevelItem(0).setCheckState(0, Qt.Checked)
     picker.tree.topLevelItem(1).setCheckState(0, Qt.Checked)
 
+    assert picker.tree.style().objectName().lower() == "fusion"
     assert picker.selected_patterns() == (".htaccess", "uploads/")
 
 

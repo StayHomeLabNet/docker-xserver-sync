@@ -121,7 +121,7 @@ For standard PHP projects outside the WordPress or Laravel frameworks.
 1. **Configuration**:
    - Set Site Type to **Custom PHP (独自 PHP)**.
    - Click **Configure XServer Protection Targets… (XServer側の保護対象を設定…)**.
-   - Click **Load List from XServer… (XServerから一覧を取得…)** to first display only files and directories directly under the synchronization destination root.
+   - Click **Load List from XServer… (XServerから一覧を取得…)** to first display only files and directories directly under the synchronization destination root. Select protection targets with the checkbox shown to the left of each item; the checkbox remains visible across supported OS themes, including macOS dark mode.
    - To select individual nested items, click **Include Subfolders… (サブフォルダも含めて取得…)** in the list. Selecting a directory already protects its entire subtree, so loading subfolders is unnecessary in that case.
    - `uploads/`, `storage/`, `cache/`, `logs/`, and `tmp/` are automatically safeguarded.
    - Add site-specific runtime directories (e.g. `userfiles/`, `data/sessions/`) relative to the root.

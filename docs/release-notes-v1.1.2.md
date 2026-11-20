@@ -17,6 +17,7 @@ Docker → XServer Sync **v1.1.2** は、XServer側の同期先にあるファ�
   - 保護対象がXServer側のファイル／フォルダであることを、ボタン、一覧列、ダイアログ、警告メッセージで統一しました。
 - **ダークモードの表示修正**:
   - 保護設定画面の説明欄で、背景色と文字色が同化して空白に見える問題を修正しました。
+  - macOSのダークモードで、保護対象ツリーのチェックボックスが描画されず選択欄が見えない問題を修正しました。
 
 ### 🧪 テスト
 
@@ -41,6 +42,7 @@ Docker → XServer Sync **v1.1.2** adds an XServer destination browser for selec
   - Updated buttons, table columns, dialogs, and warnings to state explicitly that protection applies to files and directories on XServer.
 - **Dark-Mode Display Fix**:
   - Fixed the protection-dialog information panel appearing blank because its light background and inherited dark-theme text color had insufficient contrast.
+  - Fixed protection-tree checkboxes not being drawn in macOS dark mode, which made the selection controls appear to be missing.
 
 ### 🧪 Tests
 
