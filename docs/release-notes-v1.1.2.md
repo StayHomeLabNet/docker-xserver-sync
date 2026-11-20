@@ -53,8 +53,8 @@ Docker → XServer Sync **v1.1.2** adds an XServer destination browser for selec
 ## SHA-256
 
 ```text
-f3429560bc42a572bf04168eb5481272251982bb366b1a5330c1ea76e4678efd  Docker XServer Sync-Linux-x64.tar.gz
-b720b39b5f4495864f3842c2ce028d5f58fd8a7d5559b85cb5db983eb8ab83f2  Docker XServer Sync-Windows-x64.zip
-3bb0f29be0986fb09d0ad0c3104ca49d26e89dd163c356adbdef7f3f79048a6e  Docker XServer Sync-macOS-arm64.zip
-ad34711c2874fadce18cfad7563c63ba6691d851e1948c7dcd70e7912d9590a7  Docker-XServer-Sync-Setup-v1.1.2.exe
+c3d63083ad841b75fbe176238d8882ee1b3c577c173a265483cea11982b728f5  Docker XServer Sync-Linux-x64.tar.gz
+17d0dbf00cb89b9f302d0e53a05f0d8d5f21fe0562d96d9a397125c38622229f  Docker XServer Sync-Windows-x64.zip
+6e5dc81a3a79cf13894c1b4df12ce3fb1b891b27cc868095c115e8b2cc97fe93  Docker XServer Sync-macOS-arm64.zip
+2c478471223b4bbc27caa38de16890e6c4c4c710bb6bb4cec31e8dd15bd2bdb9  Docker-XServer-Sync-Setup-v1.1.2.exe
 ```
