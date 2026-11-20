@@ -43,3 +43,14 @@ Docker → XServer Sync **v1.1.2** adds an XServer destination browser for selec
 ### 🧪 Tests
 
 - Added coverage for remote file/directory listing, symlink avoidance, entry limits, tree selection, and exact-file protection patterns (`216 passed`).
+
+---
+
+## SHA-256
+
+```text
+0d9036c3bdbc3147623fbe9553135876dd05be079e7d28bb7bda93ca08751c53  Docker XServer Sync-Linux-x64.tar.gz
+ff002c3465d3479cf2469c5ef74df8b8ab1fef1847628702c2ced77e6f070d83  Docker XServer Sync-Windows-x64.zip
+b3a5ad3a3d1770975bccb6a98480b5bbf1218fccc26cfaaf1da94200e4ad5a72  Docker XServer Sync-macOS-arm64.zip
+76eb75d9aeb0f2620319a1c07ffdff20f97b5d29580b3eca42bfb9066165cb05  Docker-XServer-Sync-Setup-v1.1.2.exe
+```
