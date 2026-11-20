@@ -2,10 +2,16 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QFormLayout
 
 from dxsync.models import Project, SiteType, SyncMapping
-from dxsync.project_dialog import ProjectDialog, RuntimePathsDialog
+from dxsync.project_dialog import (
+    ProjectDialog,
+    RemoteProtectionPickerDialog,
+    RuntimePathsDialog,
+)
+from dxsync.remote_listing import RemoteProtectionEntry
 from dxsync.storage import ProjectStore
 from dxsync.secure_store import MemoryHostKeyStore
 
@@ -27,6 +33,31 @@ def test_runtime_paths_dialog_requires_confirmation_and_normalizes_paths() -> No
     dialog._accept_paths()
 
     assert dialog.patterns == ("userfiles/", "data/sessions/")
+
+
+def test_remote_picker_can_protect_a_file_or_a_directory() -> None:
+    app()
+    picker = RemoteProtectionPickerDialog(
+        (
+            RemoteProtectionEntry(".htaccess", False),
+            RemoteProtectionEntry("uploads", True),
+            RemoteProtectionEntry("uploads/photo.jpg", False),
+        ),
+        (),
+    )
+    picker.tree.topLevelItem(0).setCheckState(0, Qt.Checked)
+    picker.tree.topLevelItem(1).setCheckState(0, Qt.Checked)
+
+    assert picker.selected_patterns() == (".htaccess", "uploads/")
+
+
+def test_runtime_paths_dialog_preserves_a_remote_file_pattern() -> None:
+    app()
+    dialog = RuntimePathsDialog(patterns=(".htaccess",), require_confirmation=False)
+    dialog.paths_edit.setPlainText(".htaccess")
+    dialog._accept_paths()
+
+    assert dialog.patterns == (".htaccess",)
 
 
 def test_project_dialog_marks_new_custom_php_mapping_unconfirmed(tmp_path) -> None:
@@ -72,8 +103,11 @@ def test_project_dialog_static_site_optional_protect_paths_without_confirmation(
 
     # Optional RuntimePathsDialog does not require confirmation checkbox
     opt_dialog = RuntimePathsDialog(require_confirmation=False)
+    assert opt_dialog.windowTitle() == "XServer側で保護するファイル／フォルダ（任意）"
     assert opt_dialog.confirm.isHidden()
     assert opt_dialog.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    assert "palette(alternate-base)" in opt_dialog.default_label.styleSheet()
+    assert "palette(text)" in opt_dialog.default_label.styleSheet()
     opt_dialog.paths_edit.setPlainText(".well-known\ncgi-bin/")
     opt_dialog._accept_paths()
     assert opt_dialog.patterns == (".well-known/", "cgi-bin/")
@@ -84,8 +118,8 @@ def test_project_dialog_static_site_optional_protect_paths_without_confirmation(
     dialog._append_mapping("dist", str(dist_dir), "/home/user/example.com/public_html")
 
     assert dialog.runtime_paths_button.isEnabled()
-    assert dialog.runtime_paths_button.text() == "保護パスを設定…"
-    assert dialog.mapping_table.item(0, 3).text() == "保護なし（確認不要）"
+    assert dialog.runtime_paths_button.text() == "XServer側の保護対象を設定…"
+    assert dialog.mapping_table.item(0, 3).text() == "追加保護なし"
 
     dialog.name_edit.setText("Static Site")
     dialog.domain_edit.setText("example.com")

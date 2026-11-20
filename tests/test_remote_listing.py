@@ -1,0 +1,45 @@
+import stat
+from types import SimpleNamespace
+
+import pytest
+
+from dxsync.remote_listing import list_remote_protection_entries
+
+
+class FakeSftp:
+    def __init__(self) -> None:
+        self.directories = {
+            "/home/user/public_html": (
+                SimpleNamespace(filename="index.html", st_mode=stat.S_IFREG | 0o644),
+                SimpleNamespace(filename="uploads", st_mode=stat.S_IFDIR | 0o755),
+                SimpleNamespace(filename="current", st_mode=stat.S_IFLNK | 0o777),
+            ),
+            "/home/user/public_html/uploads": (
+                SimpleNamespace(filename="photo.jpg", st_mode=stat.S_IFREG | 0o644),
+            ),
+        }
+
+    def listdir_attr(self, path: str):
+        return self.directories[path]
+
+
+def test_lists_remote_files_and_directories_without_following_symlinks() -> None:
+    entries = list_remote_protection_entries(
+        FakeSftp(),
+        "/home/user/public_html",
+    )
+
+    assert tuple(entry.protection_pattern for entry in entries) == (
+        "index.html",
+        "uploads/",
+        "uploads/photo.jpg",
+    )
+
+
+def test_remote_listing_has_a_safety_limit() -> None:
+    with pytest.raises(RuntimeError, match="上限"):
+        list_remote_protection_entries(
+            FakeSftp(),
+            "/home/user/public_html",
+            limit=1,
+        )

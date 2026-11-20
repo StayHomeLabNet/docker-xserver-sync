@@ -15,7 +15,7 @@
 
 <br>
 
-![version](https://img.shields.io/badge/version-1.1.1-blue)
+![version](https://img.shields.io/badge/version-1.1.2-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -51,6 +51,7 @@ Dockerへbind mountしたローカル開発環境のファイルを、安全な�
   - 本番書き込み前の自動リモートバックアップ作成
   - 一時名転送・ハッシュ照合・アトミック切り替えによる安全同期（失敗時は自動ロールバック）
   - 本番で生成されるユーザーデータディレクトリ（`uploads`、`storage`等）の保護
+  - XServer側の同期先をSFTPで一覧取得し、上書き・削除しないファイル／フォルダをツリーから選択
   - 自動実行時の `REMOTE_ONLY` 削除確認モード（`ask`）と「削除しないフォルダー」保護（静的サイトのビルド更新に最適）
   - メイン画面の **「自動実行設定…」** ボタン＆方針常時表示と、自動実行確認ダイアログ上でのバックアップスキップ切替／設定保存
   - バックアップ履歴画面での保持ルール（最新 N 世代 / 保持日数）に基づく整理候補抽出・承認付き削除
@@ -84,7 +85,7 @@ Dockerへbind mountしたローカル開発環境のファイルを、安全な�
 2. 解凍して現れる `Docker XServer Sync.app` を `/Applications`（アプリケーションフォルダ）へ移動して起動します。
 
 ### Windows
-- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v1.1.1.exe` を実行してセットアップします。
+- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v1.1.2.exe` を実行してセットアップします。
 - **ポータブル版**: `Docker XServer Sync-Windows-x64.zip` を展開し、フォルダ内の `Docker XServer Sync.exe` を起動します。
 
 ### Linux
@@ -96,6 +97,7 @@ Dockerへbind mountしたローカル開発環境のファイルを、安全な�
 
 1. アプリを起動し、「新規プロジェクト」をクリックして設定を作成します。
 2. サイト種別（WordPress / Laravel / 独自PHP / 静的サイト）を選択し、ローカルフォルダとXServerの接続情報を入力します。
+   - XServer側に残すファイル／フォルダがある場合は、「XServer側の保護対象を設定…」→「XServerから一覧を取得…」から選択できます。
 3. **安全同期の手順**:
    - **読み取り専用ドライラン**: ローカルとXServerのファイルを照合し、変更計画を作成します。
    - **計画を再検証**: 反映直前に差分が変わっていないかを検証します。
@@ -181,7 +183,7 @@ Python 3.12以上と [uv](https://docs.astral.sh/uv/) を使用します。
 # 依存関係のインストール
 uv sync --extra dev --extra gui --extra ssh --extra build
 
-# ユニットテスト実行（全212件）
+# ユニットテスト実行（全216件）
 uv run pytest
 
 # GUI起動
@@ -191,7 +193,7 @@ uv run dxsync-gui
 ### パッケージのビルド
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.1.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.2.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---

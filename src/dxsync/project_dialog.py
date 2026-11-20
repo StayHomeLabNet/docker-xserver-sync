@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,15 +25,24 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from .models import Project, SiteType, SyncMapping, utc_now
 from .presets import get_preset
+from .remote import connect_sftp
+from .remote_listing import RemoteProtectionEntry, list_remote_protection_entries
 from .storage import ProjectStore
 from .secure_store import SecureStoreError
-from .validation import ValidationIssue, normalize_runtime_directory, validate_project
+from .validation import (
+    ValidationIssue,
+    normalize_protected_file,
+    normalize_runtime_directory,
+    validate_project,
+)
 
 
 SITE_LABELS = {
@@ -52,6 +62,136 @@ def _hint(text: str) -> QLabel:
     return label
 
 
+class RemoteListingWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        provider: Callable[[], tuple[RemoteProtectionEntry, ...]],
+    ) -> None:
+        super().__init__()
+        self.provider = provider
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.completed.emit(self.provider())
+        except Exception as exc:
+            self.failed.emit(str(exc) or type(exc).__name__)
+
+
+class RemoteProtectionPickerDialog(QDialog):
+    def __init__(
+        self,
+        entries: tuple[RemoteProtectionEntry, ...],
+        selected_patterns: tuple[str, ...],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("XServer側の保護対象を選択")
+        self.resize(620, 560)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            _hint(
+                "保護するファイルまたはフォルダにチェックを入れてください。"
+                "フォルダを選ぶと、その中のすべての項目が保護されます。"
+            )
+        )
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(("XServer側のファイルとフォルダ",))
+        self.tree.itemChanged.connect(self._item_changed)
+        layout.addWidget(self.tree, 1)
+        self._populate(entries, selected_patterns)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("選択内容を反映")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _populate(
+        self,
+        entries: tuple[RemoteProtectionEntry, ...],
+        selected_patterns: tuple[str, ...],
+    ) -> None:
+        self.tree.blockSignals(True)
+        try:
+            items: dict[str, QTreeWidgetItem] = {}
+            entry_types = {entry.relative_path: entry.is_directory for entry in entries}
+
+            def ensure_item(path: str, is_directory: bool) -> QTreeWidgetItem:
+                existing = items.get(path)
+                if existing is not None:
+                    return existing
+                parent_path, _, name = path.rpartition("/")
+                parent = (
+                    ensure_item(parent_path, True)
+                    if parent_path
+                    else self.tree
+                )
+                item = QTreeWidgetItem(parent, (name or path,))
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                if is_directory:
+                    item.setFlags(item.flags() | Qt.ItemIsAutoTristate)
+                item.setData(0, Qt.UserRole, path)
+                item.setData(0, Qt.UserRole + 1, is_directory)
+                item.setCheckState(0, Qt.Unchecked)
+                items[path] = item
+                return item
+
+            for entry in entries:
+                ensure_item(entry.relative_path, entry.is_directory)
+
+            selected = set(selected_patterns)
+            for path, item in items.items():
+                pattern = f"{path}/" if entry_types.get(path, True) else path
+                if pattern in selected:
+                    item.setCheckState(0, Qt.Checked)
+                    if item.data(0, Qt.UserRole + 1):
+                        self._set_descendants(item, Qt.Checked)
+            self.tree.expandToDepth(1)
+        finally:
+            self.tree.blockSignals(False)
+
+    def selected_patterns(self) -> tuple[str, ...]:
+        result: list[str] = []
+
+        def collect(item: QTreeWidgetItem) -> None:
+            state = item.checkState(0)
+            is_directory = bool(item.data(0, Qt.UserRole + 1))
+            path = str(item.data(0, Qt.UserRole))
+            if state == Qt.Checked:
+                result.append(f"{path}/" if is_directory else path)
+                return
+            if state == Qt.PartiallyChecked:
+                for index in range(item.childCount()):
+                    collect(item.child(index))
+
+        for index in range(self.tree.topLevelItemCount()):
+            collect(self.tree.topLevelItem(index))
+        return tuple(sorted(result))
+
+    def _item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
+        if item.checkState(0) == Qt.PartiallyChecked:
+            return
+        self.tree.blockSignals(True)
+        try:
+            self._set_descendants(item, item.checkState(0))
+        finally:
+            self.tree.blockSignals(False)
+
+    def _set_descendants(
+        self,
+        item: QTreeWidgetItem,
+        state: Qt.CheckState,
+    ) -> None:
+        for index in range(item.childCount()):
+            child = item.child(index)
+            child.setCheckState(0, state)
+            self._set_descendants(child, state)
+
+
 class RuntimePathsDialog(QDialog):
     def __init__(
         self,
@@ -59,13 +199,25 @@ class RuntimePathsDialog(QDialog):
         patterns: tuple[str, ...] = (),
         confirmed: bool = False,
         require_confirmation: bool = True,
+        remote_listing_provider: Callable[
+            [], tuple[RemoteProtectionEntry, ...]
+        ]
+        | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.patterns = patterns
         self.require_confirmation = require_confirmation
+        self.remote_listing_provider = remote_listing_provider
+        self._known_remote_files = {
+            pattern for pattern in patterns if not pattern.endswith("/")
+        }
+        self._listing_thread: QThread | None = None
+        self._listing_worker: RemoteListingWorker | None = None
         self.setWindowTitle(
-            "本番で書き込まれるディレクトリ" if require_confirmation else "保護パスを設定（任意）"
+            "XServer側の本番データを保護するファイル／フォルダ"
+            if require_confirmation
+            else "XServer側で保護するファイル／フォルダ（任意）"
         )
         self.resize(620, 500)
         layout = QVBoxLayout(self)
@@ -78,8 +230,9 @@ class RuntimePathsDialog(QDialog):
             )
         else:
             intro = QLabel(
-                "静的サイトは原則すべてのファイルを同期します。例外的に上書き・削除対象から"
-                "除外したいディレクトリがある場合のみ、同期元ルートからの相対パスで"
+                "静的サイトは原則としてすべてのファイルを同期します。XServer上に残し、"
+                "PC側の内容で上書き・削除したくないファイル／フォルダだけを、XServer側の同期先フォルダ"
+                "直下からの相対パスで"
                 "1行ずつ入力してください（空欄のまま保存できます）。"
             )
         intro.setWordWrap(True)
@@ -89,21 +242,35 @@ class RuntimePathsDialog(QDialog):
             defaults = "\n".join(
                 f"• {path}" for path in get_preset(SiteType.CUSTOM_PHP).protect_patterns
             )
-            default_label = QLabel("次の場所は常に自動保護されます。\n" + defaults)
+            default_label = QLabel("XServer側の次の場所は常に自動保護されます。\n" + defaults)
         else:
             default_label = QLabel(
-                "静的サイトではデフォルトの自動保護はありません。\n"
-                ".htaccess や wp-content/uploads/ 等もそのまま同期対象になります。"
+                "この画面で追加設定する保護対象に既定値はありません。\n"
+                "空欄の場合、XServer側の追加項目は保護しません。"
             )
         default_label.setWordWrap(True)
-        default_label.setStyleSheet("background: #f6f8fa; padding: 8px;")
+        default_label.setStyleSheet(
+            "background-color: palette(alternate-base); color: palette(text); padding: 8px;"
+        )
+        self.default_label = default_label
         layout.addWidget(default_label)
+
+        listing_row = QHBoxLayout()
+        listing_row.addStretch(1)
+        self.load_remote_button = QPushButton("XServerから一覧を取得…")
+        self.load_remote_button.setEnabled(remote_listing_provider is not None)
+        self.load_remote_button.setToolTip(
+            "XServer側の同期先を読み取り、保護対象を選択します"
+        )
+        self.load_remote_button.clicked.connect(self._load_remote_entries)
+        listing_row.addWidget(self.load_remote_button)
+        layout.addLayout(listing_row)
 
         layout.addWidget(
             QLabel(
-                "その他の本番書き込みディレクトリ（1行に1つ）"
+                "XServer側にあるその他の本番データ用ファイル／フォルダ（1行に1つ）"
                 if require_confirmation
-                else "任意で保護するディレクトリ（1行に1つ・空欄可）"
+                else "XServer側で上書き・削除しないファイル／フォルダ（1行に1つ・空欄可）"
             )
         )
         self.paths_edit = QPlainTextEdit()
@@ -130,13 +297,92 @@ class RuntimePathsDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
+    @Slot()
+    def _load_remote_entries(self) -> None:
+        if self.remote_listing_provider is None or self._listing_thread is not None:
+            return
+        self.load_remote_button.setEnabled(False)
+        self.load_remote_button.setText("XServerから取得中…")
+        self.buttons.setEnabled(False)
+
+        thread = QThread(self)
+        worker = RemoteListingWorker(self.remote_listing_provider)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._remote_entries_loaded)
+        worker.failed.connect(self._remote_entries_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._remote_listing_finished)
+        self._listing_thread = thread
+        self._listing_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _remote_entries_loaded(
+        self,
+        entries: tuple[RemoteProtectionEntry, ...],
+    ) -> None:
+        if not entries:
+            QMessageBox.information(
+                self,
+                "XServer側の同期先",
+                "同期先フォルダにファイルまたはフォルダがありません。",
+            )
+            return
+        current_patterns = tuple(
+            line.strip()
+            for line in self.paths_edit.toPlainText().splitlines()
+            if line.strip()
+        )
+        picker = RemoteProtectionPickerDialog(entries, current_patterns, self)
+        if picker.exec() != QDialog.Accepted:
+            return
+
+        available_patterns = {entry.protection_pattern for entry in entries}
+        preserved = [
+            pattern for pattern in current_patterns if pattern not in available_patterns
+        ]
+        selected = picker.selected_patterns()
+        combined = tuple(dict.fromkeys((*preserved, *selected)))
+        self.paths_edit.setPlainText("\n".join(combined))
+        self._known_remote_files.update(
+            entry.relative_path
+            for entry in entries
+            if not entry.is_directory and entry.relative_path in selected
+        )
+
+    @Slot(str)
+    def _remote_entries_failed(self, message: str) -> None:
+        QMessageBox.warning(
+            self,
+            "XServerから一覧を取得できません",
+            message,
+        )
+
+    @Slot()
+    def _remote_listing_finished(self) -> None:
+        self._listing_thread = None
+        self._listing_worker = None
+        self.load_remote_button.setText("XServerから一覧を取得…")
+        self.load_remote_button.setEnabled(self.remote_listing_provider is not None)
+        self.buttons.setEnabled(True)
+
     def _accept_paths(self) -> None:
         normalized: list[str] = []
         for line_number, value in enumerate(self.paths_edit.toPlainText().splitlines(), start=1):
             if not value.strip():
                 continue
             try:
-                path = normalize_runtime_directory(value)
+                stripped = value.strip()
+                path = (
+                    normalize_protected_file(stripped)
+                    if stripped in self._known_remote_files
+                    else normalize_runtime_directory(stripped)
+                )
             except ValueError as exc:
                 QMessageBox.warning(self, "パスを確認", f"{line_number}行目: {exc}")
                 return
@@ -154,11 +400,13 @@ class ProjectDialog(QDialog):
         parent=None,
         *,
         duplicate_from: Project | None = None,
+        passphrase: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.store = store
         self.original = project
         self.duplicate_from = duplicate_from
+        self.passphrase = passphrase
         self.saved_project: Project | None = None
         self._original_mappings = {
             mapping.mapping_id: mapping for mapping in project.mappings
@@ -249,7 +497,7 @@ class ProjectDialog(QDialog):
         form.addRow("サイトの種類", self.site_combo)
         form.addRow(self.site_help)
         form.addRow("公開ドメイン", self.domain_edit)
-        form.addRow(_hint("テスト先があるドメイン名。https://は付けません。"))
+        form.addRow(_hint("同期先サイトのドメイン名。https://は付けません。"))
         form.addRow("SSHホスト", self.host_edit)
         form.addRow(_hint("XServer サーバーパネル → SSH設定 → SSHソフト設定で確認します。"))
         form.addRow("SSHポート", self.port_spin)
@@ -267,7 +515,7 @@ class ProjectDialog(QDialog):
         self.add_mapping_button = QPushButton("PC側フォルダを追加…")
         self.add_mapping_button.clicked.connect(self._add_mapping)
         self.mapping_header.addWidget(self.add_mapping_button)
-        self.runtime_paths_button = QPushButton("本番書き込み先を設定…")
+        self.runtime_paths_button = QPushButton("XServer側の保護対象を設定…")
         self.runtime_paths_button.clicked.connect(self._edit_runtime_paths)
         self.mapping_header.addWidget(self.runtime_paths_button)
         remove_mapping = QPushButton("選択行を削除")
@@ -280,8 +528,8 @@ class ProjectDialog(QDialog):
             (
                 "用途",
                 "PC側の同期元フォルダ",
-                "XServer側のテストフォルダ（絶対パス）",
-                "本番書き込み先",
+                "XServer側の同期先フォルダ（絶対パス）",
+                "XServer側の保護設定",
             )
         )
         header = self.mapping_table.horizontalHeader()
@@ -293,8 +541,8 @@ class ProjectDialog(QDialog):
 
         mapping_help = _hint(
             "PC側はcompose.ymlのvolumesでコロンより左のフォルダを選びます。"
-            "XServer側は例: /home/SERVER_ID/example.com/public_html/sync-test。"
-            "テストフォルダは事前に作成してください。"
+            "XServer側は同期先の絶対パス（例: /home/SERVER_ID/example.com/public_html）。"
+            "初回はテスト用フォルダを推奨します。同期先フォルダは事前に作成してください。"
         )
         layout.addWidget(mapping_help)
 
@@ -330,10 +578,10 @@ class ProjectDialog(QDialog):
         }
         self.site_help.setText(messages[site_type])
         if site_type is SiteType.STATIC_SITE:
-            self.runtime_paths_button.setText("保護パスを設定…")
+            self.runtime_paths_button.setText("XServer側の保護対象を設定…")
             self.runtime_paths_button.setEnabled(True)
         else:
-            self.runtime_paths_button.setText("本番書き込み先を設定…")
+            self.runtime_paths_button.setText("XServer側の保護対象を設定…")
             self.runtime_paths_button.setEnabled(site_type is SiteType.CUSTOM_PHP)
         for row in range(self.mapping_table.rowCount()):
             self._update_runtime_status(row)
@@ -355,8 +603,9 @@ class ProjectDialog(QDialog):
             "   同じ画面にあるSHA256:から始まるホスト鍵をコピー。\n\n"
             "5. 秘密鍵\n"
             "   公開鍵登録時に保存した秘密鍵。.pubは選ばない。\n\n"
-            "6. XServer側テストフォルダ\n"
-            "   例: /home/SERVER_ID/example.com/public_html/sync-test\n"
+            "6. XServer側の同期先フォルダ\n"
+            "   例: /home/SERVER_ID/example.com/public_html\n"
+            "   初回はpublic_html内のテスト用フォルダを同期先にすることを推奨します。\n"
             "   SSHで対象フォルダへ移動し、pwdを実行すると絶対パスを確認できます。",
         )
 
@@ -450,6 +699,7 @@ class ProjectDialog(QDialog):
         dialog = ProjectDialog(
             self.store,
             duplicate_from=source_project,
+            passphrase=self.passphrase,
             parent=self.parent() or self,
         )
         if dialog.exec() == QDialog.Accepted and dialog.saved_project is not None:
@@ -507,10 +757,10 @@ class ProjectDialog(QDialog):
         confirmed = bool(item.data(Qt.UserRole + 1))
         if site_type is SiteType.STATIC_SITE:
             if patterns:
-                item.setText(f"任意保護 {len(patterns)}件")
+                item.setText(f"追加保護 {len(patterns)}件")
                 item.setToolTip("\n".join(patterns))
             else:
-                item.setText("保護なし（確認不要）")
+                item.setText("追加保護なし")
                 item.setToolTip("")
             item.setForeground(QColor("#1a7f37"))
         elif site_type is SiteType.CUSTOM_PHP:
@@ -549,6 +799,7 @@ class ProjectDialog(QDialog):
             patterns=tuple(item.data(Qt.UserRole) or ()),
             confirmed=bool(item.data(Qt.UserRole + 1)),
             require_confirmation=require_confirmation,
+            remote_listing_provider=self._remote_listing_provider(row),
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -557,6 +808,59 @@ class ProjectDialog(QDialog):
         if require_confirmation:
             item.setData(Qt.UserRole + 1, True)
         self._update_runtime_status(row)
+
+    def _remote_listing_provider(
+        self,
+        row: int,
+    ) -> Callable[[], tuple[RemoteProtectionEntry, ...]]:
+        remote_item = self.mapping_table.item(row, 2)
+        remote_root = remote_item.text().strip() if remote_item else ""
+        host = self.host_edit.text().strip()
+        port = self.port_spin.value()
+        username = self.user_edit.text().strip()
+        private_key_path = self.key_edit.text().strip()
+        fingerprint = self.fingerprint_edit.text().strip()
+        passphrase = self.passphrase
+
+        def load() -> tuple[RemoteProtectionEntry, ...]:
+            missing = [
+                label
+                for label, value in (
+                    ("SSHホスト", host),
+                    ("SSHユーザー", username),
+                    ("接続先の確認コード", fingerprint),
+                    ("秘密鍵ファイル", private_key_path),
+                    ("XServer側の同期先フォルダ", remote_root),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError("先に次の項目を入力してください: " + "、".join(missing))
+            client = None
+            sftp = None
+            try:
+                client, sftp = connect_sftp(
+                    host=host,
+                    port=port,
+                    username=username,
+                    private_key_path=private_key_path,
+                    host_key_fingerprint=fingerprint,
+                    passphrase=passphrase,
+                )
+                return list_remote_protection_entries(sftp, remote_root)
+            finally:
+                if sftp is not None:
+                    try:
+                        sftp.close()
+                    except Exception:
+                        pass
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+
+        return load
 
     def _browse_key(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "SSH秘密鍵を選択")

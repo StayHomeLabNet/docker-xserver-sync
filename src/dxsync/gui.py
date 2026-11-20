@@ -1202,9 +1202,9 @@ class MainWindow(QMainWindow):
             return True
         QMessageBox.warning(
             self,
-            "本番書き込み先が未確認です",
+            "XServer側の保護設定が未確認です",
             issue.message
-            + "\n\n「プロジェクトを編集」→「本番書き込み先を設定」から確認するまで、"
+            + "\n\n「プロジェクトを編集」→「XServer側の保護対象を設定」から確認するまで、"
             "ドライラン計画と書き込み操作は実行できません。",
         )
         return False
@@ -2000,6 +2000,7 @@ class MainWindow(QMainWindow):
         dialog = ProjectDialog(
             self.store,
             duplicate_from=self._current_project,
+            passphrase=self._resolve_gui_passphrase(),
             parent=self,
         )
         if dialog.exec() == QDialog.Accepted and dialog.saved_project is not None:
@@ -2009,7 +2010,12 @@ class MainWindow(QMainWindow):
     def _edit_project(self) -> None:
         if self._current_project is None:
             return
-        dialog = ProjectDialog(self.store, self._current_project, self)
+        dialog = ProjectDialog(
+            self.store,
+            self._current_project,
+            self,
+            passphrase=self._resolve_gui_passphrase(),
+        )
         if dialog.exec() == QDialog.Accepted and dialog.saved_project is not None:
             self._reload_projects(dialog.saved_project.project_id)
 

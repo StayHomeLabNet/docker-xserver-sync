@@ -38,7 +38,7 @@ def normalize_runtime_directory(value: str) -> str:
     if "\\" in candidate:
         raise ValueError("区切り文字は / を使ってください。")
     if candidate.startswith("/"):
-        raise ValueError("同期元ルートからの相対パスを入力してください。")
+        raise ValueError("XServer側の同期先フォルダからの相対パスを入力してください。")
     without_slash = candidate.rstrip("/")
     parts = PurePosixPath(without_slash).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
@@ -46,6 +46,25 @@ def normalize_runtime_directory(value: str) -> str:
     if any(character in without_slash for character in "*?[]"):
         raise ValueError("ワイルドカードではなくディレクトリ名を入力してください。")
     return f"{PurePosixPath(without_slash).as_posix()}/"
+
+
+def normalize_protected_file(value: str) -> str:
+    """Normalize an exact project-relative file selected from the remote host."""
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("空のパスは登録できません。")
+    if any(character in candidate for character in ("\x00", "\n", "\r")):
+        raise ValueError("パスに改行やNUL文字は使えません。")
+    if "\\" in candidate:
+        raise ValueError("区切り文字は / を使ってください。")
+    if candidate.startswith("/"):
+        raise ValueError("XServer側の同期先フォルダからの相対パスを入力してください。")
+    parts = PurePosixPath(candidate).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(". や .. を含むパスは使えません。")
+    if any(character in candidate for character in "*?[]"):
+        raise ValueError("ワイルドカードは使えません。")
+    return PurePosixPath(candidate).as_posix()
 
 
 def custom_runtime_paths_issue(
