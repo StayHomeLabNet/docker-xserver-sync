@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from .rules import PathRules
 from .validation import normalize_remote_root
 
 
@@ -23,10 +24,12 @@ def list_remote_protection_entries(
     remote_root: str,
     *,
     recursive: bool = False,
+    skip_patterns: tuple[str, ...] = (),
     limit: int = 5000,
 ) -> tuple[RemoteProtectionEntry, ...]:
     """List regular files and directories without reading remote file contents."""
     root = normalize_remote_root(remote_root)
+    skipped = PathRules(skip_patterns)
     pending: list[tuple[str, str]] = [(root, "")]
     result: list[RemoteProtectionEntry] = []
 
@@ -46,7 +49,7 @@ def list_remote_protection_entries(
             absolute_path = str(PurePosixPath(absolute_directory) / entry.filename)
             if stat.S_ISDIR(entry.st_mode):
                 result.append(RemoteProtectionEntry(relative_path, True))
-                if recursive:
+                if recursive and not skipped.matches(relative_path, is_directory=True):
                     pending.append((absolute_path, relative_path))
             elif stat.S_ISREG(entry.st_mode):
                 result.append(RemoteProtectionEntry(relative_path, False))

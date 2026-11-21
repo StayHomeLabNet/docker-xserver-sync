@@ -16,7 +16,7 @@ def record(path: str, digest: str) -> FileRecord:
     return FileRecord(path, EntryKind.FILE, 1, 1, digest)
 
 
-def test_plan_classifies_changes_and_protects_runtime_data(tmp_path: Path) -> None:
+def test_plan_classifies_changes_and_omits_protected_data(tmp_path: Path) -> None:
     local = ScanResult(
         root=tmp_path,
         files=(
@@ -45,7 +45,6 @@ def test_plan_classifies_changes_and_protects_runtime_data(tmp_path: Path) -> No
         "remote.php": ChangeType.REMOTE_ONLY,
         "same.php": ChangeType.SAME,
         "update.php": ChangeType.UPDATE,
-        "wp-content/uploads/local.jpg": ChangeType.PROTECTED,
     }
     assert not plan.has_blocking_changes
     assert plan.expires_at - plan.created_at == timedelta(minutes=15)

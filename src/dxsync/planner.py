@@ -63,17 +63,22 @@ class PlanBuilder:
         config_sha256: str = "",
     ) -> SyncPlan:
         validate_plan_validity(validity)
-        local_by_path = local.by_path
-        remote_by_path = {record.relative_path: record for record in remote_records}
+        local_by_path = {
+            path: record
+            for path, record in local.by_path.items()
+            if not self._protected.matches(path)
+        }
+        remote_by_path = {
+            record.relative_path: record
+            for record in remote_records
+            if not self._protected.matches(record.relative_path)
+        }
         changes: list[FileChange] = []
 
         for path in sorted(local_by_path.keys() | remote_by_path.keys()):
             local_record = local_by_path.get(path)
             remote_record = remote_by_path.get(path)
-            if self._protected.matches(path):
-                change_type = ChangeType.PROTECTED
-                reason = "Path is protected by the site or project policy"
-            elif local_record is None:
+            if local_record is None:
                 change_type = ChangeType.REMOTE_ONLY
                 reason = "Remote-only files are preserved"
             elif remote_record is None:

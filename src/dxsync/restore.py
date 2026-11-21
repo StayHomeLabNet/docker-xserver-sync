@@ -10,6 +10,7 @@ from typing import Any, BinaryIO, Callable, Protocol
 
 from .cancellation import CancellationToken
 from .models import normalize_relative_path
+from .rules import PathRules
 from .validation import normalize_remote_root
 
 
@@ -105,6 +106,7 @@ class RemoteRestoreEngine:
         destination_root: str,
         expected_current_hashes: dict[str, str | None],
         authorization: RestoreAuthorization,
+        protect_patterns: tuple[str, ...] = (),
         progress_callback: Callable[[int, int, str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> RestoreResult:
@@ -125,14 +127,24 @@ class RemoteRestoreEngine:
         authorization.consume(backup_id=backup_id, destination_root=destination_root)
 
         manifest_directory = str(PurePosixPath(manifest_path).parent)
+        protected = PathRules(protect_patterns)
         token = f"{backup_id[:24]}-{uuid.uuid4().hex[:12]}"
         items: list[_RestoreItem] = []
         seen: set[str] = set()
-        total_files = len(manifest_files)
-        for index, record in enumerate(manifest_files, start=1):
-            cancel.raise_if_cancelled()
+        restore_records: list[tuple[dict[str, Any], str]] = []
+        for record in manifest_files:
             try:
                 relative = normalize_relative_path(str(record["relative_path"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RestoreError(f"Invalid backup file record: {exc}") from exc
+            if protected.matches(relative):
+                continue
+            restore_records.append((record, relative))
+
+        total_files = len(restore_records)
+        for index, (record, relative) in enumerate(restore_records, start=1):
+            cancel.raise_if_cancelled()
+            try:
                 backup_hash = str(record["sha256"])
                 backup_size = int(record["size"])
                 backup_path = str(PurePosixPath(str(record["backup_path"])))

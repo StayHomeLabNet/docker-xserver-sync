@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from .recovery import RecoveryAnalysisResult
+from .ui_styles import DANGER_TEXT_STYLE
 
 
 class RecoveryAnalysisDialog(QDialog):
@@ -54,7 +55,7 @@ class RecoveryAnalysisDialog(QDialog):
         if result.issues:
             warning = QLabel("未確認項目:\n" + "\n".join(result.issues))
             warning.setWordWrap(True)
-            warning.setStyleSheet("color: #b42318;")
+            warning.setStyleSheet(DANGER_TEXT_STYLE)
             layout.addWidget(warning)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)

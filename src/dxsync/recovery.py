@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from typing import Any, BinaryIO, Callable, Protocol
 
 from .cancellation import CancellationToken
+from .rules import PathRules
 from .validation import normalize_remote_root
 
 
@@ -51,6 +52,7 @@ def scan_recovery_artifacts(
     sftp: RecoveryRemoteFileSystem,
     remote_root: str,
     *,
+    protect_patterns: tuple[str, ...] = (),
     progress_callback: Callable[[int, int | None, str], None] | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> RecoveryScanResult:
@@ -58,6 +60,7 @@ def scan_recovery_artifacts(
     cancel = cancellation_token or CancellationToken()
     report = progress_callback or (lambda _current, _total, _detail: None)
     root = normalize_remote_root(remote_root)
+    protected = PathRules(protect_patterns)
     pending = [(root, "")]
     found: list[str] = []
     issues: list[str] = []
@@ -83,8 +86,13 @@ def scan_recovery_artifacts(
             if stat.S_ISLNK(entry.st_mode):
                 continue
             if stat.S_ISDIR(entry.st_mode):
+                if protected.matches(relative, is_directory=True):
+                    continue
                 pending.append((absolute, relative))
             elif stat.S_ISREG(entry.st_mode) and is_dxsync_temporary_name(entry.filename):
+                destination_relative = relative[: relative.rfind(".dxsync-")]
+                if protected.matches(relative) or protected.matches(destination_relative):
+                    continue
                 found.append(relative)
     return RecoveryScanResult(root, tuple(sorted(found)), tuple(sorted(issues)))
 
@@ -116,6 +124,7 @@ def analyze_recovery_artifacts(
     sftp: RecoveryRemoteFileSystem,
     remote_root: str,
     *,
+    protect_patterns: tuple[str, ...] = (),
     progress_callback: Callable[[int, int | None, str], None] | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> RecoveryAnalysisResult:
@@ -124,6 +133,7 @@ def analyze_recovery_artifacts(
     scan = scan_recovery_artifacts(
         sftp,
         remote_root,
+        protect_patterns=protect_patterns,
         progress_callback=progress_callback,
         cancellation_token=cancel,
     )

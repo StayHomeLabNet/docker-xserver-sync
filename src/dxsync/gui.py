@@ -24,7 +24,7 @@ try:
         Signal,
         Slot,
     )
-    from PySide6.QtGui import QColor, QDesktopServices, QFont
+    from PySide6.QtGui import QDesktopServices, QFont, QPalette
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -87,6 +87,7 @@ from .force_overwrite import (
 )
 from .presets import get_preset
 from .project_dialog import ProjectDialog
+from .ui_styles import MUTED_TEXT_STYLE, WARNING_TEXT_STYLE
 from .remote import connect_sftp
 from .wordpress_setup import (
     WORDPRESS_SETUP_TOTAL_STEPS,
@@ -215,7 +216,7 @@ class FileTableModel(QAbstractTableModel):
             )
             return values[index.column()]
         if role == Qt.ForegroundRole and is_protected:
-            return QColor("#9a6700")
+            return QApplication.palette().color(QPalette.PlaceholderText)
         if role == Qt.TextAlignmentRole and index.column() == 2:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
@@ -323,7 +324,7 @@ class MainWindow(QMainWindow):
         subtitle = QLabel(
             "安全同期モード — 通常は再検証・バックアップ・明示承認を行います"
         )
-        subtitle.setStyleSheet("color: #57606a;")
+        subtitle.setStyleSheet(MUTED_TEXT_STYLE)
         layout.addWidget(subtitle)
 
         project_bar = QHBoxLayout()
@@ -533,7 +534,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(table, 1)
 
         footer = QLabel("ドライランはリモートへの一覧取得・読み取りだけを行い、ファイルを作成・変更しません。")
-        footer.setStyleSheet("color: #57606a;")
+        footer.setStyleSheet(MUTED_TEXT_STYLE)
         layout.addWidget(footer)
 
         self.setCentralWidget(root)
@@ -885,7 +886,7 @@ class MainWindow(QMainWindow):
             self.auto_sync_policy_label.setText(
                 "自動実行設定: 保存済みプロジェクトを選択すると変更できます"
             )
-            self.auto_sync_policy_label.setStyleSheet("color: #57606a;")
+            self.auto_sync_policy_label.setStyleSheet(MUTED_TEXT_STYLE)
             self.auto_sync_button.setToolTip(
                 "保存済みプロジェクトを選択すると利用できます"
             )
@@ -896,9 +897,9 @@ class MainWindow(QMainWindow):
         summary_text = format_auto_sync_summary(preferences)
         self.auto_sync_policy_label.setText(summary_text)
         self.auto_sync_policy_label.setStyleSheet(
-            "color: #8a4b08;"
+            WARNING_TEXT_STYLE
             if preferences.backup_mode == "skip"
-            else "color: #57606a;"
+            else MUTED_TEXT_STYLE
         )
         self.auto_sync_button.setToolTip(summary_text)
 

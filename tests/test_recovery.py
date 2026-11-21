@@ -17,6 +17,9 @@ class Entry:
 
 class MemorySftp:
     def __init__(self) -> None:
+        self.listdir_calls: list[str] = []
+        self.open_calls: list[str] = []
+        self.stat_calls: list[str] = []
         self.files = {
             "/home/user/site/index.php": b"published",
             "/home/user/site/index.php.dxsync-plan-abc.new": b"published",
@@ -34,12 +37,15 @@ class MemorySftp:
         }
 
     def listdir_attr(self, path: str):
+        self.listdir_calls.append(path)
         return self.entries[path]
 
     def open(self, path: str, mode: str = "r"):
+        self.open_calls.append(path)
         return io.BytesIO(self.files[path])
 
     def stat(self, path: str):
+        self.stat_calls.append(path)
         if path in self.files:
             return type("RemoteStat", (), {"st_mode": stat.S_IFREG | 0o600})()
         raise FileNotFoundError(path)
@@ -67,6 +73,20 @@ def test_recovery_analysis_compares_temporary_and_destination_hashes() -> None:
     assert by_path["index.php.dxsync-plan-abc.new"].assessment == "公開済みコピーと一致"
     assert by_path["index.php.dxsync-plan-abc.new"].destination_sha256 is not None
     assert by_path["nested/old.php.dxsync-restore-plan.old"].assessment == "公開ファイルがなく旧退避だけ存在"
+
+
+def test_recovery_does_not_enter_or_read_protected_targets() -> None:
+    sftp = MemorySftp()
+    result = analyze_recovery_artifacts(
+        sftp,
+        "/home/user/site",
+        protect_patterns=("index.php", "nested/"),
+    )
+
+    assert result.artifacts == ()
+    assert sftp.listdir_calls == ["/home/user/site"]
+    assert sftp.open_calls == []
+    assert sftp.stat_calls == []
 
 
 def test_recovery_scan_and_analysis_report_progress_and_cancel() -> None:

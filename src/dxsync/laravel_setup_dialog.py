@@ -20,6 +20,12 @@ from PySide6.QtWidgets import (
 )
 
 from .models import Project, SyncMapping
+from .ui_styles import (
+    DANGER_TEXT_STYLE,
+    MUTED_TEXT_STYLE,
+    PANEL_STYLE,
+    WARNING_PANEL_STYLE,
+)
 from .laravel_setup import (
     LaravelSetupError,
     LaravelSetupRequest,
@@ -98,7 +104,7 @@ class LaravelSetupWizard(QWizard):
             "事前にDocker/ローカル環境で 'composer install' および 'npm run build' が完了していることを確認してください。"
         )
         self.vendor_note.setWordWrap(True)
-        self.vendor_note.setStyleSheet("color: #57606a; margin-top: 10px;")
+        self.vendor_note.setStyleSheet(MUTED_TEXT_STYLE + " margin-top: 10px;")
         form.addRow("", self.vendor_note)
 
         self._migration_mode_changed()
@@ -139,9 +145,7 @@ class LaravelSetupWizard(QWizard):
             "これにより、.envやソースコードがWeb上に誤って露出するリスクを完全に防ぎます。"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet(
-            "background: #ddf4ff; color: #0969da; padding: 10px; border: 1px solid #54aeff;"
-        )
+        info_label.setStyleSheet(PANEL_STYLE)
         form.addRow("", info_label)
         self.addPage(page)
 
@@ -203,9 +207,7 @@ class LaravelSetupWizard(QWizard):
 
         self.database_instructions = QLabel()
         self.database_instructions.setWordWrap(True)
-        self.database_instructions.setStyleSheet(
-            "background: #fff8c5; color: #5d4a00; padding: 10px; border: 1px solid #d4a72c;"
-        )
+        self.database_instructions.setStyleSheet(WARNING_PANEL_STYLE)
         form.addRow("", self.database_instructions)
 
         self.existing_db_prepared_check = QCheckBox(
@@ -285,7 +287,7 @@ class LaravelSetupWizard(QWizard):
             "設定したバージョンと合わせてください。"
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: #57606a; margin-top: 10px;")
+        note.setStyleSheet(MUTED_TEXT_STYLE + " margin-top: 10px;")
         form.addRow("", note)
         self.addPage(page)
 
@@ -297,7 +299,7 @@ class LaravelSetupWizard(QWizard):
 
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet("background: #f6f8fa; padding: 12px;")
+        self.summary_label.setStyleSheet(PANEL_STYLE)
         layout.addWidget(self.summary_label)
 
         form = QFormLayout()
@@ -311,7 +313,7 @@ class LaravelSetupWizard(QWizard):
             "本番用.envの生成、キー生成、マイグレーション、キャッシュ最適化が実行されます。"
         )
         caution.setWordWrap(True)
-        caution.setStyleSheet("color: #cf222e;")
+        caution.setStyleSheet(DANGER_TEXT_STYLE)
         layout.addWidget(caution)
         self.addPage(page)
 

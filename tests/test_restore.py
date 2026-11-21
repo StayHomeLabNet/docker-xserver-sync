@@ -30,13 +30,17 @@ class MemorySftp:
         self.files: dict[str, bytes] = {}
         self.modes: dict[str, int] = {}
         self.fail_rename_to: str | None = None
+        self.stat_calls: list[str] = []
+        self.open_calls: list[tuple[str, str]] = []
 
     def stat(self, path: str):
+        self.stat_calls.append(path)
         if path in self.files:
             return RemoteStat(stat.S_IFREG | self.modes.get(path, 0o600))
         raise FileNotFoundError(path)
 
     def open(self, path: str, mode: str = "r"):
+        self.open_calls.append((path, mode))
         if "w" in mode:
             return MemoryWriter(self, path)
         if path not in self.files:
@@ -108,6 +112,24 @@ def test_restore_replaces_expected_current_file_with_verified_backup() -> None:
     assert result.total_bytes == 3
     assert len(result.files) == 1
     assert not any(".dxsync-restore" in path for path in sftp.files)
+
+
+def test_restore_does_not_access_a_protected_destination_or_its_backup() -> None:
+    sftp, root, destination, backup_path, manifest_path = setup_files()
+    result = RemoteRestoreEngine().restore(
+        sftp=sftp,
+        manifest_path=manifest_path,
+        destination_root=root,
+        expected_current_hashes={"index.php": digest(b"new")},
+        authorization=authorize(root),
+        protect_patterns=("index.php",),
+    )
+
+    assert result.files == ()
+    assert result.total_bytes == 0
+    assert sftp.files[destination] == b"new"
+    assert destination not in sftp.stat_calls
+    assert not any(path in {destination, backup_path} for path, _mode in sftp.open_calls)
 
 
 def test_restore_refuses_externally_modified_current_file() -> None:

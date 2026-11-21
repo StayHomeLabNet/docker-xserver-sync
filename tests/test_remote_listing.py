@@ -8,6 +8,7 @@ from dxsync.remote_listing import list_remote_protection_entries
 
 class FakeSftp:
     def __init__(self) -> None:
+        self.listdir_calls: list[str] = []
         self.directories = {
             "/home/user/public_html": (
                 SimpleNamespace(filename="index.html", st_mode=stat.S_IFREG | 0o644),
@@ -20,6 +21,7 @@ class FakeSftp:
         }
 
     def listdir_attr(self, path: str):
+        self.listdir_calls.append(path)
         return self.directories[path]
 
 
@@ -47,6 +49,22 @@ def test_recursively_lists_remote_entries_without_following_symlinks() -> None:
         "uploads/",
         "uploads/photo.jpg",
     )
+
+
+def test_recursive_listing_does_not_enter_an_existing_protected_directory() -> None:
+    sftp = FakeSftp()
+    entries = list_remote_protection_entries(
+        sftp,
+        "/home/user/public_html",
+        recursive=True,
+        skip_patterns=("uploads/",),
+    )
+
+    assert tuple(entry.protection_pattern for entry in entries) == (
+        "index.html",
+        "uploads/",
+    )
+    assert sftp.listdir_calls == ["/home/user/public_html"]
 
 
 def test_remote_listing_has_a_safety_limit() -> None:

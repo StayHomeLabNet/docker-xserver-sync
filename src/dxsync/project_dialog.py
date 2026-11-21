@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -38,6 +37,7 @@ from .remote import connect_sftp
 from .remote_listing import RemoteProtectionEntry, list_remote_protection_entries
 from .storage import ProjectStore
 from .secure_store import SecureStoreError
+from .ui_styles import MUTED_NOTE_STYLE, MUTED_TEXT_STYLE
 from .validation import (
     ValidationIssue,
     normalize_protected_file,
@@ -54,12 +54,18 @@ SITE_LABELS = {
 }
 
 
+def _emphasize(item: QTableWidgetItem) -> None:
+    font = item.font()
+    font.setBold(True)
+    item.setFont(font)
+
+
 def _hint(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
     label.setTextFormat(Qt.PlainText)
     label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-    label.setStyleSheet("color: #8c959f; padding: 1px 0 6px 0;")
+    label.setStyleSheet(MUTED_NOTE_STYLE)
     return label
 
 
@@ -285,7 +291,7 @@ class RuntimePathsDialog(QDialog):
         confirmed: bool = False,
         require_confirmation: bool = True,
         remote_listing_provider: Callable[
-            [bool], tuple[RemoteProtectionEntry, ...]
+            [bool, tuple[str, ...]], tuple[RemoteProtectionEntry, ...]
         ]
         | None = None,
         parent=None,
@@ -311,12 +317,13 @@ class RuntimePathsDialog(QDialog):
             intro = QLabel(
                 "XServer上でアップロード、ログ、キャッシュなどが保存される"
                 "ディレクトリを、同期元ルートからの相対パスで1行ずつ入力してください。"
-                "ここに登録した場所は走査・アップロード・削除の対象にしません。"
+                "ここに登録した場所は配下へ入らず、内容の読み取り、ハッシュ比較、"
+                "バックアップ、復元、アップロード、削除を一切行いません。"
             )
         else:
             intro = QLabel(
                 "静的サイトは原則としてすべてのファイルを同期します。XServer上に残し、"
-                "PC側の内容で上書き・削除したくないファイル／フォルダだけを、XServer側の同期先フォルダ"
+                "同期処理で読み取り・比較・変更したくないファイル／フォルダだけを、XServer側の同期先フォルダ"
                 "直下からの相対パスで"
                 "1行ずつ入力してください（空欄のまま保存できます）。"
             )
@@ -355,7 +362,7 @@ class RuntimePathsDialog(QDialog):
             QLabel(
                 "XServer側にあるその他の本番データ用ファイル／フォルダ（1行に1つ）"
                 if require_confirmation
-                else "XServer側で上書き・削除しないファイル／フォルダ（1行に1つ・空欄可）"
+                else "XServer側で一切処理しないファイル／フォルダ（1行に1つ・空欄可）"
             )
         )
         self.paths_edit = QPlainTextEdit()
@@ -391,7 +398,14 @@ class RuntimePathsDialog(QDialog):
         self.buttons.setEnabled(False)
 
         thread = QThread(self)
-        worker = RemoteListingWorker(lambda: self.remote_listing_provider(False))
+        current_patterns = tuple(
+            line.strip()
+            for line in self.paths_edit.toPlainText().splitlines()
+            if line.strip()
+        )
+        worker = RemoteListingWorker(
+            lambda: self.remote_listing_provider(False, current_patterns)
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.completed.connect(self._remote_entries_loaded)
@@ -426,7 +440,7 @@ class RuntimePathsDialog(QDialog):
         picker = RemoteProtectionPickerDialog(
             entries,
             current_patterns,
-            lambda: self.remote_listing_provider(True),
+            lambda: self.remote_listing_provider(True, current_patterns),
             self,
         )
         if picker.exec() != QDialog.Accepted:
@@ -640,7 +654,7 @@ class ProjectDialog(QDialog):
         note = QLabel(
             "パスフレーズは保存しません。Laravelはアプリ本体とpublicを別マッピングにできます。"
         )
-        note.setStyleSheet("color: #57606a;")
+        note.setStyleSheet(MUTED_TEXT_STYLE)
         layout.addWidget(note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -853,20 +867,20 @@ class ProjectDialog(QDialog):
             else:
                 item.setText("追加保護なし")
                 item.setToolTip("")
-            item.setForeground(QColor("#1a7f37"))
+            _emphasize(item)
         elif site_type is SiteType.CUSTOM_PHP:
             if not confirmed:
                 item.setText("未確認（同期不可）")
                 item.setToolTip("")
-                item.setForeground(QColor("#cf222e"))
+                _emphasize(item)
             elif patterns:
                 item.setText(f"確認済み（追加 {len(patterns)}件）")
                 item.setToolTip("\n".join(patterns))
-                item.setForeground(QColor("#1a7f37"))
+                _emphasize(item)
             else:
                 item.setText("確認済み（自動保護のみ）")
                 item.setToolTip("")
-                item.setForeground(QColor("#1a7f37"))
+                _emphasize(item)
         else:
             if patterns:
                 item.setText(f"自動保護＋追加 {len(patterns)}件")
@@ -874,7 +888,7 @@ class ProjectDialog(QDialog):
             else:
                 item.setText("自動保護（確認不要）")
                 item.setToolTip("")
-            item.setForeground(QColor("#1a7f37"))
+            _emphasize(item)
 
     def _edit_runtime_paths(self) -> None:
         row = self.mapping_table.currentRow()
@@ -903,7 +917,7 @@ class ProjectDialog(QDialog):
     def _remote_listing_provider(
         self,
         row: int,
-    ) -> Callable[[bool], tuple[RemoteProtectionEntry, ...]]:
+    ) -> Callable[[bool, tuple[str, ...]], tuple[RemoteProtectionEntry, ...]]:
         remote_item = self.mapping_table.item(row, 2)
         remote_root = remote_item.text().strip() if remote_item else ""
         host = self.host_edit.text().strip()
@@ -913,7 +927,10 @@ class ProjectDialog(QDialog):
         fingerprint = self.fingerprint_edit.text().strip()
         passphrase = self.passphrase
 
-        def load(recursive: bool) -> tuple[RemoteProtectionEntry, ...]:
+        def load(
+            recursive: bool,
+            protect_patterns: tuple[str, ...],
+        ) -> tuple[RemoteProtectionEntry, ...]:
             missing = [
                 label
                 for label, value in (
@@ -942,6 +959,7 @@ class ProjectDialog(QDialog):
                     sftp,
                     remote_root,
                     recursive=recursive,
+                    skip_patterns=protect_patterns,
                 )
             finally:
                 if sftp is not None:

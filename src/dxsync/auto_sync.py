@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from .auto_sync_policy import AutoSyncPreferences, auto_sync_policy_issues
 from .health import normalize_health_check_path
+from .ui_styles import WARNING_TEXT_STYLE
 
 
 def _prefix(project_id: str) -> str:
@@ -168,7 +169,7 @@ class AutoSyncSettingsDialog(QDialog):
 
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
-        self.warning_label.setStyleSheet("color: #8a4b08;")
+        self.warning_label.setStyleSheet(WARNING_TEXT_STYLE)
         layout.addWidget(self.warning_label)
         self.backup_mode.currentIndexChanged.connect(self._update_warning_text)
         self.remote_only_policy.currentIndexChanged.connect(
@@ -374,7 +375,7 @@ class AutoSyncApprovalDialog(QDialog):
                 "バックアップ設定が「常にスキップ」のため、自動実行ではREMOTE_ONLYを削除できません。"
             )
             skip_note.setWordWrap(True)
-            skip_note.setStyleSheet("color: #8a4b08;")
+            skip_note.setStyleSheet(WARNING_TEXT_STYLE)
             layout.addWidget(skip_note)
 
         layout.addWidget(self.deletion_table)
@@ -424,7 +425,7 @@ class AutoSyncApprovalDialog(QDialog):
             self.domain_prompt.setText(
                 "設定により対象ドメインの再入力を省略します。"
             )
-            self.domain_prompt.setStyleSheet("color: #8a4b08;")
+            self.domain_prompt.setStyleSheet(WARNING_TEXT_STYLE)
             self.domain_edit.setVisible(False)
 
         self.buttons = QDialogButtonBox(
@@ -482,7 +483,7 @@ class AutoSyncApprovalDialog(QDialog):
             self.save_skip_backup_check.setVisible(False)
         elif self.skip_backup_check.isChecked():
             self.backup_label.setText("スキップ（復元不可）")
-            self.backup_label.setStyleSheet("color: #8a4b08; font-weight: bold;")
+            self.backup_label.setStyleSheet(WARNING_TEXT_STYLE)
             can_save = self._backup_mode != "skip"
             self.save_skip_backup_check.setVisible(can_save)
             if not can_save:

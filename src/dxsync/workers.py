@@ -62,6 +62,10 @@ def _perform_https_health_check(**kwargs):
     return (fn or perform_https_health_check)(**kwargs)
 
 
+def _protect_patterns(project: Project, mapping: SyncMapping) -> tuple[str, ...]:
+    return get_preset(project.site_type).protect_patterns + mapping.protect_patterns
+
+
 def _close_remote(client, sftp) -> None:
     if sftp is not None:
         try:
@@ -367,6 +371,7 @@ class BackupWorker(QObject):
             recovery = scan_recovery_artifacts(
                 sftp,
                 self.mapping.remote_root,
+                protect_patterns=_protect_patterns(self.project, self.mapping),
                 progress_callback=report_recovery,
                 cancellation_token=self.cancellation_token,
             )
@@ -516,6 +521,7 @@ class DeployWorker(QObject):
             recovery = scan_recovery_artifacts(
                 sftp,
                 self.mapping.remote_root,
+                protect_patterns=_protect_patterns(self.project, self.mapping),
                 progress_callback=report_recovery,
                 cancellation_token=self.cancellation_token,
             )
@@ -742,6 +748,7 @@ class RecoveryScanWorker(QObject):
                 analyze_recovery_artifacts(
                     sftp,
                     self.mapping.remote_root,
+                    protect_patterns=_protect_patterns(self.project, self.mapping),
                     progress_callback=report,
                     cancellation_token=self.cancellation_token,
                 )
@@ -823,6 +830,7 @@ class RestoreWorker(QObject):
             recovery = scan_recovery_artifacts(
                 sftp,
                 self.mapping.remote_root,
+                protect_patterns=_protect_patterns(self.project, self.mapping),
                 progress_callback=report_recovery,
                 cancellation_token=self.cancellation_token,
             )
@@ -852,6 +860,7 @@ class RestoreWorker(QObject):
                 destination_root=self.mapping.remote_root,
                 expected_current_hashes=self.expected_current_hashes,
                 authorization=self.authorization,
+                protect_patterns=_protect_patterns(self.project, self.mapping),
                 progress_callback=report_restore,
                 cancellation_token=self.cancellation_token,
             )

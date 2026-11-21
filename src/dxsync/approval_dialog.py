@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .health import normalize_health_check_path
+from .ui_styles import DANGER_TEXT_STYLE
 
 
 class BackupConfirmationDialog(QDialog):
@@ -307,7 +308,7 @@ class ForceOverwriteApprovalDialog(QDialog):
             "ローカルの同期対象ファイルをXServer側へ無条件に上書きします。"
         )
         warning.setWordWrap(True)
-        warning.setStyleSheet("font-weight: bold; color: #b42318;")
+        warning.setStyleSheet(DANGER_TEXT_STYLE)
         layout.addWidget(warning)
         summary = QFormLayout()
         summary.addRow("対象ドメイン", QLabel(domain))

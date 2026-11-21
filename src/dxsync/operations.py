@@ -22,6 +22,7 @@ from .health import normalize_health_check_path, perform_https_health_check
 from .integrity import project_config_sha256
 from .models import ChangeType, Project, SyncMapping
 from .planner import DEFAULT_PLAN_VALIDITY_MINUTES, validate_plan_validity
+from .presets import get_preset
 from .recovery import is_dxsync_temporary_name, scan_recovery_artifacts
 from .remote import connect_sftp
 from .restore import RemoteRestoreEngine, RestoreAuthorization
@@ -34,6 +35,10 @@ from .validation import custom_runtime_paths_issue
 
 class OperationError(RuntimeError):
     pass
+
+
+def _protect_patterns(project: Project, mapping: SyncMapping) -> tuple[str, ...]:
+    return get_preset(project.site_type).protect_patterns + mapping.protect_patterns
 
 
 def _resolve_passphrase(
@@ -591,7 +596,11 @@ def execute_verify(
         passphrase=_resolve_passphrase(store, project, passphrase),
     )
     try:
-        scan_res = scan_recovery_artifacts(sftp, mapping.remote_root)
+        scan_res = scan_recovery_artifacts(
+            sftp,
+            mapping.remote_root,
+            protect_patterns=_protect_patterns(project, mapping),
+        )
         issues = list(scan_res.issues)
         cleaned_up = []
         if cleanup and scan_res.temporary_files:
@@ -710,7 +719,11 @@ def execute_restore(
     )
     try:
         # Pre-scan for temporary files
-        recovery = scan_recovery_artifacts(sftp, mapping.remote_root)
+        recovery = scan_recovery_artifacts(
+            sftp,
+            mapping.remote_root,
+            protect_patterns=_protect_patterns(project, mapping),
+        )
         if recovery.temporary_files or recovery.issues:
             raise OperationError("残存一時ファイルがあります。先に安全性確認を実行してください。")
 
@@ -726,6 +739,7 @@ def execute_restore(
             destination_root=mapping.remote_root,
             expected_current_hashes=expected_hashes,
             authorization=auth,
+            protect_patterns=_protect_patterns(project, mapping),
         )
         store.set_backup_status(backup_id, "restored")
         store.finish_operation(

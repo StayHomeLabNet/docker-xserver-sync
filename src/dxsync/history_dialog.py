@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from .backup import select_prune_candidates
 from .storage import BackupRecord, ProjectStore
+from .ui_styles import MUTED_TEXT_STYLE
 
 
 def _format_bytes(value: int) -> str:
@@ -125,7 +126,7 @@ class HistoryDialog(QDialog):
             "復元できるのは既存ファイルを退避した利用可能なバックアップだけです。"
             "バックアップ削除は明示確認後にXServer上の退避先を削除します。"
         )
-        restore_note.setStyleSheet("color: #57606a;")
+        restore_note.setStyleSheet(MUTED_TEXT_STYLE)
         backups_layout.addWidget(restore_note)
         self.tabs.addTab(backups_page, "バックアップ")
         layout.addWidget(self.tabs, 1)

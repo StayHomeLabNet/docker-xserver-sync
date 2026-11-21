@@ -15,6 +15,8 @@ class Attr:
 
 class FakeSftp:
     def __init__(self) -> None:
+        self.listdir_calls: list[str] = []
+        self.open_calls: list[str] = []
         self.directories = {
             "/home/user/site": [
                 Attr("index.php", stat.S_IFREG | 0o644, 5),
@@ -28,9 +30,11 @@ class FakeSftp:
         }
 
     def listdir_attr(self, path: str):
+        self.listdir_calls.append(path)
         return self.directories[path]
 
     def open(self, path: str, mode: str = "r"):
+        self.open_calls.append(path)
         return io.BytesIO(self.files[path])
 
 
@@ -63,9 +67,25 @@ def test_sftp_scanner_is_read_only_and_hashes_files() -> None:
 
 
 def test_sftp_scanner_skips_protected_directories_without_reading_contents() -> None:
-    result = SftpScanner(skip_patterns=("uploads/",)).scan(FakeSftp(), "/home/user/site")
+    sftp = FakeSftp()
+    result = SftpScanner(skip_patterns=("uploads/",)).scan(sftp, "/home/user/site")
     assert [item.relative_path for item in result.files] == ["index.php"]
     assert result.skipped_protected_paths == ("uploads",)
+    assert sftp.listdir_calls == ["/home/user/site"]
+    assert sftp.open_calls == ["/home/user/site/index.php"]
+
+
+def test_sftp_scanner_does_not_open_an_exact_protected_file() -> None:
+    sftp = FakeSftp()
+    result = SftpScanner(skip_patterns=("index.php", "uploads/")).scan(
+        sftp,
+        "/home/user/site",
+    )
+
+    assert result.files == ()
+    assert result.skipped_protected_paths == ("index.php", "uploads")
+    assert sftp.listdir_calls == ["/home/user/site"]
+    assert sftp.open_calls == []
 
 
 def test_fingerprint_policy_accepts_only_exact_sha256() -> None:

@@ -23,6 +23,13 @@ from .file_selection import CheckableFileTree
 from .force_overwrite import collect_overwrite_candidates
 from .models import Project, SyncMapping
 from .presets import COMMON_EXCLUDES
+from .ui_styles import (
+    DANGER_TEXT_STYLE,
+    MUTED_TEXT_STYLE,
+    PANEL_STYLE,
+    WARNING_PANEL_STYLE,
+    WARNING_TEXT_STYLE,
+)
 from .wordpress_setup import (
     WordPressSetupError,
     WordPressSetupRequest,
@@ -105,7 +112,7 @@ class WordPressSetupWizard(QWizard):
             "Docker DBの自動検出とダンプは次の実装単位で追加します。"
         )
         self.sql_note.setWordWrap(True)
-        self.sql_note.setStyleSheet("color: #57606a;")
+        self.sql_note.setStyleSheet(MUTED_TEXT_STYLE)
         form.addRow("", self.sql_note)
         self.addPage(page)
 
@@ -148,7 +155,7 @@ class WordPressSetupWizard(QWizard):
             "IDE設定、.env、秘密鍵、node_modules"
         )
         excluded.setWordWrap(True)
-        excluded.setStyleSheet("color: #57606a;")
+        excluded.setStyleSheet(MUTED_TEXT_STYLE)
         layout.addWidget(excluded)
         self.core_count_label = QLabel()
         self.core_count_label.setWordWrap(True)
@@ -232,10 +239,7 @@ class WordPressSetupWizard(QWizard):
         form.addRow("DBパスワード", password_row)
         self.database_instructions = QLabel()
         self.database_instructions.setWordWrap(True)
-        self.database_instructions.setStyleSheet(
-            "background: #fff8c5; color: #5d4a00; padding: 10px; "
-            "border: 1px solid #d4a72c;"
-        )
+        self.database_instructions.setStyleSheet(WARNING_PANEL_STYLE)
         form.addRow("", self.database_instructions)
         self.existing_db_prepared_check = QCheckBox(
             "DB・MySQLユーザーの作成とアクセス権付与が完了しています"
@@ -333,7 +337,7 @@ class WordPressSetupWizard(QWizard):
             "バージョンと合わせてください。単純なSQL文字列置換は行いません。"
         )
         warning.setWordWrap(True)
-        warning.setStyleSheet("color: #9a6700;")
+        warning.setStyleSheet(WARNING_TEXT_STYLE)
         form.addRow("", warning)
         self.addPage(page)
 
@@ -344,7 +348,7 @@ class WordPressSetupWizard(QWizard):
         layout = QVBoxLayout(page)
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet("background: #f6f8fa; padding: 12px;")
+        self.summary_label.setStyleSheet(PANEL_STYLE)
         layout.addWidget(self.summary_label)
         form = QFormLayout()
         self.confirm_domain_edit = QLineEdit()
@@ -356,7 +360,7 @@ class WordPressSetupWizard(QWizard):
             "途中失敗時に作成済みDBを自動削除はしません。"
         )
         self.caution_label.setWordWrap(True)
-        self.caution_label.setStyleSheet("color: #cf222e;")
+        self.caution_label.setStyleSheet(DANGER_TEXT_STYLE)
         layout.addWidget(self.caution_label)
         self.addPage(page)
 

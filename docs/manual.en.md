@@ -123,6 +123,7 @@ For standard PHP projects outside the WordPress or Laravel frameworks.
    - Click **Configure XServer Protection Targets… (XServer側の保護対象を設定…)**.
    - Click **Load List from XServer… (XServerから一覧を取得…)** to first display only files and directories directly under the synchronization destination root. Select protection targets with the checkbox shown to the left of each item; the checkbox remains visible across supported OS themes, including macOS dark mode.
    - To select individual nested items, click **Include Subfolders… (サブフォルダも含めて取得…)** in the list. Selecting a directory already protects its entire subtree, so loading subfolders is unnecessary in that case.
+   - Protected targets are excluded from synchronization scans. Synchronization does not enter protected directories or read, hash, compare, back up, restore, upload, or delete protected files or directories. Only the parent directory is listed so the protected path can be identified and avoided.
    - `uploads/`, `storage/`, `cache/`, `logs/`, and `tmp/` are automatically safeguarded.
    - Add site-specific runtime directories (e.g. `userfiles/`, `data/sessions/`) relative to the root.
    - Check the agreement box to confirm runtime directory preservation.
@@ -386,4 +387,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.1.2 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.3 / StayHomeLabNet*
