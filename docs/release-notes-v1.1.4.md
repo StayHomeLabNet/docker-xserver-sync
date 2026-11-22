@@ -18,13 +18,13 @@ Docker → XServer Sync **v1.1.4** は、表示テーマ切替の追加、SSHバ
 ### 🔧 修正・コード品質・CI
 
 - **アップデート確認・HTTPS動作確認・API通信のSSL証明書解決を修正**: `certifi` のCA証明書バンドルを `updater.py`、`health.py`、`xserver_api.py` および各プラットフォームのNuitkaビルドに含め、パッケージ化されたアプリでもGitHub Releasesへのアップデート確認や同期後のHTTPS動作確認、XServer API通信が正しく動作するよう修正しました。
-- **バックアップスキップ時の動作確認失敗メッセージを改善**: バックアップをスキップした同期でHTTPS動作確認に失敗した場合、履歴から復元できない旨を明確に表示するよう改善しました。
+- **バックアップスキップ時の動作確認失敗メッセージとモーダル表示順序を改善**: バックアップをスキップした同期でHTTPS動作確認に失敗した場合に履歴から復元できない旨を明確に表示し、自動実行完了・エラー時のモーダルダイアログ表示中に自動実行の次段階が誤って再実行されないよう修正しました。
 - **UIモジュール分割とコード品質改善**: `file_table_model.py` と `runtime_paths_dialog.py` を分離して保守性を向上させ、全ソース・テストに対して `ruff` による静的検査を導入しました（CIワークフローにも組み込み済み）。
 
 ### 📚 ドキュメント・テスト
 
 - README（日英）、詳細マニュアル（日英）、実装状況ドキュメントを更新しました。
-- テーマ切替、バッチハッシュ計算、接続テスト、履歴整理、SSL証明書検証のテストを追加し、全 **233件** のユニットテストが合格しています。
+- テーマ切替、バッチハッシュ計算、接続テスト、履歴整理、SSL証明書検証、自動実行完了時の状態遷移テストを追加し、全 **234件** のユニットテストが合格しています。
 
 ---
 
@@ -46,13 +46,13 @@ Docker → XServer Sync **v1.1.4** introduces a persistent appearance selector, 
 ### 🔧 Fixes, Refactoring & CI
 
 - **Packaged SSL Certificate Fix**: Configured `updater.py`, `health.py`, `xserver_api.py`, and Nuitka build scripts (`build-app.sh`, `build-app.ps1`, `build-app-linux.sh`) to use and bundle `certifi` CA certificates so in-app update checks, post-sync HTTPS health checks, and XServer API calls work reliably in standalone binaries.
-- **Clearer Backup-Skipped Alert**: Updated the post-sync health-check failure dialog to clearly note when backup creation was skipped and restoration from history is unavailable.
+- **Clearer Backup-Skipped & Modal Auto-Sync Fix**: Updated the post-sync health-check failure dialog to clearly note when backup creation was skipped and restoration from history is unavailable, and stopped auto-sync state before showing modal completion/error dialogs so the finished worker signal cannot re-trigger deployment.
 - **Modularization & Linting**: Extracted `file_table_model.py` and `runtime_paths_dialog.py`, resolved lint issues across the codebase, and added `ruff check` to the CI workflow.
 
 ### 📚 Documentation & Tests
 
 - Updated the Japanese and English READMEs, user manuals, and implementation status notes.
-- Added automated tests for theme switching, batch remote hashing, connection testing, history pruning, and `certifi` SSL context usage; all **233 unit tests** pass.
+- Added automated tests for theme switching, batch remote hashing, connection testing, history pruning, `certifi` SSL context usage, and auto-sync modal completion handling; all **234 unit tests** pass.
 
 ---
 

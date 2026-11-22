@@ -1458,3 +1458,51 @@ def test_history_dialog_retention_selection_and_backup_delete_handler(
     window.close()
 
 
+def test_auto_sync_deployment_completed_stops_before_health_warning_modal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dxsync.deployment import DeploymentResult
+    from dxsync.health import HealthCheckResult
+
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    window = MainWindow(
+        store,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+    )
+    window._auto_sync_active = True
+    window._auto_sync_stage = "deployment"
+    window._backup_skipped = True
+    window._current_plan_id = "plan-1"
+
+    warnings: list[tuple[str, str]] = []
+
+    def fake_warning(_parent, title: str, text: str):
+        warnings.append((title, text))
+        window._scan_finished()
+        app().processEvents()
+        return QMessageBox.Ok
+
+    monkeypatch.setattr("dxsync.gui.QMessageBox.warning", fake_warning)
+
+    result = DeploymentResult(
+        plan_id="plan-1",
+        remote_root="/home/user/example.com/public_html",
+        files=(),
+        total_bytes=0,
+        health_check=HealthCheckResult(
+            url="https://example.com/",
+            ok=False,
+            error="HTTP 500",
+        ),
+    )
+    window._deployment_completed(result)
+
+    assert not window._auto_sync_active
+    assert len(warnings) == 1
+    assert warnings[0][0] == "同期完了・動作確認失敗"
+    assert "履歴からの復元はできません" in warnings[0][1]
+    window.close()
+
+
+

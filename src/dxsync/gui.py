@@ -3361,9 +3361,9 @@ class MainWindow(QMainWindow):
         self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self.summary.setText("ドライランに失敗しました。リモートは変更されていません。")
-        QMessageBox.critical(self, "ドライランエラー", message)
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.critical(self, "ドライランエラー", message)
 
     @Slot(str)
     def _dry_run_cancelled(self, message: str) -> None:
@@ -3423,9 +3423,9 @@ class MainWindow(QMainWindow):
             details={"valid": False, "reasons": list(result.reasons)},
         )
         self.summary.setText("計画は無効になりました。再度ドライランを実行してください。")
-        QMessageBox.warning(self, "再検証に失敗", details)
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.warning(self, "再検証に失敗", details)
 
     @Slot(str)
     def _revalidation_failed(self, message: str) -> None:
@@ -3433,9 +3433,9 @@ class MainWindow(QMainWindow):
         self._set_progress_visible(False)
         self._finish_operation("failed", error=message)
         self.summary.setText("再検証を完了できませんでした。計画は実行されていません。")
-        QMessageBox.critical(self, "再検証エラー", message)
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.critical(self, "再検証エラー", message)
 
     @Slot(str)
     def _revalidation_cancelled(self, message: str) -> None:
@@ -3505,9 +3505,9 @@ class MainWindow(QMainWindow):
         )
         self._reset_write_state()
         self.summary.setText("再検証に失敗したためバックアップを作成しませんでした。")
-        QMessageBox.warning(self, "バックアップを中止", "\n".join(result.reasons))
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.warning(self, "バックアップを中止", "\n".join(result.reasons))
 
     @Slot(str)
     def _backup_failed(self, message: str) -> None:
@@ -3516,9 +3516,9 @@ class MainWindow(QMainWindow):
         self._finish_operation("failed", error=message)
         self._reset_write_state()
         self.summary.setText("バックアップに失敗しました。公開ファイルは変更されていません。")
-        QMessageBox.critical(self, "バックアップエラー", message)
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.critical(self, "バックアップエラー", message)
 
     @Slot(str)
     def _backup_cancelled(self, message: str) -> None:
@@ -3565,12 +3565,18 @@ class MainWindow(QMainWindow):
             details=details,
         )
         self._retire_resumable_operations("deployment")
+        was_backup_skipped = self._backup_skipped
+        self._current_plan_id = None
+        self._reset_write_state()
+        cleanup_stale_staging(self.store, self.staging_parent)
+        if self._auto_sync_active:
+            self._stop_auto_sync()
         if result.health_check is not None and not result.health_check.ok:
             health_detail = result.health_check.error or "不明なエラー"
             recovery_hint = (
                 "この同期ではバックアップ作成をスキップしたため、履歴からの復元はできません。\n"
                 "ブラウザとサーバーログを確認してください。"
-                if self._backup_skipped
+                if was_backup_skipped
                 else "ブラウザとサーバーログを確認し、必要な場合は履歴から復元してください。"
             )
             self.summary.setText(
@@ -3594,11 +3600,6 @@ class MainWindow(QMainWindow):
                 f" 承認済み削除 {len(result.deleted_files)}件。"
                 + health_text
             )
-        self._current_plan_id = None
-        self._reset_write_state()
-        cleanup_stale_staging(self.store, self.staging_parent)
-        if self._auto_sync_active:
-            self._stop_auto_sync()
 
     @Slot(object)
     def _deployment_blocked(self, result: RevalidationResult) -> None:
@@ -3613,9 +3614,9 @@ class MainWindow(QMainWindow):
         self._reset_write_state()
         cleanup_stale_staging(self.store, self.staging_parent)
         self.summary.setText("再検証に失敗したため同期を実行しませんでした。")
-        QMessageBox.warning(self, "同期を中止", "\n".join(result.reasons))
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.warning(self, "同期を中止", "\n".join(result.reasons))
 
     @Slot(str)
     def _deployment_failed(self, message: str) -> None:
@@ -3627,9 +3628,9 @@ class MainWindow(QMainWindow):
             "同期に失敗しました。適用済みファイルは可能な限り復元され、"
             "計画は再開用に保存されています。"
         )
-        QMessageBox.critical(self, "同期エラー", message)
         if self._auto_sync_active:
             self._stop_auto_sync()
+        QMessageBox.critical(self, "同期エラー", message)
 
     @Slot(str)
     def _deployment_cancelled(self, message: str) -> None:
