@@ -133,6 +133,11 @@ class HistoryDialog(QDialog):
 
         refresh = QPushButton("更新")
         refresh.clicked.connect(self.refresh)
+        self.prune_history_button = QPushButton("古い操作履歴・計画を整理…")
+        self.prune_history_button.setToolTip(
+            "90日以上前の完了済み操作履歴と、復元不要な古い計画データを削除します"
+        )
+        self.prune_history_button.clicked.connect(self._prune_history)
         self.delete_backups_button = QPushButton("チェックしたバックアップを削除…")
         self.delete_backups_button.setEnabled(False)
         self.delete_backups_button.clicked.connect(self._choose_delete_backups)
@@ -141,6 +146,7 @@ class HistoryDialog(QDialog):
         self.restore_button.clicked.connect(self._choose_restore)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.addButton(refresh, QDialogButtonBox.ActionRole)
+        buttons.addButton(self.prune_history_button, QDialogButtonBox.ActionRole)
         buttons.addButton(self.delete_backups_button, QDialogButtonBox.ActionRole)
         buttons.addButton(self.restore_button, QDialogButtonBox.ActionRole)
         buttons.rejected.connect(self.reject)
@@ -263,6 +269,25 @@ class HistoryDialog(QDialog):
         self.selected_backup_id = self._backup_ids[row]
         self.selected_delete_backup_ids = ()
         self.accept()
+
+    def _prune_history(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "古い操作履歴・計画を整理",
+            "90日より前の操作履歴（および最新200件を超えた古い履歴）と、"
+            "利用可能なバックアップに紐付かない古い計画データをローカルDBから削除します。\n"
+            "XServer上のファイルやバックアップには影響しません。実行しますか？",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        result = self.store.prune_history(project_id=self.project_id)
+        self.refresh()
+        QMessageBox.information(
+            self,
+            "履歴整理完了",
+            f"操作履歴 {result['deleted_operations']}件・"
+            f"古い計画 {result['deleted_plans']}件を削除しました。",
+        )
 
     def _choose_delete_backups(self) -> None:
         checked_ids = self.checked_delete_backup_ids()

@@ -15,7 +15,7 @@
 
 <br>
 
-![version](https://img.shields.io/badge/version-1.1.3-blue)
+![version](https://img.shields.io/badge/version-1.1.4-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -54,9 +54,11 @@ Dockerへbind mountしたローカル開発環境のファイルを、安全な�
   - XServer側の同期先をSFTPで一覧取得し、同期処理で読み取り・比較・変更しないファイル／フォルダをツリーから選択
   - 自動実行時の `REMOTE_ONLY` 削除確認モード（`ask`）と「削除しないフォルダー」保護（静的サイトのビルド更新に最適）
   - メイン画面の **「自動実行設定…」** ボタン＆方針常時表示と、自動実行確認ダイアログ上でのバックアップスキップ切替／設定保存
-  - バックアップ履歴画面での保持ルール（最新 N 世代 / 保持日数）に基づく整理候補抽出・承認付き削除
+  - バックアップ履歴画面での保持ルール（最新 N 世代 / 保持日数）に基づく整理候補抽出・承認付き削除および古い操作履歴・計画データの整理
+  - プロジェクト設定画面での保存前 SSH / SFTP 接続テストと、SSH バッチ SHA-256 計算による高速差分スキャン
   - SSH秘密鍵パスフレーズのセッション内保持と、任意オプトインでのOS資格情報ストア保存
   - ヘルプメニューからのアプリ内アップデート確認（GitHub Releases）
+  - メイン画面から「システム設定」「ライト」「ダーク」を選べる表示テーマ切替
   - 同期後の自動HTTPSヘルスチェック
 - **Laravel 初回セットアップウィザード**:
   - アプリ本体（`app/`等）とWeb公開領域（`public_html`）のディレクトリ分離配置
@@ -85,7 +87,7 @@ Dockerへbind mountしたローカル開発環境のファイルを、安全な�
 2. 解凍して現れる `Docker XServer Sync.app` を `/Applications`（アプリケーションフォルダ）へ移動して起動します。
 
 ### Windows
-- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v1.1.3.exe` を実行してセットアップします。
+- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v1.1.4.exe` を実行してセットアップします。
 - **ポータブル版**: `Docker XServer Sync-Windows-x64.zip` を展開し、フォルダ内の `Docker XServer Sync.exe` を起動します。
 
 ### Linux
@@ -184,7 +186,7 @@ Python 3.12以上と [uv](https://docs.astral.sh/uv/) を使用します。
 # 依存関係のインストール
 uv sync --extra dev --extra gui --extra ssh --extra build
 
-# ユニットテスト実行（全224件）
+# ユニットテスト実行（全231件）
 uv run pytest
 
 # GUI起動
@@ -194,7 +196,7 @@ uv run dxsync-gui
 ### パッケージのビルド
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.3.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.4.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---

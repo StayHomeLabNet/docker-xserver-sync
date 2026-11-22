@@ -6,11 +6,11 @@ import posixpath
 import re
 import shlex
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from .cancellation import CancellationToken, OperationCancelled
+from .cancellation import CancellationToken
 from .presets import COMMON_EXCLUDES
 from .validation import normalize_remote_root
 from .xserver_api import XServerApiClient
@@ -368,7 +368,6 @@ class LaravelSetupEngine:
     ) -> LaravelSetupResult:
         validate_laravel_setup_request(request)
         progress = progress_callback or (lambda _p: None)
-        checkpoint = checkpoint_callback or (lambda _c: None)
         cancel = cancellation_token or CancellationToken()
         cancel.raise_if_cancelled()
 
@@ -468,7 +467,6 @@ class LaravelSetupEngine:
 
         # Collect files for application root
         app_candidates: list[Path] = []
-        app_excludes = set(COMMON_EXCLUDES) | {"public", "/public", "public/"}
 
         for path in local_root.rglob("*"):
             if path.is_file():

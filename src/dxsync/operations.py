@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -12,10 +11,8 @@ from .backup import (
     delete_remote_backup,
     select_prune_candidates,
 )
-from .cancellation import CancellationToken
 from .deployment import (
     DeploymentAuthorization,
-    DeployError,
     RemoteDeploymentEngine,
 )
 from .health import normalize_health_check_path, perform_https_health_check
@@ -23,13 +20,13 @@ from .integrity import project_config_sha256
 from .models import ChangeType, Project, SyncMapping
 from .planner import DEFAULT_PLAN_VALIDITY_MINUTES, validate_plan_validity
 from .presets import get_preset
-from .recovery import is_dxsync_temporary_name, scan_recovery_artifacts
+from .recovery import scan_recovery_artifacts
 from .remote import connect_sftp
 from .restore import RemoteRestoreEngine, RestoreAuthorization
 from .revalidation import PlanRevalidator
 from .secure_store import SecureStoreError
 from .service import DryRunProgress, DryRunService
-from .storage import BackupRecord, ProjectStore, get_default_store
+from .storage import BackupRecord, ProjectStore
 from .validation import custom_runtime_paths_issue
 
 

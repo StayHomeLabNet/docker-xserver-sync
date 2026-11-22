@@ -120,3 +120,24 @@ def test_sftp_scanner_reports_progress_before_hashing_each_file() -> None:
         (2, 2, "uploads/photo.jpg"),
     ]
 
+
+def test_sftp_scanner_uses_ssh_batch_hashing_and_falls_back_on_missing() -> None:
+    import hashlib
+
+    sftp = FakeSftp()
+    expected_index = hashlib.sha256(b"hello").hexdigest()
+    exec_calls: list[bytes] = []
+
+    def fake_ssh_exec(_cmd: str, stdin_bytes: bytes):
+        exec_calls.append(stdin_bytes)
+        # Return hash for index.php only; omit uploads/photo.jpg to verify SFTP fallback
+        return 0, f"{expected_index}  /home/user/site/index.php\n", ""
+
+    result = SftpScanner(ssh_exec=fake_ssh_exec).scan(sftp, "/home/user/site")
+
+    assert len(exec_calls) == 1
+    assert [f.relative_path for f in result.files] == ["index.php", "uploads/photo.jpg"]
+    assert result.files[0].sha256 == expected_index
+    assert result.files[1].sha256 == hashlib.sha256(b"img").hexdigest()
+    assert sftp.open_calls == ["/home/user/site/uploads/photo.jpg"]
+

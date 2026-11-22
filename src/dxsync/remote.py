@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
+import re
 import socket
 import stat
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, BinaryIO, Callable, Protocol
+from typing import Any, BinaryIO, Callable, Protocol, Sequence
 
 from .cancellation import CancellationToken
 from .models import EntryKind, FileRecord, ScanIssue
 from .rules import PathRules
 from .validation import normalize_remote_root
+
+_SHA256_LINE_RE = re.compile(r"^([0-9a-f]{64})  (.+)$")
+_REMOTE_HASH_BATCH_SIZE = 200
+_SSH_EXEC_TIMEOUT = 60.0
 
 
 class RemoteDependencyError(RuntimeError):
@@ -112,14 +116,107 @@ def _hash_stream(
     return digest.hexdigest()
 
 
+def _exec_ssh_with_stdin(
+    sftp: Any,
+    command: str,
+    stdin_bytes: bytes,
+    *,
+    timeout: float = _SSH_EXEC_TIMEOUT,
+) -> tuple[int, str, str] | None:
+    """Run a command on the SSH transport backing `sftp`, or return None if unavailable."""
+    get_channel = getattr(sftp, "get_channel", None)
+    if not callable(get_channel):
+        return None
+    channel = get_channel()
+    get_transport = getattr(channel, "get_transport", None)
+    if not callable(get_transport):
+        return None
+    transport = get_transport()
+    if transport is None:
+        return None
+    exec_channel = transport.open_session(timeout=timeout)
+    try:
+        exec_channel.settimeout(timeout)
+        exec_channel.exec_command(command)
+        if stdin_bytes:
+            exec_channel.sendall(stdin_bytes)
+        exec_channel.shutdown_write()
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        while True:
+            data = exec_channel.recv(65536)
+            if not data:
+                break
+            stdout_chunks.append(data)
+        while True:
+            err = exec_channel.recv_stderr(65536)
+            if not err:
+                break
+            stderr_chunks.append(err)
+        exit_status = exec_channel.recv_exit_status()
+        return (
+            exit_status,
+            b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+            b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        )
+    except Exception:
+        return None
+    finally:
+        try:
+            exec_channel.close()
+        except Exception:
+            pass
+
+
+def batch_hash_remote_files(
+    sftp: Any,
+    absolute_paths: Sequence[str],
+    *,
+    cancellation_token: CancellationToken | None = None,
+    ssh_exec: Callable[[str, bytes], tuple[int, str, str] | None] | None = None,
+) -> dict[str, str]:
+    """Compute SHA-256 hashes on the server via `xargs -0 sha256sum` when SSH exec is available.
+
+    Any path containing a newline or NUL byte, or any file omitted from verified
+    output, is excluded from the returned mapping so callers fall back to SFTP.
+    """
+    safe_paths = [
+        path for path in absolute_paths if "\n" not in path and "\r" not in path and "\0" not in path
+    ]
+    if not safe_paths:
+        return {}
+    expected = set(safe_paths)
+    runner = ssh_exec or (lambda cmd, data: _exec_ssh_with_stdin(sftp, cmd, data))
+    hashes: dict[str, str] = {}
+    for start in range(0, len(safe_paths), _REMOTE_HASH_BATCH_SIZE):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        chunk = safe_paths[start : start + _REMOTE_HASH_BATCH_SIZE]
+        payload = ("\0".join(chunk) + "\0").encode("utf-8")
+        result = runner("LC_ALL=C xargs -0 sha256sum", payload)
+        if result is None:
+            return hashes
+        _exit_code, stdout, _stderr = result
+        for line in stdout.splitlines():
+            match = _SHA256_LINE_RE.match(line)
+            if not match:
+                continue
+            digest, path = match.group(1), match.group(2)
+            if path in expected:
+                hashes[path] = digest
+    return hashes
+
+
 class SftpScanner:
     def __init__(
         self,
         exclude_patterns: tuple[str, ...] = (),
         skip_patterns: tuple[str, ...] = (),
+        ssh_exec: Callable[[str, bytes], tuple[int, str, str] | None] | None = None,
     ) -> None:
         self._excludes = PathRules(exclude_patterns)
         self._skips = PathRules(skip_patterns)
+        self._ssh_exec = ssh_exec
 
     def scan(
         self,
@@ -184,28 +281,40 @@ class SftpScanner:
         total = len(candidates)
         if total == 0:
             report(0, 0, "")
-        for index, (absolute, relative, entry) in enumerate(candidates, start=1):
+        for chunk_start in range(0, total, _REMOTE_HASH_BATCH_SIZE):
             if cancellation_token is not None:
                 cancellation_token.raise_if_cancelled()
-            report(index - 1, total, relative)
-            try:
-                with sftp.open(absolute, "rb") as stream:
-                    digest = _hash_stream(
-                        stream,
-                        cancellation_token=cancellation_token,
+            chunk = candidates[chunk_start : chunk_start + _REMOTE_HASH_BATCH_SIZE]
+            batch_hashes = batch_hash_remote_files(
+                sftp,
+                [absolute for absolute, _relative, _entry in chunk],
+                cancellation_token=cancellation_token,
+                ssh_exec=self._ssh_exec,
+            )
+            for index, (absolute, relative, entry) in enumerate(chunk, start=chunk_start + 1):
+                if cancellation_token is not None:
+                    cancellation_token.raise_if_cancelled()
+                report(index - 1, total, relative)
+                try:
+                    digest = batch_hashes.get(absolute)
+                    if digest is None:
+                        with sftp.open(absolute, "rb") as stream:
+                            digest = _hash_stream(
+                                stream,
+                                cancellation_token=cancellation_token,
+                            )
+                    files.append(
+                        FileRecord(
+                            relative_path=relative,
+                            kind=EntryKind.FILE,
+                            size=entry.st_size,
+                            modified_ns=(entry.st_mtime * 1_000_000_000),
+                            sha256=digest,
+                        )
                     )
-                files.append(
-                    FileRecord(
-                        relative_path=relative,
-                        kind=EntryKind.FILE,
-                        size=entry.st_size,
-                        modified_ns=(entry.st_mtime * 1_000_000_000),
-                        sha256=digest,
-                    )
-                )
-            except OSError as exc:
-                issues.append(ScanIssue(relative, "unreadable", str(exc)))
-            report(index, total, relative)
+                except OSError as exc:
+                    issues.append(ScanIssue(relative, "unreadable", str(exc)))
+                report(index, total, relative)
 
         return RemoteScanResult(
             root=normalized_root,

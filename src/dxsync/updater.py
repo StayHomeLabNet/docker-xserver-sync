@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable
+
+import certifi
 
 
 GITHUB_LATEST_RELEASE_API = (
@@ -57,7 +60,6 @@ def check_for_updates(
     timeout: float = 10.0,
     urlopen_func: Callable[..., object] | None = None,
 ) -> UpdateCheckResult:
-    opener = urlopen_func or urllib.request.urlopen
     request = urllib.request.Request(
         api_url,
         headers={
@@ -66,7 +68,16 @@ def check_for_updates(
         },
     )
     try:
-        with opener(request, timeout=timeout) as response:
+        if urlopen_func is None:
+            context = ssl.create_default_context(cafile=certifi.where())
+            response_context = urllib.request.urlopen(
+                request,
+                timeout=timeout,
+                context=context,
+            )
+        else:
+            response_context = urlopen_func(request, timeout=timeout)
+        with response_context as response:
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         raise UpdateCheckError(

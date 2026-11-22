@@ -24,11 +24,11 @@ from .force_overwrite import collect_overwrite_candidates
 from .models import Project, SyncMapping
 from .presets import COMMON_EXCLUDES
 from .ui_styles import (
-    DANGER_TEXT_STYLE,
     MUTED_TEXT_STYLE,
     PANEL_STYLE,
     WARNING_PANEL_STYLE,
-    WARNING_TEXT_STYLE,
+    danger_text_style,
+    warning_text_style,
 )
 from .wordpress_setup import (
     WordPressSetupError,
@@ -337,7 +337,7 @@ class WordPressSetupWizard(QWizard):
             "バージョンと合わせてください。単純なSQL文字列置換は行いません。"
         )
         warning.setWordWrap(True)
-        warning.setStyleSheet(WARNING_TEXT_STYLE)
+        warning.setStyleSheet(warning_text_style())
         form.addRow("", warning)
         self.addPage(page)
 
@@ -360,7 +360,7 @@ class WordPressSetupWizard(QWizard):
             "途中失敗時に作成済みDBを自動削除はしません。"
         )
         self.caution_label.setWordWrap(True)
-        self.caution_label.setStyleSheet(DANGER_TEXT_STYLE)
+        self.caution_label.setStyleSheet(danger_text_style())
         layout.addWidget(self.caution_label)
         self.addPage(page)
 

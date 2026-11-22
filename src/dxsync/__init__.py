@@ -3,5 +3,5 @@
 from .models import ChangeType, Project, SiteType, SyncMapping
 
 __all__ = ["ChangeType", "Project", "SiteType", "SyncMapping"]
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 

@@ -43,6 +43,7 @@ try {
         --output-filename="Docker XServer Sync.exe" `
         --enable-plugin=pyside6 `
         --include-package=dxsync `
+        --include-package=certifi `
         --include-package=keyring `
         --assume-yes-for-downloads `
         --output-dir="$buildRoot" `

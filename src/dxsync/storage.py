@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
@@ -842,4 +842,63 @@ class ProjectStore:
             )
             for row in rows
         )
+
+    def prune_history(
+        self,
+        *,
+        project_id: str | None = None,
+        keep_operations: int = 200,
+        max_age_days: int = 90,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Remove old completed operations and stale non-ready plans not tied to available backups."""
+        self.initialize()
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=max(max_age_days, 0))
+        cutoff_iso = cutoff.isoformat()
+        keep_limit = max(keep_operations, 0)
+        with self._connection() as connection:
+            if project_id:
+                op_rows = connection.execute(
+                    "SELECT operation_id, started_at, status FROM operations "
+                    "WHERE project_id = ? ORDER BY started_at DESC",
+                    (project_id,),
+                ).fetchall()
+            else:
+                op_rows = connection.execute(
+                    "SELECT operation_id, started_at, status FROM operations "
+                    "ORDER BY started_at DESC"
+                ).fetchall()
+
+            delete_op_ids = [
+                row["operation_id"]
+                for index, row in enumerate(op_rows)
+                if row["status"] != "running"
+                and (index >= keep_limit or row["started_at"] < cutoff_iso)
+            ]
+            if delete_op_ids:
+                placeholders = ",".join("?" for _ in delete_op_ids)
+                connection.execute(
+                    f"DELETE FROM operations WHERE operation_id IN ({placeholders})",
+                    delete_op_ids,
+                )
+
+            plan_query = """
+                DELETE FROM plans
+                WHERE status != 'ready'
+                  AND expires_at < ?
+                  AND plan_id NOT IN (
+                      SELECT plan_id FROM backups WHERE status = 'available'
+                  )
+            """
+            params: list[object] = [cutoff_iso]
+            if project_id:
+                plan_query += " AND project_id = ?"
+                params.append(project_id)
+            plan_cursor = connection.execute(plan_query, params)
+            deleted_plans = plan_cursor.rowcount
+
+        return {
+            "deleted_operations": len(delete_op_ids),
+            "deleted_plans": deleted_plans,
+        }
 

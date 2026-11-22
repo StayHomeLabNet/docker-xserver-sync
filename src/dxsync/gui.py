@@ -4,16 +4,13 @@ import html
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Callable, Sequence
-from urllib.parse import urlparse
+from typing import Sequence
 
 try:
     from PySide6.QtCore import (
-        QAbstractTableModel,
-        QModelIndex,
         QObject,
         QSettings,
         QStandardPaths,
@@ -21,10 +18,9 @@ try:
         QThread,
         QTimer,
         QUrl,
-        Signal,
         Slot,
     )
-    from PySide6.QtGui import QDesktopServices, QFont, QPalette
+    from PySide6.QtGui import QDesktopServices, QFont
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -52,12 +48,12 @@ except ImportError as exc:  # pragma: no cover - exercised only without the GUI 
         "PySide6 is required for the desktop app. Install with: uv sync --extra gui"
     ) from exc
 
-from .models import ChangeType, FileRecord, Project, ScanResult, SiteType, SyncMapping
+from .models import ChangeType, Project, ScanResult, SiteType, SyncMapping
 from . import __version__
 from .integrity import project_config_sha256
 from .maintenance import cleanup_stale_staging
 from .history_dialog import HistoryDialog
-from .health import normalize_health_check_path, perform_https_health_check
+from .health import normalize_health_check_path
 from .approval_dialog import (
     BackupConfirmationDialog,
     DeploymentApprovalDialog,
@@ -73,49 +69,60 @@ from .auto_sync import (
     load_auto_sync_preferences,
     save_auto_sync_preferences,
 )
-from .backup import BackupResult, RemoteBackupEngine, delete_remote_backup
-from .cancellation import CancellationToken, OperationCancelled
+from .backup import BackupResult, RemoteBackupEngine as RemoteBackupEngine
 from .deployment import (
     DeploymentAuthorization,
     DeploymentResult,
-    RemoteDeploymentEngine,
+    RemoteDeploymentEngine as RemoteDeploymentEngine,
 )
+from .file_table_model import FileTableModel as FileTableModel
 from .force_overwrite import (
-    ForceOverwriteEngine,
+    ForceOverwriteEngine as ForceOverwriteEngine,
     ForceOverwriteResult,
     collect_overwrite_candidates,
 )
 from .presets import get_preset
 from .project_dialog import ProjectDialog
-from .ui_styles import MUTED_TEXT_STYLE, WARNING_TEXT_STYLE
-from .remote import connect_sftp
+from .remote import connect_sftp as connect_sftp
+from .theme import (
+    THEME_OPTIONS,
+    THEME_SETTING_KEY,
+    THEME_SYSTEM,
+    apply_application_theme,
+    normalize_theme,
+)
+from .ui_styles import MUTED_TEXT_STYLE, warning_text_style
 from .wordpress_setup import (
     WORDPRESS_SETUP_TOTAL_STEPS,
-    WordPressSetupEngine,
     WordPressSetupProgress,
-    WordPressSetupRequest,
 )
 from .wordpress_setup_dialog import WordPressSetupWizard
 from .laravel_setup import (
     LARAVEL_SETUP_TOTAL_STEPS,
-    LaravelSetupEngine,
     LaravelSetupProgress,
-    LaravelSetupRequest,
 )
 from .laravel_setup_dialog import LaravelSetupWizard
-from .xserver_api import XServerApiClient
 from .recovery import (
     RecoveryAnalysisResult,
-    analyze_recovery_artifacts,
-    scan_recovery_artifacts,
+    scan_recovery_artifacts as scan_recovery_artifacts,
 )
 from .recovery_dialog import RecoveryAnalysisDialog
-from .revalidation import PlanRevalidator, RevalidationResult
-from .restore import RestoreAuthorization, RestoreResult, RemoteRestoreEngine
+from .revalidation import (
+    PlanRevalidator as PlanRevalidator,
+    RevalidationResult,
+)
+from .restore import (
+    RemoteRestoreEngine as RemoteRestoreEngine,
+    RestoreAuthorization,
+    RestoreResult,
+)
 from .rules import PathRules
-from .planner import DEFAULT_PLAN_VALIDITY_MINUTES
-from .scanner import LocalScanner
-from .service import DryRunProgress, DryRunResult, DryRunService
+from .scanner import LocalScanner as LocalScanner
+from .service import (
+    DryRunProgress,
+    DryRunResult,
+    DryRunService as DryRunService,
+)
 from .storage import BackupRecord, ProjectStore, StoredPlan
 from .secure_store import SecureStoreError
 from .settings_dialog import (
@@ -125,15 +132,14 @@ from .settings_dialog import (
     load_plan_validity_minutes,
     save_plan_validity_minutes,
 )
-from .updater import UpdateCheckResult, check_for_updates
+from .updater import UpdateCheckResult
 from .validation import custom_runtime_paths_issue
 from .progress_tracker import (
     OperationProgress,
-    _ThrottledProgressEmitter,
+    _ThrottledProgressEmitter as _ThrottledProgressEmitter,
     format_progress_amount,
     format_progress_duration,
     format_size as _format_size,
-    format_worker_error as _format_worker_error,
 )
 from .workers import (
     BackupDeleteWorker,
@@ -159,69 +165,6 @@ SITE_LABELS = {
 }
 
 
-class FileTableModel(QAbstractTableModel):
-    COLUMNS = ("状態", "相対パス", "サイズ", "SHA-256")
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._files: tuple[FileRecord, ...] = ()
-        self._statuses: tuple[str, ...] = ()
-        self._protected = PathRules(())
-
-    def set_scan(self, result: ScanResult, protected_patterns: tuple[str, ...]) -> None:
-        self.beginResetModel()
-        self._files = result.files
-        self._statuses = tuple(
-            "保護" if PathRules(protected_patterns).matches(item.relative_path) else "ローカル"
-            for item in result.files
-        )
-        self._protected = PathRules(protected_patterns)
-        self.endResetModel()
-
-    def set_plan(self, result: DryRunResult) -> None:
-        self.beginResetModel()
-        rows = [change for change in result.plan.changes]
-        self._files = tuple(
-            change.local or change.remote
-            for change in rows
-            if (change.local or change.remote) is not None
-        )
-        self._statuses = tuple(change.change_type.value.upper() for change in rows)
-        self._protected = PathRules(())
-        self.endResetModel()
-
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self._files)
-
-    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self.COLUMNS)
-
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return self.COLUMNS[section]
-        return None
-
-    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
-        if not index.isValid():
-            return None
-        record = self._files[index.row()]
-        status = self._statuses[index.row()]
-        is_protected = status in {"保護", "PROTECTED"}
-        if role == Qt.DisplayRole:
-            values = (
-                status,
-                record.relative_path,
-                _format_size(record.size),
-                record.sha256 or "—",
-            )
-            return values[index.column()]
-        if role == Qt.ForegroundRole and is_protected:
-            return QApplication.palette().color(QPalette.PlaceholderText)
-        if role == Qt.TextAlignmentRole and index.column() == 2:
-            return int(Qt.AlignRight | Qt.AlignVCenter)
-        return None
-
-
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -244,6 +187,12 @@ class MainWindow(QMainWindow):
             store = ProjectStore(state_directory / "state.db")
         self.store = store
         self.settings = settings or QSettings()
+        self._theme = normalize_theme(
+            self.settings.value(THEME_SETTING_KEY, THEME_SYSTEM)
+        )
+        application = QApplication.instance()
+        if isinstance(application, QApplication):
+            apply_application_theme(application, self._theme)
         self.staging_parent = self.store.database_path.parent / "staging"
         self._interrupted_operations = self.store.recover_interrupted_operations()
         self.store.expire_plans()
@@ -314,12 +263,27 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 4, 24, 20)
         layout.setSpacing(14)
 
+        title_row = QHBoxLayout()
         title = QLabel("Docker → XServer Sync")
         title_font = QFont()
         title_font.setPointSize(20)
         title_font.setBold(True)
         title.setFont(title_font)
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(QLabel("表示テーマ"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.setToolTip(
+            "システム設定に追従するか、ライト／ダーク表示を固定します"
+        )
+        for label, value in THEME_OPTIONS:
+            self.theme_combo.addItem(label, value)
+        self.theme_combo.setCurrentIndex(
+            max(self.theme_combo.findData(self._theme), 0)
+        )
+        self.theme_combo.currentIndexChanged.connect(self._theme_changed)
+        title_row.addWidget(self.theme_combo)
+        layout.addLayout(title_row)
 
         subtitle = QLabel(
             "安全同期モード — 通常は再検証・バックアップ・明示承認を行います"
@@ -897,7 +861,7 @@ class MainWindow(QMainWindow):
         summary_text = format_auto_sync_summary(preferences)
         self.auto_sync_policy_label.setText(summary_text)
         self.auto_sync_policy_label.setStyleSheet(
-            WARNING_TEXT_STYLE
+            warning_text_style()
             if preferences.backup_mode == "skip"
             else MUTED_TEXT_STYLE
         )
@@ -920,9 +884,25 @@ class MainWindow(QMainWindow):
     def _reset_display_settings(self) -> None:
         for key, _label in MASK_FIELDS:
             self.settings.remove(f"display_mask/{key}")
+        self.settings.remove(THEME_SETTING_KEY)
         self.settings.sync()
         self.mask_toggle.setChecked(False)
         self._apply_connection_masks()
+        self.theme_combo.setCurrentIndex(
+            max(self.theme_combo.findData(THEME_SYSTEM), 0)
+        )
+
+    @Slot(int)
+    def _theme_changed(self, index: int) -> None:
+        theme = normalize_theme(self.theme_combo.itemData(index))
+        application = QApplication.instance()
+        if isinstance(application, QApplication):
+            self._theme = apply_application_theme(application, theme)
+        else:
+            self._theme = theme
+        self.settings.setValue(THEME_SETTING_KEY, self._theme)
+        self.settings.sync()
+        self._update_auto_sync_summary()
 
     @Slot()
     def _open_online_manual(self) -> None:

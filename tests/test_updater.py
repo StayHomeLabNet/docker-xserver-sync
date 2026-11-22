@@ -7,7 +7,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QSettings, QUrl
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from dxsync.gui import MainWindow
@@ -89,6 +89,41 @@ def test_check_for_updates_handles_up_to_date_and_sanitizes_url() -> None:
 
     assert result.update_available is False
     assert result.release_url == GITHUB_RELEASES_PAGE
+
+
+def test_check_for_updates_uses_bundled_ca_certificates(monkeypatch) -> None:
+    body = json.dumps(
+        {
+            "tag_name": "v1.1.3",
+            "html_url": "https://github.com/StayHomeLabNet/docker-xserver-sync/releases/tag/v1.1.3",
+        }
+    ).encode("utf-8")
+    ssl_context = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("dxsync.updater.certifi.where", lambda: "/bundle/cacert.pem")
+    def fake_create_default_context(*, cafile):
+        captured["cafile"] = cafile
+        return ssl_context
+
+    monkeypatch.setattr(
+        "dxsync.updater.ssl.create_default_context",
+        fake_create_default_context,
+    )
+
+    def fake_urlopen(request, *, timeout, context):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        captured["context"] = context
+        return _DummyResponse(body)
+
+    monkeypatch.setattr("dxsync.updater.urllib.request.urlopen", fake_urlopen)
+
+    result = check_for_updates("1.1.3")
+
+    assert not result.update_available
+    assert captured["cafile"] == "/bundle/cacert.pem"
+    assert captured["context"] is ssl_context
 
 
 def test_check_for_updates_raises_clear_error_on_http_or_json_failure() -> None:

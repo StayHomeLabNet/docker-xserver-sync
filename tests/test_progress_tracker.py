@@ -56,4 +56,4 @@ def test_format_worker_error_and_throttled_emitter() -> None:
     emitter(DryRunProgress(2, 4, "scan", current=5, total=10, unit="files"))
     emitter(DryRunProgress(2, 4, "scan", current=10, total=10, unit="files"))
     # Boundary events (0 and total) always emit immediately; middle event is throttled.
-    assert [getattr(item, "current") for item in emitted] == [0, 10]
+    assert [item.current for item in emitted] == [0, 10]

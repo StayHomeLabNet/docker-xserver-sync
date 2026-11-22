@@ -21,16 +21,14 @@ from PySide6.QtWidgets import (
 
 from .models import Project, SyncMapping
 from .ui_styles import (
-    DANGER_TEXT_STYLE,
     MUTED_TEXT_STYLE,
     PANEL_STYLE,
     WARNING_PANEL_STYLE,
+    danger_text_style,
 )
 from .laravel_setup import (
-    LaravelSetupError,
     LaravelSetupRequest,
     detect_laravel_required_php,
-    validate_laravel_setup_request,
 )
 
 
@@ -313,7 +311,7 @@ class LaravelSetupWizard(QWizard):
             "本番用.envの生成、キー生成、マイグレーション、キャッシュ最適化が実行されます。"
         )
         caution.setWordWrap(True)
-        caution.setStyleSheet(DANGER_TEXT_STYLE)
+        caution.setStyleSheet(danger_text_style())
         layout.addWidget(caution)
         self.addPage(page)
 

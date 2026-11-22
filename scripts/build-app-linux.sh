@@ -16,6 +16,7 @@ UV_PROJECT_ENVIRONMENT="$build_venv" uv sync --python 3.12 --extra dev --extra g
   --output-filename="Docker XServer Sync" \
   --enable-plugin=pyside6 \
   --include-package=dxsync \
+  --include-package=certifi \
   --include-package=keyring \
   --output-dir="$build_root" \
   --remove-output \

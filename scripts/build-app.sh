@@ -25,6 +25,7 @@ app_version=$("$build_venv/bin/python" -c 'import tomllib; print(tomllib.load(op
   --macos-app-icon="$repo_root/assets/app-icon.icns" \
   --enable-plugin=pyside6 \
   --include-package=dxsync \
+  --include-package=certifi \
   --include-package=keyring \
   --output-dir="$build_root" \
   --remove-output \

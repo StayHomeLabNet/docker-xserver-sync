@@ -11,6 +11,7 @@ from typing import Any, BinaryIO, Callable, Protocol
 from .health import HealthCheckResult
 from .cancellation import CancellationToken
 from .models import ChangeType, FileChange, SyncPlan
+from .remote import batch_hash_remote_files
 from .validation import normalize_remote_root
 
 
@@ -112,6 +113,9 @@ def _exists(sftp: DeployRemoteFileSystem, path: str) -> bool:
 
 
 def _hash_remote(sftp: DeployRemoteFileSystem, path: str) -> tuple[str, int]:
+    remote_hashes = batch_hash_remote_files(sftp, (path,))
+    if path in remote_hashes:
+        return remote_hashes[path], int(sftp.stat(path).st_size)
     digest = hashlib.sha256()
     size = 0
     with sftp.open(path, "rb") as stream:

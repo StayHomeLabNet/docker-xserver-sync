@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
@@ -20,9 +19,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .auto_sync_policy import AutoSyncPreferences, auto_sync_policy_issues
+from .auto_sync_policy import (
+    AutoSyncPreferences as AutoSyncPreferences,
+    auto_sync_policy_issues as auto_sync_policy_issues,
+)
 from .health import normalize_health_check_path
-from .ui_styles import WARNING_TEXT_STYLE
+from .ui_styles import warning_text_style
 
 
 def _prefix(project_id: str) -> str:
@@ -169,7 +171,7 @@ class AutoSyncSettingsDialog(QDialog):
 
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
-        self.warning_label.setStyleSheet(WARNING_TEXT_STYLE)
+        self.warning_label.setStyleSheet(warning_text_style())
         layout.addWidget(self.warning_label)
         self.backup_mode.currentIndexChanged.connect(self._update_warning_text)
         self.remote_only_policy.currentIndexChanged.connect(
@@ -375,7 +377,7 @@ class AutoSyncApprovalDialog(QDialog):
                 "バックアップ設定が「常にスキップ」のため、自動実行ではREMOTE_ONLYを削除できません。"
             )
             skip_note.setWordWrap(True)
-            skip_note.setStyleSheet(WARNING_TEXT_STYLE)
+            skip_note.setStyleSheet(warning_text_style())
             layout.addWidget(skip_note)
 
         layout.addWidget(self.deletion_table)
@@ -425,7 +427,7 @@ class AutoSyncApprovalDialog(QDialog):
             self.domain_prompt.setText(
                 "設定により対象ドメインの再入力を省略します。"
             )
-            self.domain_prompt.setStyleSheet(WARNING_TEXT_STYLE)
+            self.domain_prompt.setStyleSheet(warning_text_style())
             self.domain_edit.setVisible(False)
 
         self.buttons = QDialogButtonBox(
@@ -483,7 +485,7 @@ class AutoSyncApprovalDialog(QDialog):
             self.save_skip_backup_check.setVisible(False)
         elif self.skip_backup_check.isChecked():
             self.backup_label.setText("スキップ（復元不可）")
-            self.backup_label.setStyleSheet(WARNING_TEXT_STYLE)
+            self.backup_label.setStyleSheet(warning_text_style())
             can_save = self._backup_mode != "skip"
             self.save_skip_backup_check.setVisible(can_save)
             if not can_save:

@@ -69,7 +69,7 @@ Docker → XServer Sync was designed specifically to bridge the gap between loca
 | Docker → XServer Sync                                                             [ - ] [ 口 ] [ X ]  |
 | Project(P)   Settings(S)   Help(H)                                                                    |
 +-------------------------------------------------------------------------------------------------------+
-| Docker → XServer Sync                                                                                 |
+| Docker → XServer Sync                                        Theme: [ System Setting v ]              |
 | Safe Sync Mode — Performs revalidation, differential backups, and explicit approvals                  |
 |                                                                                                       |
 | Project: [ example.com                       v ] [New…] [Clone…] [Edit…] [Delete] [Verify] [History…]  |
@@ -100,6 +100,7 @@ Docker → XServer Sync was designed specifically to bridge the gap between loca
 ```
 
 ### Action Controls
+- **Theme (表示テーマ)**: Follows the OS appearance with **System Setting**, or keeps the application in **Light** or **Dark** mode. The selection persists across launches.
 - **New…**: Creates a new synchronization project.
 - **Clone…**: Clones the active project configuration into a new project with incremented naming.
 - **Edit…**: Edits connection settings, directory mappings, and protected runtime paths. A **Clone…** button is also available inside the editor.
@@ -207,6 +208,7 @@ Tailored for static HTML/CSS/JS sites and pre-built outputs (e.g., Astro, Next.j
 
 ### New Project (`New…` / `新規…`)
 - Opens the configuration dialog. Use "How to check inputs (入力項目の確認方法)" for guided assistance.
+- Click **Test Connection… (接続テスト…)** after entering connection details and paths to verify SSH/SFTP connectivity, host key fingerprint (SHA-256), and remote directory access before saving.
 
 ### Duplicate Project (`Clone…` / `複製…`)
 Facilitates setting up multiple domains, staging environments, or similar configurations.
@@ -279,6 +281,7 @@ If the computer shuts down or network drops during a transfer:
 - View audit records of past synchronization, overwrite, setup, and backup deletion runs.
 - Select any operation and click **Restore from Backup (バックアップから復元)** to revert remote files to their pre-sync state.
 - **Retention Pruning**: In the Backups tab, set **Keep Latest (保持件数（最新）)** (default: 10) and **Retention Days (保持日数)** (default: 30 days), then click **Select Prune Candidates by Retention Rules (保持ルールで整理候補を選択)** to mark only older backups outside both thresholds for reviewed deletion.
+- **Prune Old History & Plans**: Click **Prune Old History & Plans… (古い操作履歴・計画を整理…)** at the bottom of the dialog to remove operation history older than 90 days (or beyond the latest 200 entries) and orphaned plans from the local database without affecting files or backups on XServer.
 
 ### In-App Update Check
 - Click **Help → Check for Updates… (ヘルプ → アップデートを確認…)** to check GitHub Releases in the background and open release notes if a newer version is available.
@@ -387,4 +390,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.1.3 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.4 / StayHomeLabNet*

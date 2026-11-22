@@ -44,6 +44,9 @@ jobs:
       - name: Install project and test dependencies
         run: uv sync --python 3.12 --extra dev --extra gui --extra ssh
 
+      - name: Run linter
+        run: uv run ruff check src tests
+
       - name: Run test suite
         env:
           QT_QPA_PLATFORM: ${{ runner.os == 'Windows' && '' || 'offscreen' }}

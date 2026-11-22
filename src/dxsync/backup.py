@@ -332,7 +332,7 @@ def delete_remote_backup(
     cancel.raise_if_cancelled()
     normalized = validate_backup_directory_for_delete(backup_directory)
 
-    lstat_fn = getattr(sftp, "lstat", None) or getattr(sftp, "stat")
+    lstat_fn = getattr(sftp, "lstat", None) or sftp.stat
     try:
         root_stat = lstat_fn(normalized)
     except FileNotFoundError:
@@ -348,7 +348,7 @@ def delete_remote_backup(
 
     def _remove_dir_recursive(path: str) -> None:
         cancel.raise_if_cancelled()
-        listdir_attr = getattr(sftp, "listdir_attr")
+        listdir_attr = sftp.listdir_attr
         for entry in listdir_attr(path):
             cancel.raise_if_cancelled()
             name = getattr(entry, "filename", "")

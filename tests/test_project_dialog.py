@@ -262,3 +262,63 @@ def test_project_dialog_duplicate_from_prefills_and_increments_name(tmp_path) ->
     dialog2 = ProjectDialog(store, duplicate_from=project)
     assert dialog2.name_edit.text() == "mysite.com のコピー 2"
     dialog2.close()
+
+
+def test_project_dialog_connection_test_requires_fields_and_runs_worker(
+    tmp_path, monkeypatch
+) -> None:
+    import stat
+
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    key_file = tmp_path / "id_rsa"
+    key_file.write_text("dummy key")
+
+    dialog = ProjectDialog(store)
+    warnings: list[str] = []
+    infos: list[str] = []
+    monkeypatch.setattr(
+        "dxsync.project_dialog.QMessageBox.warning",
+        lambda _p, _t, msg: warnings.append(msg),
+    )
+    monkeypatch.setattr(
+        "dxsync.project_dialog.QMessageBox.information",
+        lambda _p, _t, msg: infos.append(msg),
+    )
+
+    dialog._test_connection()
+    assert len(warnings) == 1
+    assert "SSHホスト" in warnings[0]
+
+    class FakeStat:
+        st_mode = stat.S_IFDIR | 0o755
+
+    class FakeSftp:
+        def stat(self, path: str):
+            assert path == "/home/user/public_html"
+            return FakeStat()
+
+        def close(self) -> None:
+            pass
+
+    class FakeClient:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "dxsync.project_dialog.connect_sftp",
+        lambda **_kwargs: (FakeClient(), FakeSftp()),
+    )
+    dialog.host_edit.setText("sv1.xsrv.jp")
+    dialog.user_edit.setText("user")
+    dialog.fingerprint_edit.setText("SHA256:test")
+    dialog.key_edit.setText(str(key_file))
+    dialog._append_mapping("site", str(tmp_path), "/home/user/public_html")
+
+    dialog._test_connection()
+    while dialog._connection_test_thread is not None:
+        app().processEvents()
+
+    assert len(infos) == 1
+    assert "/home/user/public_html" in infos[0]
+    dialog.close()

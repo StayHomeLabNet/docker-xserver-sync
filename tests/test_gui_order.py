@@ -275,7 +275,9 @@ def test_wordpress_completion_dialog_contains_clickable_urls(
         QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
     )
     shown: list[QMessageBox] = []
-    fake_exec = lambda self: shown.append(self) or QMessageBox.Ok
+
+    def fake_exec(self):
+        return shown.append(self) or QMessageBox.Ok
     monkeypatch.setattr(QMessageBox, "exec", fake_exec)
     monkeypatch.setattr(QDialog, "exec", fake_exec)
     result = WordPressSetupResult(
@@ -859,7 +861,7 @@ def test_revalidation_worker_emits_detailed_progress_and_remote_wait(
 ) -> None:
     from dxsync import gui as gui_module
     from dxsync.gui import RevalidationWorker
-    from dxsync.models import ScanResult, SyncPlan
+    from dxsync.models import SyncPlan
     from dxsync.revalidation import RevalidationResult
     from dxsync.service import DryRunProgress
     from dxsync.storage import StoredPlan
@@ -1381,7 +1383,6 @@ def test_history_dialog_retention_selection_and_backup_delete_handler(
     tmp_path: Path, monkeypatch
 ) -> None:
     from datetime import datetime, timedelta, timezone
-    from PySide6.QtCore import Qt
     from dxsync.history_dialog import HistoryDialog
     from dxsync.storage import BackupRecord
 

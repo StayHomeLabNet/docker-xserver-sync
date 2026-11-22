@@ -14,7 +14,7 @@
 
 <br>
 
-![version](https://img.shields.io/badge/version-1.1.3-blue)
+![version](https://img.shields.io/badge/version-1.1.4-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -53,9 +53,11 @@ Docker XServer Sync is a cross-platform desktop application designed to safely d
   - SFTP listing of the XServer destination with tree-based selection of files/directories to protect from overwrite and deletion
   - Auto-sync `REMOTE_ONLY` interactive deletion policy (`ask`) with "Do Not Delete Folders" safeguards (ideal for hashed static site builds)
   - Direct main-window **Auto-Sync Settings…** shortcut & live policy summary, plus per-run backup skip toggle and preference persistence in the Auto-Sync confirmation dialog
-  - Backup retention & approved cleanup UI in the History dialog (keep latest N / max age days)
+  - Backup retention & approved cleanup UI in the History dialog (keep latest N / max age days) plus pruning of old local operation history and plans
+  - Pre-save SSH/SFTP connection test in the Project Settings dialog and faster diff scanning via SSH batch SHA-256 hashing
   - In-session SSH key passphrase caching and explicit opt-in OS credential store persistence
   - Built-in update checker under the Help menu (GitHub Releases)
+  - Persistent System / Light / Dark appearance selector in the main window
   - Post-deployment automated HTTPS health checks
 - **Laravel Initial Setup Wizard**:
   - Architecture-recommended separation: Application files (`app/`, `vendor/`) are placed outside public document root (`/home/{user}/{domain}_app`), while public assets (`public/`) are placed in `public_html`
@@ -84,7 +86,7 @@ Download the latest release from [GitHub Releases](https://github.com/StayHomeLa
 2. Extract and move `Docker XServer Sync.app` to your `/Applications` folder.
 
 ### Windows
-- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v1.1.3.exe`.
+- **Installer (Recommended)**: Run `Docker-XServer-Sync-Setup-v1.1.4.exe`.
 - **Portable**: Extract `Docker XServer Sync-Windows-x64.zip` and launch `Docker XServer Sync.exe`.
 
 ### Linux
@@ -183,7 +185,7 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 # Install dependencies
 uv sync --extra dev --extra gui --extra ssh --extra build
 
-# Run unit tests (224 passing tests)
+# Run unit tests (231 passing tests)
 uv run pytest
 
 # Launch GUI
@@ -193,7 +195,7 @@ uv run dxsync-gui
 ### Building Application Packages
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.3.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.4.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---

@@ -252,3 +252,76 @@ def test_project_store_ssh_passphrase_opt_in_and_cleanup(tmp_path: Path) -> None
     assert store.delete(project.project_id)
     assert secure_store.values == {}
 
+
+def test_prune_history_removes_old_operations_and_unused_plans_only(tmp_path: Path) -> None:
+    mapping = SyncMapping.create("public", str(tmp_path), "/home/example/public_html")
+    project = Project.create(
+        name="Example",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="example.xsrv.jp",
+        ssh_username="example",
+        host_key_fingerprint="SHA256:test",
+        private_key_reference="/tmp/key",
+        mappings=(mapping,),
+    )
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    store.save(project)
+
+    now = utc_now()
+    old_time = now - timedelta(days=120)
+    local = FileRecord("index.html", EntryKind.FILE, 5, 1, "hash1")
+
+    old_unused_plan = SyncPlan(
+        plan_id="plan-old-unused",
+        mapping_id=mapping.mapping_id,
+        created_at=old_time,
+        expires_at=old_time + timedelta(minutes=15),
+        changes=(FileChange("index.html", ChangeType.ADD, local, None),),
+        local_snapshot_sha256="l1",
+        remote_snapshot_sha256="r1",
+    )
+    old_backup_plan = SyncPlan(
+        plan_id="plan-old-backup",
+        mapping_id=mapping.mapping_id,
+        created_at=old_time,
+        expires_at=old_time + timedelta(minutes=15),
+        changes=(FileChange("index.html", ChangeType.ADD, local, None),),
+        local_snapshot_sha256="l2",
+        remote_snapshot_sha256="r2",
+    )
+    store.save_plan(project.project_id, old_unused_plan, "/tmp/s1")
+    store.save_plan(project.project_id, old_backup_plan, "/tmp/s2")
+    store.expire_plans(now)
+    store.save_backup(
+        BackupRecord(
+            backup_id="bkp-1",
+            project_id=project.project_id,
+            mapping_id=mapping.mapping_id,
+            plan_id="plan-old-backup",
+            backup_directory="/home/example/.dxsync/backups/bkp-1",
+            manifest_path="/home/example/.dxsync/backups/bkp-1/manifest.json",
+            created_at=old_time,
+            file_count=1,
+            total_bytes=5,
+            status="available",
+        )
+    )
+
+    op1 = store.start_operation(project_id=project.project_id, mapping_id=mapping.mapping_id, kind="dry_run")
+    store.finish_operation(op1.operation_id, status="succeeded")
+    op2 = store.start_operation(project_id=project.project_id, mapping_id=mapping.mapping_id, kind="dry_run")
+    store.finish_operation(op2.operation_id, status="succeeded")
+
+    pruned = store.prune_history(
+        project_id=project.project_id,
+        keep_operations=1,
+        max_age_days=90,
+        now=now,
+    )
+
+    assert pruned == {"deleted_operations": 1, "deleted_plans": 1}
+    assert len(store.list_operations(project.project_id)) == 1
+    assert store.get_plan("plan-old-unused") is None
+    assert store.get_plan("plan-old-backup") is not None
+
