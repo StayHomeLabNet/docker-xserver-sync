@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import ssl
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+import certifi
 
 
 class XServerApiError(RuntimeError):
@@ -22,6 +25,11 @@ class CreatedDatabaseUser:
     db_user: str
 
 
+def _default_urlopen(request: Request, *, timeout: float) -> Any:
+    context = ssl.create_default_context(cafile=certifi.where())
+    return urlopen(request, timeout=timeout, context=context)
+
+
 class XServerApiClient:
     """Small, dependency-free client for the XServer server API."""
 
@@ -31,7 +39,7 @@ class XServerApiClient:
         api_key: str,
         servername: str,
         base_url: str = "https://api.xserver.ne.jp",
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] = _default_urlopen,
         timeout: float = 30.0,
     ) -> None:
         if not api_key.strip():

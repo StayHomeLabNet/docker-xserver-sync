@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import http.client
+import ssl
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from urllib.parse import urljoin, urlparse
+
+import certifi
 
 from . import __version__
 
@@ -42,12 +45,17 @@ def normalize_health_check_path(value: str) -> str:
     return path
 
 
+def _default_https_connection(domain: str, *, timeout: float) -> http.client.HTTPSConnection:
+    context = ssl.create_default_context(cafile=certifi.where())
+    return http.client.HTTPSConnection(domain, timeout=timeout, context=context)
+
+
 def perform_https_health_check(
     *,
     domain: str,
     path: str,
     timeout: float = 10.0,
-    connection_factory: Callable[..., HttpsConnection] = http.client.HTTPSConnection,
+    connection_factory: Callable[..., HttpsConnection] = _default_https_connection,
 ) -> HealthCheckResult:
     normalized_path = normalize_health_check_path(path)
     url = f"https://{domain}{normalized_path}"

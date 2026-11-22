@@ -75,3 +75,35 @@ def test_xserver_api_lists_existing_resources() -> None:
     )
     assert client.list_databases() == ("sample_existing",)
     assert client.list_database_users() == ("sample_user",)
+
+
+def test_default_urlopen_uses_certifi_bundle(monkeypatch) -> None:
+    import certifi
+
+    from dxsync import xserver_api
+
+    captured: dict[str, object] = {}
+
+    def fake_create_default_context(*, cafile=None):
+        captured["cafile"] = cafile
+        return "ssl-context"
+
+    def fake_urlopen(request, *, timeout, context=None):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["context"] = context
+        return Response(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(
+        xserver_api.ssl, "create_default_context", fake_create_default_context
+    )
+    monkeypatch.setattr(xserver_api, "urlopen", fake_urlopen)
+
+    client = xserver_api.XServerApiClient(
+        api_key="xs_secret",
+        servername="sample.xsrv.jp",
+    )
+    assert client.key_info() == {"ok": True}
+    assert captured["cafile"] == certifi.where()
+    assert captured["context"] == "ssl-context"
+    assert captured["timeout"] == 30.0

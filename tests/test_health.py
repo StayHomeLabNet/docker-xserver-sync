@@ -104,3 +104,31 @@ def test_https_health_check_rejects_redirect_to_unexpected_port() -> None:
 def test_unsafe_health_check_path_is_rejected(value: str) -> None:
     with pytest.raises(ValueError):
         normalize_health_check_path(value)
+
+
+def test_default_https_connection_uses_certifi_bundle(monkeypatch) -> None:
+    import certifi
+
+    from dxsync import health
+
+    captured: dict[str, object] = {}
+
+    def fake_create_default_context(*, cafile=None):
+        captured["cafile"] = cafile
+        return "ssl-context"
+
+    class DummyHttpsConnection:
+        def __init__(self, domain: str, *, timeout: float, context=None) -> None:
+            captured["domain"] = domain
+            captured["timeout"] = timeout
+            captured["context"] = context
+
+    monkeypatch.setattr(health.ssl, "create_default_context", fake_create_default_context)
+    monkeypatch.setattr(health.http.client, "HTTPSConnection", DummyHttpsConnection)
+
+    conn = health._default_https_connection("example.com", timeout=5.0)
+    assert isinstance(conn, DummyHttpsConnection)
+    assert captured["cafile"] == certifi.where()
+    assert captured["context"] == "ssl-context"
+    assert captured["domain"] == "example.com"
+    assert captured["timeout"] == 5.0

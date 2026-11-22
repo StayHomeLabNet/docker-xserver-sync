@@ -2428,14 +2428,15 @@ class MainWindow(QMainWindow):
             for backup in self.store.list_backups(project.project_id)
         } if project else {}
         backup = backups.get(self._current_backup_id) if self._current_backup_id else None
-        if (
-            project is None
-            or mapping is None
-            or stored is None
-            or (
-                not self._backup_skipped
-                and (backup is None or backup.plan_id != stored.plan.plan_id)
+        if project is None or mapping is None or stored is None:
+            QMessageBox.warning(
+                self,
+                "自動実行を停止",
+                "同期対象の計画を取得できません（有効期限切れの可能性があります）。再度ドライランを実行してください。",
             )
+            return
+        if not self._backup_skipped and (
+            backup is None or backup.plan_id != stored.plan.plan_id
         ):
             QMessageBox.warning(
                 self, "自動実行を停止", "この計画に対応するバックアップがありません。"
@@ -3566,6 +3567,12 @@ class MainWindow(QMainWindow):
         self._retire_resumable_operations("deployment")
         if result.health_check is not None and not result.health_check.ok:
             health_detail = result.health_check.error or "不明なエラー"
+            recovery_hint = (
+                "この同期ではバックアップ作成をスキップしたため、履歴からの復元はできません。\n"
+                "ブラウザとサーバーログを確認してください。"
+                if self._backup_skipped
+                else "ブラウザとサーバーログを確認し、必要な場合は履歴から復元してください。"
+            )
             self.summary.setText(
                 f"同期は完了しましたが、HTTPS動作確認に失敗しました: {health_detail}"
             )
@@ -3575,7 +3582,7 @@ class MainWindow(QMainWindow):
                 "ファイルの同期と転送後ハッシュ検証は完了しています。\n\n"
                 f"確認先: {result.health_check.url}\n"
                 f"結果: {health_detail}\n\n"
-                "ブラウザとサーバーログを確認し、必要な場合は履歴から復元してください。",
+                f"{recovery_hint}",
             )
         else:
             health_text = ""
