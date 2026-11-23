@@ -50,6 +50,7 @@ def test_auto_sync_preferences_round_trip_per_project(tmp_path: Path) -> None:
         max_update_files=10,
         max_upload_mib=50,
         require_domain_confirmation=False,
+        skip_approval_dialog=True,
     )
 
     save_auto_sync_preferences(settings, "project-one", preferences)
@@ -597,5 +598,132 @@ def test_main_window_auto_sync_skip_backup_saves_pref_and_deploys_without_backup
     assert captured["backup_skipped"] is True
     assert captured["delete_paths"] == ()
 
+    window._stop_auto_sync()
+    window.close()
+
+
+def test_auto_sync_settings_dialog_disables_domain_check_when_skip_approval_enabled() -> None:
+    app()
+    dialog = AutoSyncSettingsDialog(AutoSyncPreferences())
+    assert not dialog.skip_approval_dialog.isChecked()
+    assert dialog.require_domain_confirmation.isEnabled()
+
+    dialog.skip_approval_dialog.setChecked(True)
+    assert not dialog.require_domain_confirmation.isEnabled()
+    assert dialog.selected_preferences().skip_approval_dialog is True
+
+
+def test_auto_sync_skips_approval_dialog_when_configured(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app()
+    store = ProjectStore(tmp_path / "state.db", MemoryHostKeyStore())
+    mapping = SyncMapping(
+        mapping_id="m1",
+        name="main",
+        local_root=str(tmp_path / "src"),
+        remote_root="/home/user/example.com/public_html",
+    )
+    project = Project(
+        project_id="p1",
+        name="Example",
+        site_type=SiteType.STATIC_SITE,
+        domain="example.com",
+        ssh_host="sv.xsrv.jp",
+        ssh_port=10022,
+        ssh_username="user",
+        host_key_fingerprint="SHA256:abc",
+        private_key_reference=str(tmp_path / "id_ed25519"),
+        mappings=(mapping,),
+    )
+    store.save(project)
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    save_auto_sync_preferences(
+        settings,
+        project.project_id,
+        AutoSyncPreferences(
+            backup_mode="always",
+            remote_only_policy="ask",
+            skip_approval_dialog=True,
+        ),
+    )
+
+    window = MainWindow(store, settings)
+    assert "確認画面スキップ" in window.auto_sync_policy_label.text()
+    window._auto_sync_active = True
+    window._auto_sync_stage = "approval"
+    window._auto_sync_preferences = load_auto_sync_preferences(
+        settings, project.project_id
+    )
+
+    now = datetime.now(UTC)
+    local_record = FileRecord(
+        relative_path="index.html",
+        kind=EntryKind.FILE,
+        size=10,
+        modified_ns=2_000_000_000,
+        sha256="a" * 64,
+    )
+    remote_record = FileRecord(
+        relative_path="index.html",
+        kind=EntryKind.FILE,
+        size=10,
+        modified_ns=1_000_000_000,
+        sha256="b" * 64,
+    )
+    plan = SyncPlan(
+        plan_id="plan-skip-approval",
+        mapping_id=mapping.mapping_id,
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        changes=(
+            FileChange(
+                relative_path="index.html",
+                change_type=ChangeType.UPDATE,
+                local=local_record,
+                remote=remote_record,
+            ),
+            FileChange(
+                relative_path="old.js",
+                change_type=ChangeType.REMOTE_ONLY,
+                local=None,
+                remote=remote_record,
+            ),
+        ),
+        local_snapshot_sha256="local-snap",
+        remote_snapshot_sha256="remote-snap",
+        config_sha256="cfg",
+    )
+    store.save_plan(project.project_id, plan, str(tmp_path / "staging"))
+    window._current_plan_id = plan.plan_id
+
+    monkeypatch.setattr(
+        "dxsync.gui.AutoSyncApprovalDialog",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("AutoSyncApprovalDialog must not open")
+        ),
+    )
+
+    window._prepare_auto_after_dry_run(
+        DryRunResult(
+            local=ScanResult(
+                root=tmp_path / "src",
+                files=(local_record,),
+                issues=(),
+                excluded_count=0,
+            ),
+            remote=RemoteScanResult(
+                root="/home/user/example.com/public_html",
+                files=(remote_record,),
+                issues=(),
+                excluded_count=0,
+            ),
+            plan=plan,
+        )
+    )
+
+    assert window._auto_sync_stage == "revalidation"
+    assert not window._auto_backup_skipped
+    assert window._auto_approved_delete_paths == ()
     window._stop_auto_sync()
     window.close()

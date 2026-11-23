@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
@@ -112,6 +114,8 @@ class RemoteBackupEngine:
         delete_paths: tuple[str, ...] = (),
         progress_callback: Callable[[int, int, str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
+        sftp_factory: Callable[[], Any] | None = None,
+        max_workers: int = 1,
     ) -> BackupResult:
         cancel = cancellation_token or CancellationToken()
         cancel.raise_if_cancelled()
@@ -162,56 +166,95 @@ class RemoteBackupEngine:
 
         backed_up: list[BackupFile] = []
         total_bytes = 0
+
+        def backup_one(change: Any, thread_sftp: Any) -> BackupFile:
+            cancel.raise_if_cancelled()
+            if change.remote is None or not change.remote.sha256:
+                raise BackupError(f"Missing approved remote hash: {change.relative_path}")
+            relative = change.remote.relative_path
+            source = str(PurePosixPath(source_root) / relative)
+            destination = str(PurePosixPath(backup_directory) / relative)
+            temporary = destination + f".dxsync-{backup_id}.tmp"
+
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                with thread_sftp.open(source, "rb") as reader, thread_sftp.open(temporary, "wb") as writer:
+                    while chunk := reader.read(1024 * 1024):
+                        cancel.raise_if_cancelled()
+                        writer.write(chunk)
+                        digest.update(chunk)
+                        size += len(chunk)
+                copied_hash = digest.hexdigest()
+                if copied_hash != change.remote.sha256:
+                    raise BackupError(f"Remote source changed before backup: {relative}")
+                thread_sftp.rename(temporary, destination)
+            except Exception:
+                if _exists(thread_sftp, temporary):
+                    thread_sftp.remove(temporary)
+                raise
+
+            verified_hash, verified_size = _hash_remote(
+                thread_sftp,
+                destination,
+                cancellation_token=cancel,
+            )
+            if verified_hash != change.remote.sha256 or verified_size != size:
+                raise BackupError(f"Backup verification failed: {relative}")
+            mode = stat.S_IMODE(thread_sftp.stat(source).st_mode)
+            return BackupFile(
+                relative,
+                verified_hash,
+                size,
+                destination,
+                change.change_type,
+                mode,
+            )
+
         try:
-            for index, change in enumerate(backup_targets, start=1):
+            for change in backup_targets:
                 cancel.raise_if_cancelled()
                 if change.remote is None or not change.remote.sha256:
                     raise BackupError(f"Missing approved remote hash: {change.relative_path}")
-                relative = change.remote.relative_path
-                source = str(PurePosixPath(source_root) / relative)
-                destination = str(PurePosixPath(backup_directory) / relative)
-                temporary = destination + f".dxsync-{backup_id}.tmp"
+                destination = str(PurePosixPath(backup_directory) / change.remote.relative_path)
                 _mkdir_parents(sftp, str(PurePosixPath(destination).parent), mode=0o700)
 
-                digest = hashlib.sha256()
-                size = 0
-                try:
-                    with sftp.open(source, "rb") as reader, sftp.open(temporary, "wb") as writer:
-                        while chunk := reader.read(1024 * 1024):
-                            cancel.raise_if_cancelled()
-                            writer.write(chunk)
-                            digest.update(chunk)
-                            size += len(chunk)
-                    copied_hash = digest.hexdigest()
-                    if copied_hash != change.remote.sha256:
-                        raise BackupError(f"Remote source changed before backup: {relative}")
-                    sftp.rename(temporary, destination)
-                except Exception:
-                    if _exists(sftp, temporary):
-                        sftp.remove(temporary)
-                    raise
+            if max_workers > 1 and sftp_factory is not None and len(backup_targets) > 1:
+                thread_local = threading.local()
+                progress_lock = threading.Lock()
+                completed_count = 0
+                backed_up_by_index: dict[int, BackupFile] = {}
 
-                verified_hash, verified_size = _hash_remote(
-                    sftp,
-                    destination,
-                    cancellation_token=cancel,
-                )
-                if verified_hash != change.remote.sha256 or verified_size != size:
-                    raise BackupError(f"Backup verification failed: {relative}")
-                mode = stat.S_IMODE(sftp.stat(source).st_mode)
-                backed_up.append(
-                    BackupFile(
-                        relative,
-                        verified_hash,
-                        size,
-                        destination,
-                        change.change_type,
-                        mode,
-                    )
-                )
-                total_bytes += size
-                if progress_callback is not None:
-                    progress_callback(index, total_targets, relative)
+                def run_backup(index: int, change: Any) -> tuple[int, BackupFile]:
+                    thread_sftp = getattr(thread_local, "sftp", None)
+                    if thread_sftp is None:
+                        thread_sftp = sftp_factory()
+                        thread_local.sftp = thread_sftp
+                    return index, backup_one(change, thread_sftp)
+
+                with ThreadPoolExecutor(
+                    max_workers=min(max_workers, len(backup_targets))
+                ) as executor:
+                    futures = [
+                        executor.submit(run_backup, idx, change)
+                        for idx, change in enumerate(backup_targets)
+                    ]
+                    for future in as_completed(futures):
+                        idx, item = future.result()
+                        backed_up_by_index[idx] = item
+                        with progress_lock:
+                            completed_count += 1
+                            if progress_callback is not None:
+                                progress_callback(completed_count, total_targets, item.relative_path)
+                backed_up = [backed_up_by_index[i] for i in range(len(backup_targets))]
+                total_bytes = sum(item.size for item in backed_up)
+            else:
+                for index, change in enumerate(backup_targets, start=1):
+                    item = backup_one(change, sftp)
+                    backed_up.append(item)
+                    total_bytes += item.size
+                    if progress_callback is not None:
+                        progress_callback(index, total_targets, item.relative_path)
         except OperationCancelled:
             for item in backed_up:
                 try:

@@ -75,6 +75,7 @@ from .deployment import (
     DeploymentResult,
     RemoteDeploymentEngine as RemoteDeploymentEngine,
 )
+from .diff_dialog import MAX_DIFF_BYTES, DiffViewerDialog, build_text_diff
 from .file_table_model import FileTableModel as FileTableModel
 from .force_overwrite import (
     ForceOverwriteEngine as ForceOverwriteEngine,
@@ -84,6 +85,7 @@ from .force_overwrite import (
 from .presets import get_preset
 from .project_dialog import ProjectDialog
 from .remote import connect_sftp as connect_sftp
+from .setup_helpers import persist_xserver_api_key
 from .theme import (
     THEME_OPTIONS,
     THEME_SETTING_KEY,
@@ -141,6 +143,7 @@ from .progress_tracker import (
     format_progress_duration,
     format_size as _format_size,
 )
+from .hooks import filter_allowed_delete_paths
 from .workers import (
     BackupDeleteWorker,
     BackupWorker,
@@ -148,6 +151,7 @@ from .workers import (
     DryRunWorker,
     ForceOverwriteWorker,
     LaravelSetupWorker,
+    PreSyncHookWorker,
     RecoveryScanWorker,
     RestoreWorker,
     RevalidationWorker,
@@ -487,15 +491,16 @@ class MainWindow(QMainWindow):
         layout.addLayout(progress_layout)
 
         self.table_model = FileTableModel()
-        table = QTableView()
-        table.setModel(self.table_model)
-        table.setAlternatingRowColors(True)
-        table.setSortingEnabled(False)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setColumnWidth(0, 100)
-        table.setColumnWidth(1, 430)
-        table.setColumnWidth(2, 90)
-        layout.addWidget(table, 1)
+        self.table = QTableView()
+        self.table.setModel(self.table_model)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 100)
+        self.table.setColumnWidth(1, 430)
+        self.table.setColumnWidth(2, 90)
+        self.table.doubleClicked.connect(self._open_row_diff)
+        layout.addWidget(self.table, 1)
 
         footer = QLabel("ドライランはリモートへの一覧取得・読み取りだけを行い、ファイルを作成・変更しません。")
         footer.setStyleSheet(MUTED_TEXT_STYLE)
@@ -1225,9 +1230,18 @@ class MainWindow(QMainWindow):
                 "Laravelの保存済みプロジェクトを選択してください。",
             )
             return
-        wizard = LaravelSetupWizard(project, mapping, self)
+        wizard = LaravelSetupWizard(
+            project, mapping, self, secure_store=self.store.secure_store
+        )
         if wizard.exec() != QDialog.Accepted:
             return
+        if wizard.uses_xserver_api:
+            persist_xserver_api_key(
+                self.store.secure_store,
+                project.project_id,
+                wizard.api_key,
+                remember=wizard.save_api_key_check.isChecked(),
+            )
         request = wizard.request_value()
         api_key = wizard.api_key or None
         servername = wizard.servername if wizard.uses_xserver_api else None
@@ -1314,10 +1328,21 @@ class MainWindow(QMainWindow):
             )
             return
         wizard = WordPressSetupWizard(
-            project, mapping, self, resume_existing=resume_existing
+            project,
+            mapping,
+            self,
+            resume_existing=resume_existing,
+            secure_store=self.store.secure_store,
         )
         if wizard.exec() != QDialog.Accepted:
             return
+        if wizard.uses_xserver_api and not resume_existing:
+            persist_xserver_api_key(
+                self.store.secure_store,
+                project.project_id,
+                wizard.api_key,
+                remember=wizard.save_api_key_check.isChecked(),
+            )
         request = wizard.request_value()
         api_key = wizard.api_key or None
         servername = wizard.servername if wizard.uses_xserver_api else None
@@ -2374,13 +2399,62 @@ class MainWindow(QMainWindow):
         self._auto_dry_run_result = None
         self._set_auto_sync_controls_locked(True)
         self._update_action_buttons()
+        if self._auto_sync_preferences.pre_sync_command.strip():
+            self._set_auto_stage(1, "同期前ローカルコマンドを実行")
+            self._start_pre_sync_hook(
+                self._auto_sync_preferences.pre_sync_command,
+                Path(mapping.local_root).expanduser(),
+            )
+            if self._thread is None:
+                self._stop_auto_sync()
+            return
         self._set_auto_stage(1, "読み取り専用ドライラン")
         self._start_dry_run()
         if self._thread is None:
             self._stop_auto_sync()
 
+    def _start_pre_sync_hook(self, command: str, cwd: Path) -> None:
+        if not cwd.is_dir():
+            QMessageBox.warning(
+                self, "フォルダを確認", "同期元のローカルフォルダを読み取れません。"
+            )
+            return
+        self.summary.setText(f"自動実行 1/4 — 同期前コマンド実行中: {command}")
+        thread = QThread(self)
+        worker = PreSyncHookWorker(command=command, cwd=cwd)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._pre_sync_hook_completed)
+        worker.failed.connect(self._pre_sync_hook_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    @Slot()
+    def _pre_sync_hook_completed(self) -> None:
+        if not self._auto_sync_active:
+            return
+        self._auto_sync_stage = "dry_run_after_hook"
+
+    @Slot(str)
+    def _pre_sync_hook_failed(self, message: str) -> None:
+        self.summary.setText("同期前ローカルコマンドが失敗したため、自動実行を中止しました。")
+        if self._auto_sync_active:
+            self._stop_auto_sync()
+        QMessageBox.critical(self, "同期前コマンドエラー", message)
+
     def _continue_auto_sync(self) -> None:
         if not self._auto_sync_active or self._thread is not None:
+            return
+        if self._auto_sync_stage == "dry_run_after_hook":
+            self._auto_sync_stage = "dry_run"
+            self._set_auto_stage(1, "読み取り専用ドライラン")
+            self._start_dry_run()
+            if self._thread is None and self._auto_sync_active:
+                self._stop_auto_sync()
             return
         if self._auto_sync_stage == "approval":
             result = self._auto_dry_run_result
@@ -2450,6 +2524,78 @@ class MainWindow(QMainWindow):
             backup,
             self._auto_health_check_path,
         )
+
+    @Slot(object)
+    def _open_row_diff(self, index) -> None:
+        if not index.isValid() or self._thread is not None:
+            return
+        entry = self.table_model.row_entry(index.row())
+        if entry is None:
+            return
+        status, record = entry
+        if status != "UPDATE":
+            return
+        project = self._current_project
+        mapping = self._selected_mapping()
+        if project is None or mapping is None:
+            return
+        local_path = Path(mapping.local_root).expanduser() / record.relative_path
+        if not local_path.is_file():
+            QMessageBox.warning(
+                self, "差分を表示できません", f"ローカルファイルが見つかりません:\n{local_path}"
+            )
+            return
+        try:
+            with local_path.open("rb") as handle:
+                local_bytes = handle.read(MAX_DIFF_BYTES + 1)
+        except OSError as exc:
+            QMessageBox.warning(self, "差分を表示できません", str(exc))
+            return
+
+        client = None
+        sftp = None
+        try:
+            client, sftp = connect_sftp(
+                host=project.ssh_host,
+                port=project.ssh_port,
+                username=project.ssh_username,
+                expected_fingerprint=self.store.resolve_host_key(project),
+                private_key_path=project.private_key_reference,
+                passphrase=self._resolve_gui_passphrase(),
+            )
+            remote_path = mapping.remote_root.rstrip("/") + "/" + record.relative_path
+            with sftp.open(remote_path, "rb") as handle:
+                remote_bytes = handle.read(MAX_DIFF_BYTES + 1)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "差分を取得できません", f"XServer からファイルを取得できませんでした:\n{exc}"
+            )
+            return
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+        _, diff_text = build_text_diff(
+            record.relative_path,
+            local_bytes,
+            remote_bytes,
+            max_bytes=MAX_DIFF_BYTES,
+        )
+        DiffViewerDialog(
+            relative_path=record.relative_path,
+            diff_text=diff_text,
+            local_summary=f"{len(local_bytes):,} bytes",
+            remote_summary=f"{len(remote_bytes):,} bytes",
+            parent=self,
+        ).exec()
 
     @Slot()
     def _start_scan(self) -> None:
@@ -2828,6 +2974,7 @@ class MainWindow(QMainWindow):
                 "resumed": resume,
             },
         )
+        preferences = load_auto_sync_preferences(self.settings, project.project_id)
         thread = QThread(self)
         worker = DeployWorker(
             stored=stored,
@@ -2844,6 +2991,8 @@ class MainWindow(QMainWindow):
             ),
             health_check_path=health_check_path,
             resume=resume,
+            post_sync_remote_command=preferences.post_sync_remote_command,
+            post_sync_webhook_url=preferences.post_sync_webhook_url,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3294,12 +3443,20 @@ class MainWindow(QMainWindow):
             for change in result.plan.changes
             if change.change_type == ChangeType.REMOTE_ONLY
         )
+        auto_allowed_deletes = (
+            filter_allowed_delete_paths(
+                remote_only_paths, preferences.auto_delete_allowed_folders
+            )
+            if preferences.skip_approval_dialog and preferences.backup_mode != "skip"
+            else ()
+        )
         can_ask_delete = (
             preferences.remote_only_policy == "ask"
             and bool(remote_only_paths)
             and preferences.backup_mode != "skip"
+            and not preferences.skip_approval_dialog
         )
-        if changed_count == 0 and not can_ask_delete:
+        if changed_count == 0 and not auto_allowed_deletes and not can_ask_delete:
             self.summary.setText(
                 "自動実行完了。ADD・UPDATEはなく、XServerへの書き込みは行いませんでした。"
             )
@@ -3316,39 +3473,45 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "自動実行設定を確認", str(exc))
             self._stop_auto_sync()
             return
-        initial_backup_skipped = preferences.resolved_backup_skip(update_count)
-        approval = AutoSyncApprovalDialog(
-            domain=project.domain,
-            remote_root=mapping.remote_root,
-            add_count=add_count,
-            update_count=update_count,
-            remote_only_count=remote_only_count,
-            upload_bytes=upload_bytes,
-            backup_skipped=initial_backup_skipped,
-            health_check_path=health_path,
-            require_domain_confirmation=(
-                preferences.require_domain_confirmation
-            ),
-            remote_only_paths=remote_only_paths,
-            allow_remote_only_deletion=(preferences.remote_only_policy == "ask"),
-            backup_mode=preferences.backup_mode,
-            parent=self,
-        )
-        if approval.exec() != QDialog.Accepted:
-            self.summary.setText(
-                "自動実行をキャンセルしました。XServerへの書き込みは行っていません。"
+        if preferences.skip_approval_dialog:
+            selected_deletes = auto_allowed_deletes
+            backup_skipped = preferences.resolved_backup_skip(
+                update_count, delete_count=len(selected_deletes)
             )
-            self._stop_auto_sync()
-            return
-        selected_deletes = approval.selected_delete_paths()
-        backup_skipped = approval.should_skip_backup()
-        if getattr(approval, "should_save_skip_backup_preference", lambda: False)():
-            updated_preferences = replace(preferences, backup_mode="skip")
-            save_auto_sync_preferences(
-                self.settings, project.project_id, updated_preferences
+        else:
+            initial_backup_skipped = preferences.resolved_backup_skip(update_count)
+            approval = AutoSyncApprovalDialog(
+                domain=project.domain,
+                remote_root=mapping.remote_root,
+                add_count=add_count,
+                update_count=update_count,
+                remote_only_count=remote_only_count,
+                upload_bytes=upload_bytes,
+                backup_skipped=initial_backup_skipped,
+                health_check_path=health_path,
+                require_domain_confirmation=(
+                    preferences.require_domain_confirmation
+                ),
+                remote_only_paths=remote_only_paths,
+                allow_remote_only_deletion=(preferences.remote_only_policy == "ask"),
+                backup_mode=preferences.backup_mode,
+                parent=self,
             )
-            self._auto_sync_preferences = updated_preferences
-            self._update_auto_sync_summary()
+            if approval.exec() != QDialog.Accepted:
+                self.summary.setText(
+                    "自動実行をキャンセルしました。XServerへの書き込みは行っていません。"
+                )
+                self._stop_auto_sync()
+                return
+            selected_deletes = approval.selected_delete_paths()
+            backup_skipped = approval.should_skip_backup()
+            if getattr(approval, "should_save_skip_backup_preference", lambda: False)():
+                updated_preferences = replace(preferences, backup_mode="skip")
+                save_auto_sync_preferences(
+                    self.settings, project.project_id, updated_preferences
+                )
+                self._auto_sync_preferences = updated_preferences
+                self._update_auto_sync_summary()
         self._auto_approved_delete_paths = selected_deletes
         self._approved_delete_paths = selected_deletes
         self._auto_backup_skipped = backup_skipped
@@ -3594,12 +3757,29 @@ class MainWindow(QMainWindow):
             health_text = ""
             if result.health_check is not None:
                 health_text = f" HTTPS {result.health_check.status_code}を確認済みです。"
+            hook_notes = [
+                note
+                for note in (
+                    result.post_sync_remote_error,
+                    result.post_sync_webhook_error,
+                )
+                if note
+            ]
+            hook_suffix = f" 注意: {' / '.join(hook_notes)}" if hook_notes else ""
             self.summary.setText(
                 f"同期完了 / {len(result.files)}ファイル / {result.total_bytes:,} bytes。"
                 "転送後ハッシュを確認済みです。"
                 f" 承認済み削除 {len(result.deleted_files)}件。"
                 + health_text
+                + hook_suffix
             )
+            if hook_notes:
+                QMessageBox.warning(
+                    self,
+                    "同期完了・フック通知警告",
+                    "ファイルの同期は完了しましたが、同期後処理で警告が発生しました:\n\n"
+                    + "\n".join(f"• {note}" for note in hook_notes),
+                )
 
     @Slot(object)
     def _deployment_blocked(self, result: RevalidationResult) -> None:
@@ -3880,6 +4060,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setText("処理を停止")
         self._refresh_ready_plan()
         if self._auto_sync_active and self._auto_sync_stage in {
+            "dry_run_after_hook",
             "approval",
             "revalidation",
             "backup",

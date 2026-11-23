@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -15,6 +16,11 @@ from .cancellation import CancellationToken, OperationCancelled
 from .deployment import DeploymentAuthorization, RemoteDeploymentEngine
 from .force_overwrite import ForceOverwriteEngine
 from .health import perform_https_health_check
+from .hooks import (
+    run_post_sync_remote_command,
+    run_pre_sync_command,
+    send_post_sync_webhook,
+)
 from .laravel_setup import (
     LARAVEL_SETUP_TOTAL_STEPS,
     LaravelSetupEngine,
@@ -77,6 +83,29 @@ def _close_remote(client, sftp) -> None:
             client.close()
         except Exception:
             pass
+
+
+class _SftpChannelPool:
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._channels: list[Any] = []
+        self._lock = threading.Lock()
+
+    def open_channel(self) -> Any:
+        channel = self._client.open_sftp()
+        with self._lock:
+            self._channels.append(channel)
+        return channel
+
+    def close_all(self) -> None:
+        with self._lock:
+            channels = list(self._channels)
+            self._channels.clear()
+        for channel in channels:
+            try:
+                channel.close()
+            except Exception:
+                pass
 
 
 class ScanWorker(QObject):
@@ -428,16 +457,27 @@ class BackupWorker(QObject):
                     )
                 )
 
-            result = RemoteBackupEngine().create_backup(
-                sftp=sftp,
-                plan=self.stored.plan,
-                project_id=self.project.project_id,
-                remote_root=self.mapping.remote_root,
-                backup_root=self.backup_root,
-                delete_paths=self.delete_paths,
-                progress_callback=report_backup,
-                cancellation_token=self.cancellation_token,
+            pool = (
+                _SftpChannelPool(client)
+                if callable(getattr(client, "open_sftp", None))
+                else None
             )
+            try:
+                result = RemoteBackupEngine().create_backup(
+                    sftp=sftp,
+                    plan=self.stored.plan,
+                    project_id=self.project.project_id,
+                    remote_root=self.mapping.remote_root,
+                    backup_root=self.backup_root,
+                    delete_paths=self.delete_paths,
+                    progress_callback=report_backup,
+                    cancellation_token=self.cancellation_token,
+                    sftp_factory=pool.open_channel if pool is not None else None,
+                    max_workers=3 if pool is not None else 1,
+                )
+            finally:
+                if pool is not None:
+                    pool.close_all()
             self.completed.emit(result)
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))
@@ -445,6 +485,27 @@ class BackupWorker(QObject):
             self.failed.emit(format_worker_error(exc))
         finally:
             _close_remote(client, sftp)
+
+
+class PreSyncHookWorker(QObject):
+    completed = Signal()
+    failed = Signal(str)
+
+    def __init__(self, *, command: str, cwd: Path) -> None:
+        super().__init__()
+        self.command = command
+        self.cwd = cwd
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = run_pre_sync_command(self.command, self.cwd)
+            if not result.ok:
+                self.failed.emit(result.error or "同期前コマンドが失敗しました。")
+                return
+            self.completed.emit()
+        except Exception as exc:
+            self.failed.emit(format_worker_error(exc))
 
 
 class DeployWorker(QObject):
@@ -465,6 +526,8 @@ class DeployWorker(QObject):
         authorization: DeploymentAuthorization,
         health_check_path: str | None = None,
         resume: bool = False,
+        post_sync_remote_command: str = "",
+        post_sync_webhook_url: str = "",
     ) -> None:
         super().__init__()
         self.stored = stored
@@ -474,6 +537,8 @@ class DeployWorker(QObject):
         self.authorization = authorization
         self.health_check_path = health_check_path
         self.resume = resume
+        self.post_sync_remote_command = post_sync_remote_command
+        self.post_sync_webhook_url = post_sync_webhook_url
         self.cancellation_token = CancellationToken()
 
     def cancel(self) -> None:
@@ -564,17 +629,28 @@ class DeployWorker(QObject):
             if not revalidation.valid:
                 self.blocked.emit(revalidation)
                 return
-            result = RemoteDeploymentEngine().deploy(
-                sftp=sftp,
-                plan=self.stored.plan,
-                staging_root=Path(self.stored.staging_path),
-                remote_root=self.mapping.remote_root,
-                authorization=self.authorization,
-                file_mode=self.mapping.file_mode,
-                directory_mode=self.mapping.directory_mode,
-                progress_callback=self.progress.emit,
-                cancellation_token=self.cancellation_token,
+            pool = (
+                _SftpChannelPool(client)
+                if callable(getattr(client, "open_sftp", None))
+                else None
             )
+            try:
+                result = RemoteDeploymentEngine().deploy(
+                    sftp=sftp,
+                    plan=self.stored.plan,
+                    staging_root=Path(self.stored.staging_path),
+                    remote_root=self.mapping.remote_root,
+                    authorization=self.authorization,
+                    file_mode=self.mapping.file_mode,
+                    directory_mode=self.mapping.directory_mode,
+                    progress_callback=self.progress.emit,
+                    cancellation_token=self.cancellation_token,
+                    sftp_factory=pool.open_channel if pool is not None else None,
+                    max_workers=3 if pool is not None else 1,
+                )
+            finally:
+                if pool is not None:
+                    pool.close_all()
             if self.health_check_path is not None:
                 emit_status(
                     OperationProgress(
@@ -591,6 +667,41 @@ class DeployWorker(QObject):
                         path=self.health_check_path,
                     ),
                 )
+            if self.post_sync_remote_command.strip():
+                remote_hook = run_post_sync_remote_command(
+                    client,
+                    self.post_sync_remote_command,
+                    self.mapping.remote_root,
+                )
+                if not remote_hook.ok:
+                    result = replace(
+                        result,
+                        post_sync_remote_error=remote_hook.error,
+                    )
+            if self.post_sync_webhook_url.strip():
+                health_note = ""
+                if result.health_check is not None:
+                    health_note = (
+                        f" / HTTPS {result.health_check.status_code}"
+                        if result.health_check.ok
+                        else f" / HTTPS失敗: {result.health_check.error}"
+                    )
+                hook_status = "warning" if result.post_sync_remote_error else "succeeded"
+                webhook_hook = send_post_sync_webhook(
+                    self.post_sync_webhook_url,
+                    project_name=self.project.name,
+                    domain=self.project.domain,
+                    status=hook_status,
+                    summary=(
+                        f"同期完了: {len(result.files)}ファイル ({result.total_bytes:,} bytes), "
+                        f"削除 {len(result.deleted_files)}件{health_note}"
+                    ),
+                )
+                if not webhook_hook.ok:
+                    result = replace(
+                        result,
+                        post_sync_webhook_error=webhook_hook.error,
+                    )
             self.completed.emit(result)
         except OperationCancelled as exc:
             self.cancelled.emit(str(exc))

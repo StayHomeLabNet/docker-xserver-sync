@@ -108,8 +108,8 @@ Docker → XServer Sync was designed specifically to bridge the gap between loca
 - **Verify (安全性確認)**: Inspects remote XServer storage for orphaned `.new` temporary files and legacy `.bak` archives.
 - **History…**: Opens the audit log and enables 1-click rollbacks from historical backups.
 - **Auto Safe Sync (安全同期を自動実行)**: Recommended standard workflow. Executes Dry Run → Revalidation → Backup → Sync in sequence.
-- **Auto-Sync Settings… (自動実行設定…)**: Opens per-project Auto Safe Sync settings (backup mode, `REMOTE_ONLY` policy, HTTPS health check, safety limits). The active policy summary is displayed directly next to the button.
-- **Read-Only Dry Run (読み取り専用ドライラン)**: Performs a remote differential scan without altering remote storage.
+- **Auto-Sync Settings… (自動実行設定…)**: Opens per-project Auto Safe Sync settings (backup mode, `REMOTE_ONLY` policy, HTTPS health check, safety limits, approval-dialog skip, pre/post-sync hooks, and allowlisted auto-delete folders). The active policy summary is displayed directly next to the button.
+- **Read-Only Dry Run (読み取り専用ドライラン)**: Performs a remote differential scan without altering remote storage. Double-click any `UPDATE` row in the dry-run table to preview the unified text diff between local and XServer.
 - **Stop Process (処理を停止)**: Safely cancels ongoing transfers at the next file boundary.
 
 ---
@@ -390,4 +390,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.1.4 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.5 / StayHomeLabNet*

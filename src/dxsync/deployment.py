@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import re
 import stat
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Protocol
@@ -45,6 +47,8 @@ class DeploymentResult:
     total_bytes: int
     health_check: HealthCheckResult | None = None
     deleted_files: tuple[str, ...] = ()
+    post_sync_remote_error: str | None = None
+    post_sync_webhook_error: str | None = None
 
 
 @dataclass
@@ -172,6 +176,8 @@ class RemoteDeploymentEngine:
         directory_mode: int = 0o755,
         progress_callback: Callable[[int, int, str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
+        sftp_factory: Callable[[], Any] | None = None,
+        max_workers: int = 1,
     ) -> DeploymentResult:
         normalized_root = normalize_remote_root(remote_root)
         cancel = cancellation_token or CancellationToken()
@@ -192,22 +198,70 @@ class RemoteDeploymentEngine:
             if change.change_type in {ChangeType.ADD, ChangeType.UPDATE}
         ]
         total_changes = len(upload_changes) + len(authorization.delete_paths)
-        try:
-            for index, change in enumerate(upload_changes, start=1):
-                cancel.raise_if_cancelled()
-                if progress_callback is not None:
-                    progress_callback(
-                        index - 1, total_changes, f"転送準備: {change.relative_path}"
-                    )
-                if change.local is None or not change.local.sha256:
-                    raise DeployError(f"Missing approved local hash: {change.relative_path}")
-                local_path = staging_root / Path(change.relative_path)
-                if local_path.is_symlink() or not local_path.is_file():
-                    raise DeployError(f"Staged file is missing or unsafe: {change.relative_path}")
-                local_hash, local_size = _hash_local(local_path)
-                if local_hash != change.local.sha256 or local_size != change.local.size:
-                    raise DeployError(f"Staged file changed: {change.relative_path}")
+        def prepare_one(change: FileChange, thread_sftp: Any) -> _PreparedFile:
+            cancel.raise_if_cancelled()
+            if change.local is None or not change.local.sha256:
+                raise DeployError(f"Missing approved local hash: {change.relative_path}")
+            local_path = staging_root / Path(change.relative_path)
+            if local_path.is_symlink() or not local_path.is_file():
+                raise DeployError(f"Staged file is missing or unsafe: {change.relative_path}")
+            local_hash, local_size = _hash_local(local_path)
+            if local_hash != change.local.sha256 or local_size != change.local.size:
+                raise DeployError(f"Staged file changed: {change.relative_path}")
 
+            destination = str(PurePosixPath(normalized_root) / change.relative_path)
+            exists = _exists(thread_sftp, destination)
+            destination_mode = file_mode
+            if change.change_type is ChangeType.ADD and exists:
+                raise DeployError(f"ADD destination already exists: {change.relative_path}")
+            if change.change_type is ChangeType.UPDATE:
+                if not exists or change.remote is None or not change.remote.sha256:
+                    raise DeployError(f"UPDATE destination is unavailable: {change.relative_path}")
+                current_hash, _ = _hash_remote(thread_sftp, destination)
+                if current_hash != change.remote.sha256:
+                    raise DeployError(f"Remote file changed before upload: {change.relative_path}")
+                destination_mode = stat.S_IMODE(thread_sftp.stat(destination).st_mode)
+
+            new_temporary = destination + f".dxsync-{token}.new"
+            old_temporary = (
+                destination + f".dxsync-{token}.old"
+                if change.change_type is ChangeType.UPDATE
+                else None
+            )
+            if _exists(thread_sftp, new_temporary) or (
+                old_temporary and _exists(thread_sftp, old_temporary)
+            ):
+                raise DeployError(f"Deployment temporary file already exists: {change.relative_path}")
+
+            digest = hashlib.sha256()
+            size = 0
+            with local_path.open("rb") as reader, thread_sftp.open(new_temporary, "wb") as writer:
+                while chunk := reader.read(1024 * 1024):
+                    cancel.raise_if_cancelled()
+                    writer.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
+            thread_sftp.chmod(new_temporary, destination_mode)
+            uploaded_hash, uploaded_size = _hash_remote(thread_sftp, new_temporary)
+            if (
+                digest.hexdigest() != change.local.sha256
+                or uploaded_hash != change.local.sha256
+                or uploaded_size != size
+            ):
+                raise DeployError(f"Uploaded temporary file verification failed: {change.relative_path}")
+            return _PreparedFile(
+                change,
+                destination,
+                new_temporary,
+                old_temporary,
+                uploaded_hash,
+                uploaded_size,
+                destination_mode,
+            )
+
+        try:
+            for change in upload_changes:
+                cancel.raise_if_cancelled()
                 destination = str(PurePosixPath(normalized_root) / change.relative_path)
                 parent = str(PurePosixPath(destination).parent)
                 _ensure_parents(
@@ -217,58 +271,49 @@ class RemoteDeploymentEngine:
                     created_directories,
                     directory_mode,
                 )
-                exists = _exists(sftp, destination)
-                destination_mode = file_mode
-                if change.change_type is ChangeType.ADD and exists:
-                    raise DeployError(f"ADD destination already exists: {change.relative_path}")
-                if change.change_type is ChangeType.UPDATE:
-                    if not exists or change.remote is None or not change.remote.sha256:
-                        raise DeployError(f"UPDATE destination is unavailable: {change.relative_path}")
-                    current_hash, _ = _hash_remote(sftp, destination)
-                    if current_hash != change.remote.sha256:
-                        raise DeployError(f"Remote file changed before upload: {change.relative_path}")
-                    destination_mode = stat.S_IMODE(sftp.stat(destination).st_mode)
 
-                new_temporary = destination + f".dxsync-{token}.new"
-                old_temporary = (
-                    destination + f".dxsync-{token}.old"
-                    if change.change_type is ChangeType.UPDATE
-                    else None
-                )
-                if _exists(sftp, new_temporary) or (
-                    old_temporary and _exists(sftp, old_temporary)
-                ):
-                    raise DeployError(f"Deployment temporary file already exists: {change.relative_path}")
+            if max_workers > 1 and sftp_factory is not None and len(upload_changes) > 1:
+                thread_local = threading.local()
+                progress_lock = threading.Lock()
+                completed_count = 0
+                prepared_by_index: dict[int, _PreparedFile] = {}
 
-                digest = hashlib.sha256()
-                size = 0
-                with local_path.open("rb") as reader, sftp.open(new_temporary, "wb") as writer:
-                    while chunk := reader.read(1024 * 1024):
-                        cancel.raise_if_cancelled()
-                        writer.write(chunk)
-                        digest.update(chunk)
-                        size += len(chunk)
-                sftp.chmod(new_temporary, destination_mode)
-                uploaded_hash, uploaded_size = _hash_remote(sftp, new_temporary)
-                if (
-                    digest.hexdigest() != change.local.sha256
-                    or uploaded_hash != change.local.sha256
-                    or uploaded_size != size
-                ):
-                    raise DeployError(f"Uploaded temporary file verification failed: {change.relative_path}")
-                prepared.append(
-                    _PreparedFile(
-                        change,
-                        destination,
-                        new_temporary,
-                        old_temporary,
-                        uploaded_hash,
-                        uploaded_size,
-                        destination_mode,
-                    )
-                )
-                if progress_callback is not None:
-                    progress_callback(index, total_changes, f"転送準備: {change.relative_path}")
+                def run_upload(index: int, change: FileChange) -> tuple[int, _PreparedFile]:
+                    thread_sftp = getattr(thread_local, "sftp", None)
+                    if thread_sftp is None:
+                        thread_sftp = sftp_factory()
+                        thread_local.sftp = thread_sftp
+                    return index, prepare_one(change, thread_sftp)
+
+                with ThreadPoolExecutor(
+                    max_workers=min(max_workers, len(upload_changes))
+                ) as executor:
+                    futures = [
+                        executor.submit(run_upload, idx, change)
+                        for idx, change in enumerate(upload_changes)
+                    ]
+                    for future in as_completed(futures):
+                        idx, item = future.result()
+                        prepared_by_index[idx] = item
+                        with progress_lock:
+                            completed_count += 1
+                            if progress_callback is not None:
+                                progress_callback(
+                                    completed_count,
+                                    total_changes,
+                                    f"転送準備: {item.change.relative_path}",
+                                )
+                prepared = [prepared_by_index[i] for i in range(len(upload_changes))]
+            else:
+                for index, change in enumerate(upload_changes, start=1):
+                    cancel.raise_if_cancelled()
+                    if progress_callback is not None:
+                        progress_callback(
+                            index - 1, total_changes, f"転送準備: {change.relative_path}"
+                        )
+                    prepared.append(prepare_one(change, sftp))
+                    if progress_callback is not None:
+                        progress_callback(index, total_changes, f"転送準備: {change.relative_path}")
         except Exception:
             self._clean_prepared(sftp, prepared, created_directories)
             raise

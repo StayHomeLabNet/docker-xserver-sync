@@ -409,3 +409,57 @@ def test_deploy_requires_matching_one_time_authorization(tmp_path: Path) -> None
             remote_root="/home/user/site",
             authorization=approval,
         )
+
+
+def test_parallel_deploy_uploads_multiple_files_via_sftp_factory(tmp_path: Path) -> None:
+    sftp = MemorySftp()
+    changes = []
+    for name in ("a.txt", "sub/b.txt", "sub/c.txt"):
+        local_file = tmp_path / name
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = f"content-{name}".encode()
+        local_file.write_bytes(payload)
+        changes.append(
+            FileChange(
+                relative_path=name,
+                change_type=ChangeType.ADD,
+                local=FileRecord(
+                    relative_path=name,
+                    kind=EntryKind.FILE,
+                    size=len(payload),
+                    modified_ns=1,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                ),
+                remote=None,
+            )
+        )
+    now = utc_now()
+    plan = SyncPlan(
+        plan_id="plan-parallel-deploy",
+        mapping_id="m1",
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        changes=tuple(changes),
+        local_snapshot_sha256="l",
+        remote_snapshot_sha256="r",
+        config_sha256="c",
+    )
+    factory_calls = 0
+
+    def factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return sftp
+
+    result = RemoteDeploymentEngine().deploy(
+        sftp=sftp,
+        plan=plan,
+        staging_root=tmp_path,
+        remote_root="/home/user/site",
+        authorization=authorize(plan),
+        sftp_factory=factory,
+        max_workers=3,
+    )
+    assert factory_calls >= 1
+    assert len(result.files) == 3
+    assert sftp.files["/home/user/site/sub/c.txt"] == b"content-sub/c.txt"

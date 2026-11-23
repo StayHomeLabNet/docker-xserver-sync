@@ -12,11 +12,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from .auto_sync_policy import (
@@ -24,6 +27,7 @@ from .auto_sync_policy import (
     auto_sync_policy_issues as auto_sync_policy_issues,
 )
 from .health import normalize_health_check_path
+from .hooks import normalize_allowed_delete_folders, validate_webhook_url
 from .ui_styles import warning_text_style
 
 
@@ -58,6 +62,19 @@ def load_auto_sync_preferences(
         require_domain_confirmation=settings.value(
             f"{prefix}/require_domain_confirmation", True, type=bool
         ),
+        skip_approval_dialog=settings.value(
+            f"{prefix}/skip_approval_dialog", False, type=bool
+        ),
+        pre_sync_command=str(settings.value(f"{prefix}/pre_sync_command", "")),
+        post_sync_remote_command=str(
+            settings.value(f"{prefix}/post_sync_remote_command", "")
+        ),
+        post_sync_webhook_url=str(
+            settings.value(f"{prefix}/post_sync_webhook_url", "")
+        ),
+        auto_delete_allowed_folders=normalize_allowed_delete_folders(
+            str(settings.value(f"{prefix}/auto_delete_allowed_folders", ""))
+        ),
     )
 
 
@@ -78,6 +95,18 @@ def save_auto_sync_preferences(
         (
             "require_domain_confirmation",
             preferences.require_domain_confirmation,
+        ),
+        ("skip_approval_dialog", preferences.skip_approval_dialog),
+        ("pre_sync_command", preferences.pre_sync_command.strip()),
+        ("post_sync_remote_command", preferences.post_sync_remote_command.strip()),
+        ("post_sync_webhook_url", preferences.post_sync_webhook_url.strip()),
+        (
+            "auto_delete_allowed_folders",
+            "\n".join(
+                normalize_allowed_delete_folders(
+                    preferences.auto_delete_allowed_folders
+                )
+            ),
         ),
     ):
         settings.setValue(f"{prefix}/{key}", value)
@@ -102,7 +131,10 @@ def format_auto_sync_summary(preferences: AutoSyncPreferences) -> str:
         remote_text = remote_only_labels.get(
             preferences.remote_only_policy, preferences.remote_only_policy
         )
-    return f"自動実行設定 — バックアップ: {backup_text} / REMOTE_ONLY: {remote_text}"
+    summary = f"自動実行設定 — バックアップ: {backup_text} / REMOTE_ONLY: {remote_text}"
+    if preferences.skip_approval_dialog:
+        summary += " / 確認画面スキップ"
+    return summary
 
 
 class AutoSyncSettingsDialog(QDialog):
@@ -112,13 +144,15 @@ class AutoSyncSettingsDialog(QDialog):
         self.resize(650, 490)
         layout = QVBoxLayout(self)
         note = QLabel(
-            "この設定は選択中のプロジェクトに保存されます。自動実行でも、"
-            "ドライラン後の統合確認と明示承認は省略できません。"
+            "この設定は選択中のプロジェクトに保存されます。既定ではドライラン後に統合確認画面を表示しますが、"
+            "確認画面をスキップして完全自動実行する設定も可能です。"
         )
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        form = QFormLayout()
+        tabs = QTabWidget()
+        basic_tab = QWidget()
+        form = QFormLayout(basic_tab)
         self.backup_mode = QComboBox()
         self.backup_mode.addItem("必ず作成する（推奨）", "always")
         self.backup_mode.addItem("追加ファイルだけならスキップ", "add_only")
@@ -166,8 +200,63 @@ class AutoSyncSettingsDialog(QDialog):
         self.require_domain_confirmation.setChecked(
             preferences.require_domain_confirmation
         )
+        self.skip_approval_dialog = QCheckBox(
+            "ドライラン後の確認画面をスキップして完全自動実行する"
+        )
+        self.skip_approval_dialog.setChecked(preferences.skip_approval_dialog)
+        self.require_domain_confirmation.setEnabled(
+            not preferences.skip_approval_dialog
+        )
+        self.skip_approval_dialog.toggled.connect(
+            lambda checked: self.require_domain_confirmation.setEnabled(not checked)
+        )
         form.addRow("実行時の確認", self.require_domain_confirmation)
-        layout.addLayout(form)
+        form.addRow("", self.skip_approval_dialog)
+        tabs.addTab(basic_tab, "基本・安全設定")
+
+        hooks_tab = QWidget()
+        hooks_form = QFormLayout(hooks_tab)
+        self.pre_sync_command_edit = QLineEdit(preferences.pre_sync_command)
+        self.pre_sync_command_edit.setPlaceholderText(
+            "例: npm run build （同期元ローカルフォルダで実行）"
+        )
+        hooks_form.addRow("同期前ローカルコマンド", self.pre_sync_command_edit)
+
+        self.post_sync_remote_command_edit = QLineEdit(
+            preferences.post_sync_remote_command
+        )
+        self.post_sync_remote_command_edit.setPlaceholderText(
+            "例: php artisan config:cache && php artisan route:cache"
+        )
+        hooks_form.addRow("同期後リモートコマンド", self.post_sync_remote_command_edit)
+
+        self.post_sync_webhook_url_edit = QLineEdit(
+            preferences.post_sync_webhook_url
+        )
+        self.post_sync_webhook_url_edit.setPlaceholderText(
+            "例: https://hooks.slack.com/services/... （Slack / Discord）"
+        )
+        hooks_form.addRow("完了通知 Webhook URL", self.post_sync_webhook_url_edit)
+
+        self.auto_delete_folders_edit = QPlainTextEdit(
+            "\n".join(preferences.auto_delete_allowed_folders)
+        )
+        self.auto_delete_folders_edit.setPlaceholderText(
+            "確認画面スキップ時に自動削除を許可するフォルダ（1行1フォルダ）\n"
+            "例:\nassets/\n_astro/"
+        )
+        self.auto_delete_folders_edit.setMaximumHeight(90)
+        hooks_form.addRow("自動削除許可フォルダ", self.auto_delete_folders_edit)
+
+        hooks_note = QLabel(
+            "• 同期前コマンドが失敗した場合、ドライランや同期は開始しません。\n"
+            "• 自動削除許可フォルダは「確認画面をスキップ」かつバックアップ有効時のみ適用され、"
+            "対象ファイルは事前にバックアップされます。"
+        )
+        hooks_note.setWordWrap(True)
+        hooks_form.addRow("", hooks_note)
+        tabs.addTab(hooks_tab, "フック・自動削除設定")
+        layout.addWidget(tabs)
 
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
@@ -177,6 +266,8 @@ class AutoSyncSettingsDialog(QDialog):
         self.remote_only_policy.currentIndexChanged.connect(
             self._update_warning_text
         )
+        self.skip_approval_dialog.toggled.connect(self._update_warning_text)
+        self.auto_delete_folders_edit.textChanged.connect(self._update_warning_text)
         self._update_warning_text()
 
         self.buttons = QDialogButtonBox(
@@ -206,6 +297,21 @@ class AutoSyncSettingsDialog(QDialog):
             )
         if remote_only_policy == "keep":
             parts.append("「削除せず残す」設定時はREMOTE_ONLYを削除しません。")
+        if self.skip_approval_dialog.isChecked():
+            allowed_folders = normalize_allowed_delete_folders(
+                self.auto_delete_folders_edit.toPlainText()
+            )
+            if allowed_folders and backup_mode != "skip":
+                parts.append(
+                    "「確認画面をスキップ」設定時は、ドライラン後に安全上限を通過すると"
+                    "確認画面を表示せずに再検証・バックアップ・同期を実行します"
+                    f"（許可フォルダ {', '.join(allowed_folders)} 配下のREMOTE_ONLYのみバックアップ後に自動削除します）。"
+                )
+            else:
+                parts.append(
+                    "「確認画面をスキップ」設定時は、ドライラン後に安全上限を通過すると"
+                    "確認画面を表示せずに再検証・バックアップ・同期を実行します（REMOTE_ONLY削除は行いません）。"
+                )
         parts.append(
             "設定上限を超えた場合、バックアップ・再検証・HTTPS確認に失敗した場合は自動的に停止します。"
         )
@@ -226,6 +332,11 @@ class AutoSyncSettingsDialog(QDialog):
             except ValueError as exc:
                 QMessageBox.warning(self, "HTTPS確認パスを確認", str(exc))
                 return
+        try:
+            validate_webhook_url(self.post_sync_webhook_url_edit.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Webhook URL を確認", str(exc))
+            return
         self.accept()
 
     def selected_preferences(self) -> AutoSyncPreferences:
@@ -242,6 +353,13 @@ class AutoSyncSettingsDialog(QDialog):
             max_upload_mib=self.max_upload_mib.value(),
             require_domain_confirmation=(
                 self.require_domain_confirmation.isChecked()
+            ),
+            skip_approval_dialog=self.skip_approval_dialog.isChecked(),
+            pre_sync_command=self.pre_sync_command_edit.text().strip(),
+            post_sync_remote_command=self.post_sync_remote_command_edit.text().strip(),
+            post_sync_webhook_url=self.post_sync_webhook_url_edit.text().strip(),
+            auto_delete_allowed_folders=normalize_allowed_delete_folders(
+                self.auto_delete_folders_edit.toPlainText()
             ),
         )
 

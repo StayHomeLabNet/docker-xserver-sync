@@ -41,6 +41,11 @@ class FileTableModel(QAbstractTableModel):
         self._protected = PathRules(())
         self.endResetModel()
 
+    def row_entry(self, row: int) -> tuple[str, FileRecord] | None:
+        if 0 <= row < len(self._files):
+            return self._statuses[row], self._files[row]
+        return None
+
     def rowCount(self, parent: QModelIndex | None = None) -> int:
         return 0 if (parent is not None and parent.isValid()) else len(self._files)
 

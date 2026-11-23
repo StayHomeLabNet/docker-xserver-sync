@@ -20,6 +20,10 @@ from PySide6.QtWidgets import (
 )
 
 from .models import Project, SyncMapping
+from .setup_helpers import (
+    load_saved_xserver_api_key,
+    run_docker_compose_sql_dump_ui,
+)
 from .ui_styles import (
     MUTED_TEXT_STYLE,
     PANEL_STYLE,
@@ -43,10 +47,13 @@ class LaravelSetupWizard(QWizard):
         project: Project,
         mapping: SyncMapping,
         parent=None,
+        *,
+        secure_store=None,
     ) -> None:
         super().__init__(parent)
         self.project = project
         self.mapping = mapping
+        self.secure_store = secure_store
         self.setWindowTitle("LaravelをXServerへ新規セットアップ")
         self.resize(960, 640)
         self.setMinimumSize(850, 580)
@@ -94,6 +101,9 @@ class LaravelSetupWizard(QWizard):
         self.sql_button = QPushButton("SQLを選択…")
         self.sql_button.clicked.connect(self._browse_sql)
         sql_row.addWidget(self.sql_button)
+        self.docker_sql_button = QPushButton("Dockerから生成…")
+        self.docker_sql_button.clicked.connect(self._generate_sql_from_docker)
+        sql_row.addWidget(self.docker_sql_button)
         self.sql_label = QLabel("SQLダンプ")
         form.addRow(self.sql_label, sql_row)
 
@@ -112,6 +122,7 @@ class LaravelSetupWizard(QWizard):
         is_sql = self.migration_mode_combo.currentData() == "sql_dump"
         self.sql_edit.setEnabled(is_sql)
         self.sql_button.setEnabled(is_sql)
+        self.docker_sql_button.setEnabled(is_sql)
         self.sql_label.setEnabled(is_sql)
         self.run_seed_check.setEnabled(not is_sql)
 
@@ -160,7 +171,15 @@ class LaravelSetupWizard(QWizard):
 
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
-        self.api_key_edit.setPlaceholderText("xs_...（保存しません）")
+        self.api_key_edit.setPlaceholderText("xs_...")
+        self.save_api_key_check = QCheckBox("APIキーをOS資格情報ストアに保存する")
+        saved_api_key = load_saved_xserver_api_key(
+            self.secure_store, self.project.project_id
+        )
+        if saved_api_key:
+            self.api_key_edit.setText(saved_api_key)
+            self.save_api_key_check.setChecked(True)
+        self.save_api_key_check.setVisible(self.secure_store is not None)
 
         initial_domain = (
             self.project.ssh_host
@@ -195,6 +214,7 @@ class LaravelSetupWizard(QWizard):
 
         form.addRow("DBの準備方法", self.database_mode_combo)
         form.addRow("XServer APIキー", self.api_key_edit)
+        form.addRow("", self.save_api_key_check)
         form.addRow("API対象サーバー", self.servername_edit)
         form.addRow("MySQLホスト", self.db_host_edit)
         form.addRow("DB名サフィックス", self.db_suffix_edit)
@@ -220,6 +240,7 @@ class LaravelSetupWizard(QWizard):
         uses_api = self.uses_xserver_api
         for editor in (
             self.api_key_edit,
+            self.save_api_key_check,
             self.servername_edit,
             self.db_suffix_edit,
             self.user_suffix_edit,
@@ -326,6 +347,11 @@ class LaravelSetupWizard(QWizard):
         )
         if selected:
             self.sql_edit.setText(selected)
+
+    def _generate_sql_from_docker(self) -> None:
+        generated = run_docker_compose_sql_dump_ui(self, self.local_root_edit.text())
+        if generated:
+            self.sql_edit.setText(generated)
 
     def _toggle_password(self) -> None:
         mode = (

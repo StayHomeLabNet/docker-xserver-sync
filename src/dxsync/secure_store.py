@@ -7,6 +7,7 @@ from typing import Protocol
 SERVICE_NAME = "Docker XServer Sync"
 ACCOUNT_PREFIX = "host-key:"
 PASSPHRASE_PREFIX = "ssh-passphrase:"
+XSERVER_API_KEY_PREFIX = "xserver-api-key:"
 
 
 class SecureStoreError(RuntimeError):
@@ -30,6 +31,10 @@ def ssh_passphrase_reference(project_id: str) -> str:
     return f"keyring://{PASSPHRASE_PREFIX}{project_id}"
 
 
+def xserver_api_key_reference(project_id: str) -> str:
+    return f"keyring://{XSERVER_API_KEY_PREFIX}{project_id}"
+
+
 def _account_from_reference(reference: str) -> str:
     prefix = "keyring://"
     if not reference.startswith(prefix):
@@ -47,6 +52,16 @@ def _passphrase_account_from_reference(reference: str) -> str:
     account = reference[len(prefix) :]
     if not account.startswith(PASSPHRASE_PREFIX):
         raise SecureStoreError("Secure-store reference is not an SSH passphrase entry")
+    return account
+
+
+def _api_key_account_from_reference(reference: str) -> str:
+    prefix = "keyring://"
+    if not reference.startswith(prefix):
+        raise SecureStoreError(f"Unsupported secure-store reference: {reference!r}")
+    account = reference[len(prefix) :]
+    if not account.startswith(XSERVER_API_KEY_PREFIX):
+        raise SecureStoreError("Secure-store reference is not an XServer API key entry")
     return account
 
 
@@ -121,6 +136,34 @@ class KeyringHostKeyStore:
                 self._keyring.delete_password(SERVICE_NAME, account)
         except Exception as exc:
             raise SecureStoreError(f"Cannot delete SSH passphrase from the OS credential store: {exc}") from exc
+
+    def store_api_key(self, project_id: str, api_key: str) -> str:
+        reference = xserver_api_key_reference(project_id)
+        account = _api_key_account_from_reference(reference)
+        try:
+            self._keyring.set_password(SERVICE_NAME, account, api_key)
+            verified = self._keyring.get_password(SERVICE_NAME, account)
+        except Exception as exc:
+            raise SecureStoreError(f"Cannot write XServer API key to the OS credential store: {exc}") from exc
+        if verified != api_key:
+            raise SecureStoreError("OS credential-store verification failed")
+        return reference
+
+    def retrieve_api_key(self, reference: str) -> str | None:
+        account = _api_key_account_from_reference(reference)
+        try:
+            return self._keyring.get_password(SERVICE_NAME, account)
+        except Exception as exc:
+            raise SecureStoreError(f"Cannot read XServer API key from the OS credential store: {exc}") from exc
+
+    def delete_api_key(self, reference: str) -> None:
+        account = _api_key_account_from_reference(reference)
+        try:
+            current = self._keyring.get_password(SERVICE_NAME, account)
+            if current is not None:
+                self._keyring.delete_password(SERVICE_NAME, account)
+        except Exception as exc:
+            raise SecureStoreError(f"Cannot delete XServer API key from the OS credential store: {exc}") from exc
 
 
 @dataclass

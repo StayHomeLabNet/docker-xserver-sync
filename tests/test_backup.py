@@ -339,3 +339,58 @@ def test_delete_remote_backup_removes_tree_and_rejects_unsafe_paths() -> None:
     assert delete_remote_backup(sftp, "/home/u/.dxsync/backups/proj-1/bk-1") is False
 
 
+def test_parallel_backup_copies_multiple_files_via_sftp_factory() -> None:
+    import hashlib
+
+    sftp = MemorySftp()
+    sftp.directories.update({"/home", "/home/u", "/home/u/public_html", "/home/u/public_html/sub"})
+    changes = []
+    for name in ("a.php", "sub/b.php", "sub/c.php"):
+        payload = f"remote-{name}".encode()
+        sftp.files[f"/home/u/public_html/{name}"] = payload
+        changes.append(
+            FileChange(
+                relative_path=name,
+                change_type=ChangeType.UPDATE,
+                local=None,
+                remote=FileRecord(
+                    relative_path=name,
+                    kind=EntryKind.FILE,
+                    size=len(payload),
+                    modified_ns=1,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                ),
+            )
+        )
+    now = utc_now()
+    plan = SyncPlan(
+        plan_id="plan-parallel-bk",
+        mapping_id="m1",
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        changes=tuple(changes),
+        local_snapshot_sha256="l",
+        remote_snapshot_sha256="r",
+        config_sha256="c",
+    )
+    factory_calls = 0
+
+    def factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return sftp
+
+    result = RemoteBackupEngine().create_backup(
+        sftp=sftp,
+        plan=plan,
+        project_id="proj-1",
+        remote_root="/home/u/public_html",
+        backup_root="/home/u/.dxsync/backups",
+        sftp_factory=factory,
+        max_workers=3,
+    )
+    assert factory_calls >= 1
+    assert len(result.files) == 3
+    assert sftp.files["/home/u/.dxsync/backups/proj-1/plan-parallel-bk/sub/c.php"] == b"remote-sub/c.php"
+
+

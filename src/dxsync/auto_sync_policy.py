@@ -13,6 +13,11 @@ class AutoSyncPreferences:
     max_update_files: int = 500
     max_upload_mib: int = 1024
     require_domain_confirmation: bool = True
+    skip_approval_dialog: bool = False
+    pre_sync_command: str = ""
+    post_sync_remote_command: str = ""
+    post_sync_webhook_url: str = ""
+    auto_delete_allowed_folders: tuple[str, ...] = ()
 
     def resolved_backup_skip(self, update_count: int, delete_count: int = 0) -> bool:
         if self.backup_mode == "skip":
