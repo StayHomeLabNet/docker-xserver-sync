@@ -24,12 +24,15 @@ from dxsync.mcp_setup import (
 )
 
 
-def test_detect_mcp_launch_spec_packaged(monkeypatch) -> None:
+def test_detect_mcp_launch_spec_packaged(monkeypatch, tmp_path: Path) -> None:
+    app_exe = tmp_path / "Docker XServer Sync"
+    app_exe.write_text("", encoding="utf-8")
     monkeypatch.setattr("dxsync.mcp_setup.is_packaged_executable", lambda: True)
-    monkeypatch.setattr(sys, "executable", "/Applications/Docker XServer Sync.app/Contents/MacOS/Docker XServer Sync")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    monkeypatch.setattr(sys, "argv", [str(app_exe)])
     spec = detect_mcp_launch_spec()
     assert spec.source == "packaged"
-    assert spec.command == "/Applications/Docker XServer Sync.app/Contents/MacOS/Docker XServer Sync"
+    assert spec.command == str(app_exe.resolve())
     assert spec.args == ("mcp",)
 
 
@@ -92,6 +95,8 @@ def test_format_helpers() -> None:
 def test_register_and_unregister_codex_toml_fallback(monkeypatch, tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(tmp_path / ".claude.json"))
+    monkeypatch.setenv("ANTIGRAVITY_MCP_CONFIG_PATH", str(tmp_path / "mcp_config.json"))
     monkeypatch.setattr("dxsync.mcp_setup.find_client_executable", lambda _cid: None)
 
     registered, _ = get_codex_mcp_status()
@@ -164,6 +169,8 @@ def test_register_clients_via_cli(monkeypatch, tmp_path: Path) -> None:
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(tmp_path / ".claude.json"))
+    monkeypatch.setenv("ANTIGRAVITY_MCP_CONFIG_PATH", str(tmp_path / "mcp_config.json"))
     monkeypatch.setattr(
         "dxsync.mcp_setup.find_client_executable",
         lambda cid: f"/usr/local/bin/{'agy' if cid == 'antigravity' else ('claude' if cid == 'claude_code' else 'codex')}",

@@ -92,10 +92,21 @@ def _common_bin_candidates(name: str) -> tuple[Path, ...]:
     )
 
 
+def _resolve_packaged_executable() -> str:
+    exe = Path(sys.executable)
+    if exe.is_file() and exe.name.lower() not in {"python", "python3", "python.exe"}:
+        return str(exe)
+    if sys.argv and sys.argv[0]:
+        argv0 = Path(sys.argv[0]).resolve()
+        if argv0.is_file():
+            return str(argv0)
+    return str(exe)
+
+
 def detect_mcp_launch_spec() -> McpLaunchSpec:
     if is_packaged_executable():
         return McpLaunchSpec(
-            command=sys.executable,
+            command=_resolve_packaged_executable(),
             args=("mcp",),
             source="packaged",
         )

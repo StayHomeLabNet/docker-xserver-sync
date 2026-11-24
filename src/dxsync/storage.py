@@ -27,8 +27,13 @@ def get_default_state_directory() -> Path:
     if override:
         return Path(override)
     try:
-        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtCore import QCoreApplication, QStandardPaths
 
+        if QCoreApplication.instance() is None:
+            if not QCoreApplication.organizationName():
+                QCoreApplication.setOrganizationName("Docker XServer Sync")
+            if not QCoreApplication.applicationName():
+                QCoreApplication.setApplicationName("Docker XServer Sync")
         location = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
         if location:
             return Path(location)
@@ -37,13 +42,19 @@ def get_default_state_directory() -> Path:
     if sys.platform == "win32":
         app_data = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
         base = Path(app_data) if app_data else Path.home() / "AppData" / "Roaming"
-        return base / "Docker XServer Sync"
+        return base / "Docker XServer Sync" / "Docker XServer Sync"
     elif sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Docker XServer Sync"
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Docker XServer Sync"
+            / "Docker XServer Sync"
+        )
     else:
         xdg_data = os.environ.get("XDG_DATA_HOME")
         base = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
-        return base / "Docker XServer Sync"
+        return base / "Docker XServer Sync" / "Docker XServer Sync"
 
 
 def get_default_store(secure_store: HostKeySecureStore | None = None) -> ProjectStore:
