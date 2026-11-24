@@ -113,6 +113,7 @@ from .revalidation import (
     PlanRevalidator as PlanRevalidator,
     RevalidationResult,
 )
+from .mcp_dialog import McpIntegrationDialog
 from .restore import (
     RemoteRestoreEngine as RemoteRestoreEngine,
     RestoreAuthorization,
@@ -785,6 +786,8 @@ class MainWindow(QMainWindow):
         auto_action.triggered.connect(self._show_auto_sync_settings)
         self.plan_validity_action = settings_menu.addAction("計画の有効時間設定…")
         self.plan_validity_action.triggered.connect(self._show_plan_validity_settings)
+        ai_mcp_action = settings_menu.addAction("AI / MCP 連携設定（Codex / Claude / Antigravity）…")
+        ai_mcp_action.triggered.connect(self._show_mcp_integration)
         security_action = settings_menu.addAction("確認コードの保存状態…")
         security_action.triggered.connect(self._show_security_status)
         register_action = settings_menu.addAction("接続先の確認コードを再登録…")
@@ -803,6 +806,14 @@ class MainWindow(QMainWindow):
 
     def _plan_validity_minutes(self) -> int:
         return load_plan_validity_minutes(self.settings)
+
+    @Slot()
+    def _show_mcp_integration(self) -> None:
+        project_label = None
+        if self._current_project is not None:
+            project_label = self._current_project.domain or self._current_project.name
+        dialog = McpIntegrationDialog(project_label=project_label, parent=self)
+        dialog.exec()
 
     @Slot()
     def _show_mask_settings(self) -> None:
@@ -4106,7 +4117,12 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    app = QApplication(list(argv) if argv is not None else sys.argv)
+    args = list(argv) if argv is not None else sys.argv
+    if len(args) > 1 and args[1] == "mcp":
+        from .mcp_server import run_stdio_server
+
+        return run_stdio_server()
+    app = QApplication(args)
     app.setOrganizationName("Docker XServer Sync")
     app.setOrganizationDomain("dxsync.local")
     app.setApplicationName("Docker XServer Sync")

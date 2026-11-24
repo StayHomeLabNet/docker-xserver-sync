@@ -15,7 +15,7 @@
 
 <br>
 
-![version](https://img.shields.io/badge/version-1.1.5-blue)
+![version](https://img.shields.io/badge/version-1.1.6-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-orange)
 ![app](https://img.shields.io/badge/app-PySide6%20%2F%20Qt6-purple)
@@ -89,7 +89,7 @@ Dockerへbind mountしたローカル開発環境のファイルを、安全な�
 2. 解凍して現れる `Docker XServer Sync.app` を `/Applications`（アプリケーションフォルダ）へ移動して起動します。
 
 ### Windows
-- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v1.1.5.exe` を実行してセットアップします。
+- **インストーラー（推奨）**: `Docker-XServer-Sync-Setup-v1.1.6.exe` を実行してセットアップします。
 - **ポータブル版**: `Docker XServer Sync-Windows-x64.zip` を展開し、フォルダ内の `Docker XServer Sync.exe` を起動します。
 
 ### Linux
@@ -198,7 +198,7 @@ uv run dxsync-gui
 ### パッケージのビルド
 
 - **macOS**: `zsh scripts/build-app.sh` → `dist/Docker XServer Sync-macOS-arm64.zip`
-- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.5.exe`
+- **Windows**: `pwsh -File scripts/build-app.ps1 -BuildInstaller` → `dist/Docker-XServer-Sync-Setup-v1.1.6.exe`
 - **Linux**: `bash scripts/build-app-linux.sh` → `dist/Docker XServer Sync-Linux-x64.tar.gz`
 
 ---

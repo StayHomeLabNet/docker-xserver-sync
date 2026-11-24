@@ -374,12 +374,27 @@ Docker → XServer Sync は **Model Context Protocol (MCP)** に対応してお�
 - **AIからの操作範囲**: AI は保存済みプロジェクトの「一覧・詳細参照」「ドライラン」「安全自動同期（auto-sync）」「安全性確認・ゴミ掃除」「バックアップ一覧・復元・保持整理（既定 `dry_run=true`、実削除時は `confirm_delete=true` 必須）」のみを安全に実行できます。
 - **一発安全同期パイプライン**: AIが `dxsync_auto_sync` を呼ぶと、内部で「ドライラン走査 → 計画再検証 → 自動リモートバックアップ → アトミック転送 → HTTPSヘルスチェック」が全自動かつ安全に実行されます（`backup_mode`、`remote_only_policy`、`delete_paths`、`plan_validity_minutes`、安全上限の各パラメータも指定可能）。
 
-### 12-2. MCP サーバーの起動と設定
-本ツールにはゼロ依存の stdio MCP サーバーが組み込まれています。
+### 12-2. MCP サーバーの起動と設定（Codex / Claude Code / Antigravity / Cursor）
+本ツールにはゼロ依存の stdio MCP サーバーが組み込まれています。配布版 GUI バイナリも引数 `mcp` での直接起動に対応しているため、Python 環境がなくても利用できます。
 
+#### GUI からのワンクリック登録（推奨・最も簡単）
+1. GUI メニューの **「設定」→「AI / MCP 連携設定（Codex / Claude / Antigravity）…」** を開きます。
+2. **Codex / Claude Code / Antigravity** それぞれの **「登録 / 更新」** をクリックすると、現在の実行環境（配布アプリ / `dxsync` / `uv`）を自動検出し、各 CLI または設定ファイル（`~/.codex/config.toml`、`~/.claude.json`、`~/.gemini/antigravity/mcp_config.json`）へ即時登録します。
+3. ダイアログ内のタブから各 CLI コマンド、TOML / JSON 設定、および AI への指示例もワンクリックでコピーできます。
+
+#### CLI での起動・手動設定例
 ```bash
 # MCPサーバーを標準入出力モードで起動
 dxsync mcp
+
+# Codex CLI へ手動登録する場合
+codex mcp add docker-xserver-sync -- dxsync mcp
+
+# Claude Code CLI へ手動登録する場合
+claude mcp add -s user docker-xserver-sync -- dxsync mcp
+
+# Antigravity CLI へ手動登録する場合
+agy mcp add docker-xserver-sync -- dxsync mcp
 ```
 
 #### Claude Desktop / Cursor の設定例 (`claude_desktop_config.json`)
@@ -404,4 +419,4 @@ AI: dxsync_dry_run を実行して差分を確認後、dxsync_auto_sync を呼�
 
 ---
 
-*マニュアル発行日: 2026年11月 / バージョン v1.1.5 対応 / StayHomeLabNet*
+*マニュアル発行日: 2026年11月 / バージョン v1.1.6 対応 / StayHomeLabNet*

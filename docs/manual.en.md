@@ -365,12 +365,27 @@ Docker → XServer Sync implements the **Model Context Protocol (MCP)**, allowin
 - **AI Scope**: AI assistants can query projects, preview differences via dry runs, trigger automated safe syncs, verify leftover `.new` artifacts, trigger rollbacks, and prune aged backups via `dxsync_prune_backups` (`dry_run=true` by default; `confirm_delete=true` required for deletion).
 - **Atomic 4-Stage Sync**: When the AI invokes `dxsync_auto_sync`, the application performs the full pipeline: dry run -> plan revalidation -> remote backup -> atomic file deployment -> HTTPS health check (supporting full policy parameters including `backup_mode`, `remote_only_policy`, `delete_paths`, `plan_validity_minutes`, and safety limits).
 
-### 12-2. Launching the MCP Server
-A built-in stdio MCP server is available out of the box with zero additional dependencies:
+### 12-2. Launching & Registering the MCP Server (Codex / Claude Code / Antigravity / Cursor)
+A built-in stdio MCP server is available out of the box with zero additional dependencies. The packaged GUI executable also supports passing `mcp` as its first argument, so no separate Python environment is required.
 
+#### One-Click Registration from the GUI (Recommended)
+1. Open **Settings → AI / MCP Integration (Codex / Claude / Antigravity)…** from the GUI menu bar.
+2. Click **Register / Update** for **Codex**, **Claude Code**, or **Antigravity** to automatically detect your launch command (packaged app, `dxsync`, or `uv`) and register it via the respective CLI or config file (`~/.codex/config.toml`, `~/.claude.json`, or `~/.gemini/antigravity/mcp_config.json`).
+3. You can also copy each CLI command, TOML/JSON snippet, and ready-to-use prompt examples from the dialog.
+
+#### Manual CLI Launch & Registration
 ```bash
 # Launch stdio MCP server
 dxsync mcp
+
+# Register manually in Codex CLI
+codex mcp add docker-xserver-sync -- dxsync mcp
+
+# Register manually in Claude Code CLI
+claude mcp add -s user docker-xserver-sync -- dxsync mcp
+
+# Register manually in Antigravity CLI
+agy mcp add docker-xserver-sync -- dxsync mcp
 ```
 
 #### Configuration Example (`claude_desktop_config.json` / Cursor)
@@ -390,4 +405,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.1.5 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.6 / StayHomeLabNet*
