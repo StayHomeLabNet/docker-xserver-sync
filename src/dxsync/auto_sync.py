@@ -141,7 +141,7 @@ class AutoSyncSettingsDialog(QDialog):
     def __init__(self, preferences: AutoSyncPreferences, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("自動実行設定")
-        self.resize(650, 490)
+        self.resize(680, 540)
         layout = QVBoxLayout(self)
         note = QLabel(
             "この設定は選択中のプロジェクトに保存されます。既定ではドライラン後に統合確認画面を表示しますが、"

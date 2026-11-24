@@ -80,7 +80,7 @@ class PlanValiditySettingsDialog(QDialog):
     def __init__(self, current_minutes: int, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("計画の有効時間設定")
-        self.resize(460, 230)
+        self.resize(480, 250)
         normalized = normalize_plan_validity_minutes(current_minutes)
 
         layout = QVBoxLayout(self)

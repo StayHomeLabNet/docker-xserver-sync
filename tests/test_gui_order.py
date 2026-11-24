@@ -35,7 +35,7 @@ def test_main_window_site_order(tmp_path: Path) -> None:
         SiteType.LARAVEL.value,
         SiteType.STATIC_SITE.value,
     ]
-    assert window.centralWidget().layout().contentsMargins().top() == 4
+    assert window.centralWidget().layout().contentsMargins().top() == 16
     connection_layout = window.auto_sync_button.parentWidget().layout()
     dry_position = connection_layout.getItemPosition(
         connection_layout.indexOf(window.dry_run_button)

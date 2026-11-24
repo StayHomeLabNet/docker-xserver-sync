@@ -265,10 +265,11 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 4, 24, 20)
+        layout.setContentsMargins(24, 16, 24, 20)
         layout.setSpacing(14)
 
         title_row = QHBoxLayout()
+        title_row.setAlignment(Qt.AlignVCenter)
         title = QLabel("Docker → XServer Sync")
         title_font = QFont()
         title_font.setPointSize(20)
@@ -388,6 +389,8 @@ class MainWindow(QMainWindow):
 
         connection = QGroupBox("XServer接続と安全同期")
         connection_layout = QGridLayout(connection)
+        connection_layout.setHorizontalSpacing(10)
+        connection_layout.setVerticalSpacing(8)
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("SERVER_ID.xsrv.jp")
         self.port_spin = QSpinBox()
@@ -417,7 +420,7 @@ class MainWindow(QMainWindow):
         self.auto_sync_settings_button.setEnabled(False)
         self.auto_sync_policy_label = QLabel()
         self.auto_sync_policy_label.setWordWrap(True)
-        self.auto_sync_policy_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.auto_sync_policy_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.revalidate_button = QPushButton("計画を再検証")
         self.revalidate_button.clicked.connect(self._start_revalidation)
         self.revalidate_button.setEnabled(False)

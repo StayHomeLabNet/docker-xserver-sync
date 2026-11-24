@@ -119,7 +119,7 @@ class ProjectDialog(QDialog):
         self.scroll_area = scroll
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
         scroll.setWidget(content)
         outer_layout.addWidget(scroll, 1)

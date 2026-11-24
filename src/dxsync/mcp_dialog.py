@@ -51,6 +51,8 @@ class McpIntegrationDialog(QDialog):
 
         clients_group = QGroupBox("AI エージェントへのワンクリック登録")
         clients_grid = QGridLayout(clients_group)
+        clients_grid.setHorizontalSpacing(10)
+        clients_grid.setVerticalSpacing(8)
         clients_grid.setColumnStretch(1, 1)
 
         self._status_labels: dict[ClientId, QLabel] = {}

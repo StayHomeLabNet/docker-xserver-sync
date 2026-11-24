@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication, QStyleFactory
+from PySide6.QtWidgets import QApplication
 
 
 THEME_SYSTEM = "system"
@@ -74,24 +74,12 @@ def apply_application_theme(app: QApplication, theme: object) -> str:
     normalized = normalize_theme(theme)
     if not hasattr(app, "_dxsync_system_palette"):
         app._dxsync_system_palette = QPalette(app.palette())  # type: ignore[attr-defined]
-        object_name = app.style().objectName()
-        app._dxsync_system_style = next(  # type: ignore[attr-defined]
-            (
-                name
-                for name in QStyleFactory.keys()
-                if name.casefold() == object_name.casefold()
-            ),
-            object_name,
-        )
     system_palette = app._dxsync_system_palette  # type: ignore[attr-defined]
+    if app.style().objectName().casefold() != "fusion":
+        app.setStyle("Fusion")
     if normalized == THEME_SYSTEM:
-        system_style = app._dxsync_system_style  # type: ignore[attr-defined]
-        if app.style().objectName().casefold() != system_style.casefold():
-            app.setStyle(system_style)
         app.setPalette(QPalette(system_palette))
     else:
-        if app.style().objectName().casefold() != "fusion":
-            app.setStyle("Fusion")
         app.setPalette(
             _explicit_palette(system_palette, dark=normalized == THEME_DARK)
         )
