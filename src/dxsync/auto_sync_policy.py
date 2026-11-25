@@ -3,6 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+DEFAULT_SFTP_MAX_WORKERS = 4
+MIN_SFTP_MAX_WORKERS = 1
+MAX_SFTP_MAX_WORKERS = 16
+
+
+def normalize_sftp_max_workers(value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_SFTP_MAX_WORKERS
+    return max(MIN_SFTP_MAX_WORKERS, min(MAX_SFTP_MAX_WORKERS, parsed))
+
+
 @dataclass(frozen=True)
 class AutoSyncPreferences:
     backup_mode: str = "always"
@@ -18,6 +31,8 @@ class AutoSyncPreferences:
     post_sync_remote_command: str = ""
     post_sync_webhook_url: str = ""
     auto_delete_allowed_folders: tuple[str, ...] = ()
+    sftp_max_workers: int = DEFAULT_SFTP_MAX_WORKERS
+    auto_maintenance_mode: bool = False
 
     def resolved_backup_skip(self, update_count: int, delete_count: int = 0) -> bool:
         if self.backup_mode == "skip":

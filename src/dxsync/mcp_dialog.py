@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QGridLayout,
@@ -25,8 +26,12 @@ from .mcp_setup import (
     format_codex_toml,
     format_mcp_json,
     get_client_mcp_status,
+    get_client_skill_status,
+    install_client_skill,
     register_client_mcp,
+    remove_client_skill,
     unregister_client_mcp,
+    verify_mcp_launch_spec,
 )
 
 
@@ -77,6 +82,12 @@ class McpIntegrationDialog(QDialog):
 
             self._status_labels[client_id] = status_label
             self._unregister_buttons[client_id] = unregister_btn
+
+        self.install_skill_check = QCheckBox(
+            "スキル定義 (SKILL.md) も同時に配置する（安全運用ルールを自動適用・推奨）"
+        )
+        self.install_skill_check.setChecked(True)
+        clients_grid.addWidget(self.install_skill_check, len(MCP_CLIENTS), 0, 1, 4)
 
         layout.addWidget(clients_group)
 
@@ -145,6 +156,9 @@ class McpIntegrationDialog(QDialog):
         layout.addWidget(prompt_group)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        self.verify_button = QPushButton("起動テスト")
+        self.verify_button.clicked.connect(self._on_verify_mcp)
+        buttons.addButton(self.verify_button, QDialogButtonBox.ActionRole)
         buttons.button(QDialogButtonBox.Close).setText("閉じる")
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -174,18 +188,43 @@ class McpIntegrationDialog(QDialog):
     def _refresh_status(self) -> None:
         for client_id in MCP_CLIENTS:
             registered, detail = get_client_mcp_status(client_id)
-            self._status_labels[client_id].setText(detail)
-            self._unregister_buttons[client_id].setEnabled(registered)
+            skill_installed = get_client_skill_status(client_id)
+            skill_suffix = " / スキル配置済み" if skill_installed else ""
+            self._status_labels[client_id].setText(f"{detail}{skill_suffix}")
+            self._unregister_buttons[client_id].setEnabled(registered or skill_installed)
+
+    def _on_verify_mcp(self) -> None:
+        ok, message = verify_mcp_launch_spec(self.spec)
+        if ok:
+            QMessageBox.information(
+                self,
+                "MCP 起動テスト成功",
+                f"{message}\n\nコマンド: {self.spec.command} {' '.join(self.spec.args)}",
+            )
+        else:
+            QMessageBox.warning(self, "MCP 起動テスト失敗", message)
 
     def _on_register_client(self, client_id: ClientId) -> None:
         client = MCP_CLIENTS[client_id]
+        verify_ok, verify_msg = verify_mcp_launch_spec(self.spec)
+        if not verify_ok:
+            QMessageBox.warning(
+                self,
+                f"{client.display_name} 連携エラー（起動テスト失敗）",
+                f"登録前の MCP サーバー自己診断テストに失敗したため登録を中止しました。\n\n{verify_msg}",
+            )
+            return
         ok, message = register_client_mcp(client_id, self.spec)
+        skill_note = ""
+        if ok and self.install_skill_check.isChecked():
+            skill_ok, skill_msg = install_client_skill(client_id)
+            skill_note = f"\n{skill_msg}" if skill_ok else f"\n※ スキル配置エラー: {skill_msg}"
         self._refresh_status()
         if ok:
             QMessageBox.information(
                 self,
                 f"{client.display_name} 連携完了",
-                f"{message}\n\n"
+                f"{message}\n{verify_msg}{skill_note}\n\n"
                 f"{client.display_name} を再起動（または新しいセッションを開始）すると、"
                 "すぐに利用できます。\n"
                 "※ 対象プロジェクトがまだ未保存の場合は、先に GUI で保存してください。",
@@ -196,8 +235,9 @@ class McpIntegrationDialog(QDialog):
     def _on_unregister_client(self, client_id: ClientId) -> None:
         client = MCP_CLIENTS[client_id]
         ok, message = unregister_client_mcp(client_id)
+        skill_ok, skill_msg = remove_client_skill(client_id)
         self._refresh_status()
-        if ok:
-            QMessageBox.information(self, f"{client.display_name} 連携解除", message)
+        if ok and skill_ok:
+            QMessageBox.information(self, f"{client.display_name} 連携解除", f"{message}\n{skill_msg}")
         else:
-            QMessageBox.warning(self, f"{client.display_name} 連携エラー", message)
+            QMessageBox.warning(self, f"{client.display_name} 連携エラー", f"{message}\n{skill_msg}")

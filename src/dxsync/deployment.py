@@ -145,6 +145,7 @@ def _ensure_parents(
     directory: str,
     created: list[str],
     mode: int,
+    verified_dirs: set[str] | None = None,
 ) -> None:
     root_path = PurePosixPath(root)
     directory_path = PurePosixPath(directory)
@@ -156,11 +157,15 @@ def _ensure_parents(
     for part in relative_parts:
         current /= part
         current_text = str(current)
+        if verified_dirs is not None and current_text in verified_dirs:
+            continue
         if not _exists(sftp, current_text):
             sftp.mkdir(current_text, mode=mode)
             created.append(current_text)
         if not stat.S_ISDIR(sftp.stat(current_text).st_mode):
             raise DeployError(f"Remote path is not a directory: {current_text}")
+        if verified_dirs is not None:
+            verified_dirs.add(current_text)
 
 
 class RemoteDeploymentEngine:
@@ -260,6 +265,7 @@ class RemoteDeploymentEngine:
             )
 
         try:
+            verified_dirs: set[str] = set()
             for change in upload_changes:
                 cancel.raise_if_cancelled()
                 destination = str(PurePosixPath(normalized_root) / change.relative_path)
@@ -270,6 +276,7 @@ class RemoteDeploymentEngine:
                     parent,
                     created_directories,
                     directory_mode,
+                    verified_dirs=verified_dirs,
                 )
 
             if max_workers > 1 and sftp_factory is not None and len(upload_changes) > 1:

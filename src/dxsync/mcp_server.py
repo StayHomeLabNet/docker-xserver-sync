@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+import threading
+from typing import Any, Callable
 
 from . import __version__
+from .auto_sync_policy import (
+    DEFAULT_SFTP_MAX_WORKERS,
+    MAX_SFTP_MAX_WORKERS,
+    MIN_SFTP_MAX_WORKERS,
+)
 from .operations import (
     OperationError,
     execute_auto_sync,
+    execute_auto_sync_all,
     execute_dry_run,
+    execute_dry_run_all,
     execute_prune_backups,
     execute_restore,
     execute_verify,
@@ -65,6 +73,11 @@ TOOLS = [
                 "mapping": {
                     "type": "string",
                     "description": "Optional mapping name or ID",
+                },
+                "all_mappings": {
+                    "type": "boolean",
+                    "description": "If true, dry-run all configured mappings in order (default: false)",
+                    "default": False,
                 },
                 "plan_validity_minutes": {
                     "type": "integer",
@@ -155,6 +168,30 @@ TOOLS = [
                     "minimum": 0,
                     "default": 1024,
                 },
+                "all_mappings": {
+                    "type": "boolean",
+                    "description": "If true, safely sync all configured mappings in order (default: false)",
+                    "default": False,
+                },
+                "sftp_max_workers": {
+                    "type": "integer",
+                    "description": (
+                        f"Parallel SFTP workers for backup and upload "
+                        f"({MIN_SFTP_MAX_WORKERS}-{MAX_SFTP_MAX_WORKERS}, "
+                        f"default: {DEFAULT_SFTP_MAX_WORKERS})"
+                    ),
+                    "minimum": MIN_SFTP_MAX_WORKERS,
+                    "maximum": MAX_SFTP_MAX_WORKERS,
+                    "default": DEFAULT_SFTP_MAX_WORKERS,
+                },
+                "auto_maintenance_mode": {
+                    "type": "boolean",
+                    "description": (
+                        "Automatically enable/disable WordPress .maintenance or Laravel "
+                        "artisan down/up during deployment (default: false)"
+                    ),
+                    "default": False,
+                },
             },
             "required": ["project"],
         },
@@ -175,6 +212,11 @@ TOOLS = [
                 "mapping": {
                     "type": "string",
                     "description": "Optional mapping name or ID",
+                },
+                "all_mappings": {
+                    "type": "boolean",
+                    "description": "If true, dry-run all configured mappings in order (default: false)",
+                    "default": False,
                 },
                 "cleanup": {
                     "type": "boolean",
@@ -216,6 +258,11 @@ TOOLS = [
                 "mapping": {
                     "type": "string",
                     "description": "Optional mapping name or ID",
+                },
+                "all_mappings": {
+                    "type": "boolean",
+                    "description": "If true, dry-run all configured mappings in order (default: false)",
+                    "default": False,
                 },
             },
             "required": ["project", "backup_id"],
@@ -264,8 +311,35 @@ TOOLS = [
 
 
 class McpServer:
-    def __init__(self, store: ProjectStore | None = None) -> None:
+    def __init__(
+        self,
+        store: ProjectStore | None = None,
+        notify_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.store = store or get_default_store()
+        self._notify_callback = notify_callback
+
+    def _emit_progress(
+        self,
+        progress_token: str | int | None,
+        progress: int,
+        total: int,
+        message: str,
+    ) -> None:
+        if progress_token is None or self._notify_callback is None:
+            return
+        self._notify_callback(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {
+                    "progressToken": progress_token,
+                    "progress": progress,
+                    "total": total,
+                    "message": message,
+                },
+            }
+        )
 
     def handle_request(self, message: dict[str, Any]) -> dict[str, Any] | None:
         msg_id = message.get("id")
@@ -302,8 +376,23 @@ class McpServer:
         if method == "tools/call":
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
+            meta = params.get("_meta")
+            progress_token = (
+                meta.get("progressToken") if isinstance(meta, dict) else None
+            )
+            progress_cb = (
+                (
+                    lambda done, total, msg: self._emit_progress(
+                        progress_token, done, total, msg
+                    )
+                )
+                if progress_token is not None and self._notify_callback is not None
+                else None
+            )
             try:
-                result_data = self._dispatch_tool(tool_name, arguments)
+                result_data = self._dispatch_tool(
+                    tool_name, arguments, progress_callback=progress_cb
+                )
                 return {
                     "jsonrpc": "2.0",
                     "id": msg_id,
@@ -346,7 +435,12 @@ class McpServer:
             raise OperationError(f"Project '{identifier}' not found in configuration.")
         return proj
 
-    def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
+    def _dispatch_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> Any:
         if name == "dxsync_list_projects":
             return list_projects_summary(self.store)
 
@@ -356,6 +450,20 @@ class McpServer:
 
         if name == "dxsync_dry_run":
             project = self._resolve_project(args["project"])
+            dry_progress = (
+                (lambda p: progress_callback(p.completed, max(p.total, 1), p.detail))
+                if progress_callback is not None
+                else None
+            )
+            if bool(args.get("all_mappings", False)):
+                return execute_dry_run_all(
+                    self.store,
+                    project,
+                    plan_validity_minutes=int(
+                        args.get("plan_validity_minutes", DEFAULT_PLAN_VALIDITY_MINUTES)
+                    ),
+                    progress_callback=dry_progress,
+                )
             return execute_dry_run(
                 self.store,
                 project,
@@ -363,6 +471,7 @@ class McpServer:
                 plan_validity_minutes=int(
                     args.get("plan_validity_minutes", DEFAULT_PLAN_VALIDITY_MINUTES)
                 ),
+                progress_callback=dry_progress,
             )
 
         if name == "dxsync_auto_sync":
@@ -372,6 +481,28 @@ class McpServer:
                 isinstance(item, str) for item in raw_delete_paths
             ):
                 raise OperationError("delete_paths must be an array of strings.")
+            if bool(args.get("all_mappings", False)):
+                return execute_auto_sync_all(
+                    self.store,
+                    project,
+                    backup_mode=str(args.get("backup_mode", "always")),
+                    remote_only_policy=str(args.get("remote_only_policy", "keep")),
+                    health_check_enabled=bool(args.get("health_check_enabled", True)),
+                    health_check_path=str(args.get("health_check_path", "/")),
+                    plan_validity_minutes=int(
+                        args.get("plan_validity_minutes", DEFAULT_PLAN_VALIDITY_MINUTES)
+                    ),
+                    max_changed_files=int(args.get("max_changed_files", 1000)),
+                    max_update_files=int(args.get("max_update_files", 500)),
+                    max_upload_mib=int(args.get("max_upload_mib", 1024)),
+                    sftp_max_workers=int(
+                        args.get("sftp_max_workers", DEFAULT_SFTP_MAX_WORKERS)
+                    ),
+                    auto_maintenance_mode=bool(
+                        args.get("auto_maintenance_mode", False)
+                    ),
+                    progress_callback=progress_callback,
+                )
             return execute_auto_sync(
                 self.store,
                 project,
@@ -387,6 +518,11 @@ class McpServer:
                 max_changed_files=int(args.get("max_changed_files", 1000)),
                 max_update_files=int(args.get("max_update_files", 500)),
                 max_upload_mib=int(args.get("max_upload_mib", 1024)),
+                sftp_max_workers=int(
+                    args.get("sftp_max_workers", DEFAULT_SFTP_MAX_WORKERS)
+                ),
+                auto_maintenance_mode=bool(args.get("auto_maintenance_mode", False)),
+                progress_callback=progress_callback,
             )
 
         if name == "dxsync_verify_safety":
@@ -430,7 +566,14 @@ class McpServer:
 
 
 def run_stdio_server(store: ProjectStore | None = None) -> int:
-    server = McpServer(store=store)
+    stdout_lock = threading.Lock()
+
+    def _emit_notification(payload: dict[str, Any]) -> None:
+        with stdout_lock:
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+    server = McpServer(store=store, notify_callback=_emit_notification)
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -441,6 +584,5 @@ def run_stdio_server(store: ProjectStore | None = None) -> int:
             continue
         response = server.handle_request(message)
         if response is not None:
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            _emit_notification(response)
     return 0

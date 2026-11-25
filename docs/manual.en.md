@@ -405,4 +405,4 @@ Placing `skills/docker-xserver-sync/` or `.gemini/skills/docker-xserver-sync/` i
 
 ---
 
-*Manual Published: November 2026 / Version v1.1.6 / StayHomeLabNet*
+*Manual Published: November 2026 / Version v1.1.7 / StayHomeLabNet*

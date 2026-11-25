@@ -74,16 +74,21 @@ def _mkdir_parents(
     path: str,
     *,
     mode: int = 0o700,
+    verified_dirs: set[str] | None = None,
 ) -> None:
     current = PurePosixPath("/")
     for part in PurePosixPath(path).parts[1:]:
         current /= part
         current_text = str(current)
+        if verified_dirs is not None and current_text in verified_dirs:
+            continue
         if not _exists(sftp, current_text):
             sftp.mkdir(current_text, mode=mode)
         remote_stat = sftp.stat(current_text)
         if not stat.S_ISDIR(remote_stat.st_mode):
             raise BackupError(f"Backup path component is not a directory: {current_text}")
+        if verified_dirs is not None:
+            verified_dirs.add(current_text)
 
 
 def _hash_remote(
@@ -212,12 +217,18 @@ class RemoteBackupEngine:
             )
 
         try:
+            verified_dirs: set[str] = set()
             for change in backup_targets:
                 cancel.raise_if_cancelled()
                 if change.remote is None or not change.remote.sha256:
                     raise BackupError(f"Missing approved remote hash: {change.relative_path}")
                 destination = str(PurePosixPath(backup_directory) / change.remote.relative_path)
-                _mkdir_parents(sftp, str(PurePosixPath(destination).parent), mode=0o700)
+                _mkdir_parents(
+                    sftp,
+                    str(PurePosixPath(destination).parent),
+                    mode=0o700,
+                    verified_dirs=verified_dirs,
+                )
 
             if max_workers > 1 and sftp_factory is not None and len(backup_targets) > 1:
                 thread_local = threading.local()

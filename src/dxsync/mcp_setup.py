@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -74,12 +75,20 @@ def _find_repo_root(start_path: Path | None = None) -> Path | None:
     return None
 
 
+def _is_executable_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if os.name == "nt":
+        return True
+    return os.access(path, os.X_OK)
+
+
 def _find_executable(name: str, extra_candidates: tuple[Path, ...] = ()) -> str | None:
     found = shutil.which(name)
-    if found:
+    if found and _is_executable_file(Path(found)):
         return found
     for candidate in extra_candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
+        if _is_executable_file(candidate):
             return str(candidate)
     return None
 
@@ -92,31 +101,59 @@ def _common_bin_candidates(name: str) -> tuple[Path, ...]:
     )
 
 
+def _resolve_macos_bundle_executable(start_path: Path) -> str | None:
+    for parent in (start_path, *start_path.parents):
+        if parent.name.endswith(".app"):
+            plist_path = parent / "Contents" / "Info.plist"
+            if plist_path.is_file():
+                try:
+                    info = plistlib.loads(plist_path.read_bytes())
+                    bundle_exec = info.get("CFBundleExecutable")
+                    if isinstance(bundle_exec, str) and bundle_exec:
+                        candidate = parent / "Contents" / "MacOS" / bundle_exec
+                        if _is_executable_file(candidate):
+                            return str(candidate)
+                except Exception:
+                    pass
+            fallback = parent / "Contents" / "MacOS" / parent.stem
+            if _is_executable_file(fallback):
+                return str(fallback)
+    return None
+
+
 def _resolve_packaged_executable() -> str:
-    exe = Path(sys.executable)
-    if exe.is_file() and exe.name.lower() not in {"python", "python3", "python.exe"}:
-        return str(exe)
+    python_names = {"python", "python3", "python.exe"}
+    candidates: list[Path] = []
     if sys.argv and sys.argv[0]:
-        argv0 = Path(sys.argv[0]).resolve()
-        if argv0.is_file():
-            return str(argv0)
-    return str(exe)
+        candidates.append(Path(sys.argv[0]).resolve())
+    candidates.append(Path(sys.executable))
+
+    for candidate in candidates:
+        bundle_exe = _resolve_macos_bundle_executable(candidate)
+        if bundle_exe:
+            return bundle_exe
+
+    for candidate in candidates:
+        if candidate.name.lower() not in python_names and _is_executable_file(candidate):
+            return str(candidate)
+
+    return str(Path(sys.executable))
 
 
 def detect_mcp_launch_spec() -> McpLaunchSpec:
-    if is_packaged_executable():
-        return McpLaunchSpec(
-            command=_resolve_packaged_executable(),
-            args=("mcp",),
-            source="packaged",
-        )
-
     dxsync_exe = _find_executable("dxsync", _common_bin_candidates("dxsync"))
     if dxsync_exe:
         return McpLaunchSpec(
             command=dxsync_exe,
             args=("mcp",),
             source="dxsync-cli",
+        )
+
+    if is_packaged_executable():
+        return McpLaunchSpec(
+            command=_resolve_packaged_executable(),
+            args=("mcp",),
+            source="packaged",
         )
 
     repo_root = _find_repo_root()
@@ -133,6 +170,69 @@ def detect_mcp_launch_spec() -> McpLaunchSpec:
         args=("-m", "dxsync.cli", "mcp"),
         source="python-module",
     )
+
+
+def verify_mcp_launch_spec(spec: McpLaunchSpec, timeout: float = 10.0) -> tuple[bool, str]:
+    cmd_path = Path(spec.command)
+    if not cmd_path.is_file():
+        resolved = shutil.which(spec.command)
+        if not resolved:
+            return False, f"起動コマンドが見つかりません: {spec.command}"
+        cmd_path = Path(resolved)
+
+    if not _is_executable_file(cmd_path):
+        return (
+            False,
+            f"実行権限がありません: {cmd_path}\n"
+            "実行権限を付与するか、dxsync CLI を導入してください。",
+        )
+
+    init_request = (
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {},
+            }
+        )
+        + "\n"
+    )
+    try:
+        proc = subprocess.run(
+            [str(cmd_path), *spec.args],
+            input=init_request,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"MCP サーバーの起動テストに失敗しました: {exc}"
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return (
+            False,
+            f"MCP サーバーがエラー終了しました (exit {proc.returncode}): "
+            f"{detail or '詳細不明'}",
+        )
+
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("id") == 1 and "result" in payload:
+            server_info = payload["result"].get("serverInfo", {})
+            version = server_info.get("version", "")
+            suffix = f" (v{version})" if version else ""
+            return True, f"MCP サーバーの起動と応答を確認しました{suffix}。"
+
+    return False, "MCP サーバーから有効な initialize 応答が返りませんでした。"
 
 
 def _join_shell_command(parts: list[str]) -> str:
@@ -381,3 +481,63 @@ def register_codex_mcp(spec: McpLaunchSpec) -> tuple[bool, str]:
 
 def unregister_codex_mcp() -> tuple[bool, str]:
     return unregister_client_mcp("codex")
+
+
+_FALLBACK_SKILL_MD = """---
+name: docker-xserver-sync
+description: >-
+  Docker開発環境からXServer本番・ステージング環境への安全な同期・デプロイ・ドライラン・ロールバックを操作するスキル。
+---
+
+# Docker XServer Sync AI 操作スキル
+
+- 同期・変更前にまず `dxsync_list_projects` と `dxsync_dry_run` で対象プロジェクトと差分を確認する。
+- 安全同期を実行する場合は `dxsync_auto_sync` を使用する（ドライラン→計画再検証→バックアップ→アトミック転送→HTTPSヘルスチェック）。
+- `REMOTE_ONLY` ファイルの削除は明示的な指定がある場合のみ `remote_only_policy="ask"` と `delete_paths` を使う。
+"""
+
+
+def get_client_skill_path(client_id: ClientId) -> Path:
+    if client_id == "codex":
+        codex_home = os.environ.get("CODEX_HOME")
+        base = Path(codex_home) if codex_home else (Path.home() / ".codex")
+        return base / "skills" / MCP_SERVER_NAME / "SKILL.md"
+    if client_id == "claude_code":
+        return Path.home() / ".claude" / "skills" / MCP_SERVER_NAME / "SKILL.md"
+    return Path.home() / ".gemini" / "antigravity" / "skills" / MCP_SERVER_NAME / "SKILL.md"
+
+
+def get_client_skill_status(client_id: ClientId) -> bool:
+    return get_client_skill_path(client_id).is_file()
+
+
+def _load_skill_markdown() -> str:
+    repo_root = _find_repo_root()
+    if repo_root is not None:
+        source_skill = repo_root / "skills" / MCP_SERVER_NAME / "SKILL.md"
+        if source_skill.is_file():
+            return source_skill.read_text(encoding="utf-8")
+    return _FALLBACK_SKILL_MD
+
+
+def install_client_skill(client_id: ClientId) -> tuple[bool, str]:
+    target_path = get_client_skill_path(client_id)
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(_load_skill_markdown(), encoding="utf-8")
+    except OSError as exc:
+        return False, f"スキルファイルの配置に失敗しました ({target_path}): {exc}"
+    return True, f"スキルを {target_path} に配置しました。"
+
+
+def remove_client_skill(client_id: ClientId) -> tuple[bool, str]:
+    target_path = get_client_skill_path(client_id)
+    if not target_path.is_file():
+        return True, "スキルは未配置です。"
+    try:
+        target_path.unlink()
+        if target_path.parent.is_dir() and not any(target_path.parent.iterdir()):
+            target_path.parent.rmdir()
+    except OSError as exc:
+        return False, f"スキルの削除に失敗しました ({target_path}): {exc}"
+    return True, f"スキルを {target_path} から削除しました。"

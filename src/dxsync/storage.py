@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -22,10 +23,18 @@ from .secure_store import (
 SCHEMA_VERSION = 5
 
 
-def get_default_state_directory() -> Path:
-    override = os.environ.get("DXSYNC_STATE_DIR")
-    if override:
-        return Path(override)
+def _db_has_projects(db_path: Path) -> bool:
+    if not db_path.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM projects").fetchone()
+            return bool(row and row[0] > 0)
+    except sqlite3.Error:
+        return False
+
+
+def _resolve_canonical_state_directory() -> Path:
     try:
         from PySide6.QtCore import QCoreApplication, QStandardPaths
 
@@ -55,6 +64,34 @@ def get_default_state_directory() -> Path:
         xdg_data = os.environ.get("XDG_DATA_HOME")
         base = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
         return base / "Docker XServer Sync" / "Docker XServer Sync"
+
+
+def get_default_state_directory() -> Path:
+    override = os.environ.get("DXSYNC_STATE_DIR")
+    if override:
+        return Path(override)
+
+    canonical_dir = _resolve_canonical_state_directory()
+    canonical_db = canonical_dir / "state.db"
+    if _db_has_projects(canonical_db):
+        return canonical_dir
+
+    legacy_dir = canonical_dir.parent
+    legacy_db = legacy_dir / "state.db"
+    if (
+        canonical_dir.name == "Docker XServer Sync"
+        and legacy_dir.name == "Docker XServer Sync"
+        and _db_has_projects(legacy_db)
+    ):
+        try:
+            canonical_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy_db, canonical_db)
+            legacy_db.rename(legacy_dir / "state.db.migrated")
+            return canonical_dir
+        except OSError:
+            return legacy_dir
+
+    return canonical_dir
 
 
 def get_default_store(secure_store: HostKeySecureStore | None = None) -> ProjectStore:

@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Sequence
 
 from .models import FileRecord, SiteType
+from .auto_sync_policy import DEFAULT_SFTP_MAX_WORKERS
 from .operations import (
     OperationError,
     execute_auto_sync,
+    execute_auto_sync_all,
     execute_dry_run,
+    execute_dry_run_all,
     execute_prune_backups,
     execute_restore,
     execute_verify,
@@ -237,6 +240,20 @@ def _run_dry_run_project(args: argparse.Namespace) -> int:
     store = _get_store_from_args(args)
     project = _resolve_project(store, args.project)
     passphrase = getpass.getpass("秘密鍵のパスフレーズ: ") if args.ask_passphrase else None
+    if getattr(args, "all_mappings", False):
+        result = execute_dry_run_all(
+            store=store,
+            project=project,
+            passphrase=passphrase,
+            plan_validity_minutes=args.validity_minutes,
+        )
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"[{project.name}] 全マッピング一括ドライラン結果 ({result['mappings_count']}件):")
+            for item in result["results"]:
+                print(f"  - {item['mapping']}: status={item['status']} plan_id={item['plan_id']}")
+        return 2 if result["has_blocking_issues"] else 0
     result = execute_dry_run(
         store=store,
         project=project,
@@ -282,6 +299,27 @@ def _run_auto_sync_project(args: argparse.Namespace) -> int:
         f"[{project.name}] ドメイン {project.domain} へ安全自動同期を実行しますか？",
     )
     passphrase = getpass.getpass("秘密鍵のパスフレーズ: ") if args.ask_passphrase else None
+    if getattr(args, "all_mappings", False):
+        result = execute_auto_sync_all(
+            store=store,
+            project=project,
+            passphrase=passphrase,
+            backup_mode=args.backup_mode,
+            remote_only_policy=args.remote_only_policy,
+            health_check_enabled=not args.no_health_check,
+            health_check_path=args.health_check_path,
+            plan_validity_minutes=args.validity_minutes,
+            max_changed_files=args.max_changed_files,
+            max_update_files=args.max_update_files,
+            max_upload_mib=args.max_upload_mib,
+            sftp_max_workers=args.sftp_workers,
+            auto_maintenance_mode=args.maintenance_mode,
+        )
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"[{project.name}] {result['summary']}")
+        return 2 if result["status"] == "warning" else 0
     result = execute_auto_sync(
         store=store,
         project=project,
@@ -296,6 +334,8 @@ def _run_auto_sync_project(args: argparse.Namespace) -> int:
         max_changed_files=args.max_changed_files,
         max_update_files=args.max_update_files,
         max_upload_mib=args.max_upload_mib,
+        sftp_max_workers=args.sftp_workers,
+        auto_maintenance_mode=args.maintenance_mode,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -460,6 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
     r_dry.add_argument("project", help="project name, domain, or ID")
     r_dry.add_argument("--mapping", help="optional mapping name or ID")
     r_dry.add_argument(
+        "--all-mappings",
+        action="store_true",
+        help="run dry-run for all mappings in the project",
+    )
+    r_dry.add_argument(
         "--validity-minutes",
         type=_validity_minutes,
         default=DEFAULT_PLAN_VALIDITY_MINUTES,
@@ -472,6 +517,22 @@ def build_parser() -> argparse.ArgumentParser:
     r_auto = run_subs.add_parser("auto-sync", help="run safe automated 4-stage sync pipeline")
     r_auto.add_argument("project", help="project name, domain, or ID")
     r_auto.add_argument("--mapping", help="optional mapping name or ID")
+    r_auto.add_argument(
+        "--all-mappings",
+        action="store_true",
+        help="run auto-sync for all mappings in the project",
+    )
+    r_auto.add_argument(
+        "--sftp-workers",
+        type=int,
+        default=DEFAULT_SFTP_MAX_WORKERS,
+        help=f"parallel SFTP workers (1-16, default: {DEFAULT_SFTP_MAX_WORKERS})",
+    )
+    r_auto.add_argument(
+        "--maintenance-mode",
+        action="store_true",
+        help="automatically enable/disable WordPress/Laravel maintenance mode during deploy",
+    )
     r_auto.add_argument(
         "--backup-mode",
         choices=("always", "add_only", "skip"),

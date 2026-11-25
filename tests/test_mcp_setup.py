@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import plistlib
+import stat
 import sys
 import tomllib
 from pathlib import Path
@@ -21,18 +24,45 @@ from dxsync.mcp_setup import (
     register_codex_mcp,
     unregister_client_mcp,
     unregister_codex_mcp,
+    verify_mcp_launch_spec,
 )
+from dxsync.models import Project, SiteType, SyncMapping
+from dxsync.secure_store import MemoryHostKeyStore
+from dxsync.storage import ProjectStore, get_default_state_directory
 
 
-def test_detect_mcp_launch_spec_packaged(monkeypatch, tmp_path: Path) -> None:
-    app_exe = tmp_path / "Docker XServer Sync"
-    app_exe.write_text("", encoding="utf-8")
+def test_detect_mcp_launch_spec_packaged_macos_bundle(monkeypatch, tmp_path: Path) -> None:
+    app_bundle = tmp_path / "Docker XServer Sync.app"
+    macos_dir = app_bundle / "Contents" / "MacOS"
+    macos_dir.mkdir(parents=True)
+    (app_bundle / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleExecutable": "Docker XServer Sync"})
+    )
+    python_lib = macos_dir / "Python"
+    python_lib.write_text("", encoding="utf-8")
+    app_exe = macos_dir / "Docker XServer Sync"
+    app_exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    app_exe.chmod(app_exe.stat().st_mode | stat.S_IXUSR)
+
     monkeypatch.setattr("dxsync.mcp_setup.is_packaged_executable", lambda: True)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
-    monkeypatch.setattr(sys, "argv", [str(app_exe)])
+    monkeypatch.setattr("dxsync.mcp_setup._find_executable", lambda *_a, **_kw: None)
+    monkeypatch.setattr(sys, "executable", str(python_lib))
+    monkeypatch.setattr(sys, "argv", [str(python_lib)])
     spec = detect_mcp_launch_spec()
     assert spec.source == "packaged"
-    assert spec.command == str(app_exe.resolve())
+    assert spec.command == str(app_exe)
+    assert spec.args == ("mcp",)
+
+
+def test_detect_mcp_launch_spec_prefers_dxsync_cli_even_when_packaged(monkeypatch) -> None:
+    monkeypatch.setattr("dxsync.mcp_setup.is_packaged_executable", lambda: True)
+    monkeypatch.setattr(
+        "dxsync.mcp_setup._find_executable",
+        lambda name, extra=(): "/Users/test/.local/bin/dxsync" if name == "dxsync" else None,
+    )
+    spec = detect_mcp_launch_spec()
+    assert spec.source == "dxsync-cli"
+    assert spec.command == "/Users/test/.local/bin/dxsync"
     assert spec.args == ("mcp",)
 
 
@@ -213,3 +243,64 @@ def test_gui_main_dispatches_mcp(monkeypatch) -> None:
     exit_code = gui.main(["dxsync-gui", "mcp"])
     assert exit_code == 0
     assert called is True
+
+
+def test_verify_mcp_launch_spec_checks_permissions_and_response(tmp_path: Path) -> None:
+    missing = McpLaunchSpec(command=str(tmp_path / "missing"), args=("mcp",), source="packaged")
+    ok, msg = verify_mcp_launch_spec(missing)
+    assert ok is False
+    assert "見つかりません" in msg
+
+    if os.name != "nt":
+        non_exec = tmp_path / "Python"
+        non_exec.write_text("not executable", encoding="utf-8")
+        non_exec.chmod(0o644)
+        ok, msg = verify_mcp_launch_spec(
+            McpLaunchSpec(command=str(non_exec), args=("mcp",), source="packaged")
+        )
+        assert ok is False
+        assert "実行権限がありません" in msg
+
+    spec = McpLaunchSpec(command=sys.executable, args=("-m", "dxsync.cli", "mcp"), source="python-module")
+    ok, msg = verify_mcp_launch_spec(spec)
+    assert ok is True
+    assert "確認しました" in msg
+
+
+def test_get_default_state_directory_migrates_legacy_db(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("DXSYNC_STATE_DIR", raising=False)
+    legacy_dir = tmp_path / "Docker XServer Sync"
+    canonical_dir = legacy_dir / "Docker XServer Sync"
+    legacy_dir.mkdir(parents=True)
+
+    legacy_store = ProjectStore(legacy_dir / "state.db", secure_store=MemoryHostKeyStore())
+    legacy_store.save(
+        Project.create(
+            name="stayhomelab.net",
+            site_type=SiteType.STATIC_SITE,
+            domain="stayhomelab.net",
+            ssh_host="xs1.xsrv.jp",
+            ssh_port=10022,
+            ssh_username="xs1",
+            host_key_fingerprint="SHA256:test",
+            private_key_reference="/tmp/key",
+            mappings=(
+                SyncMapping.create(
+                    name="stayhomelab.net",
+                    local_root="/tmp/dist",
+                    remote_root="/home/xs1/stayhomelab.net/public_html",
+                ),
+            ),
+        )
+    )
+
+    monkeypatch.setattr("dxsync.storage._resolve_canonical_state_directory", lambda: canonical_dir)
+
+    resolved = get_default_state_directory()
+    assert resolved == canonical_dir
+    assert (canonical_dir / "state.db").is_file()
+    assert (legacy_dir / "state.db.migrated").is_file()
+
+    migrated_store = ProjectStore(canonical_dir / "state.db", secure_store=MemoryHostKeyStore())
+    assert len(migrated_store.list_projects()) == 1
+    assert migrated_store.list_projects()[0].name == "stayhomelab.net"

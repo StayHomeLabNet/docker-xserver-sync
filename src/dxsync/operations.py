@@ -5,7 +5,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from .auto_sync_policy import AutoSyncPreferences, auto_sync_policy_issues
+from .auto_sync_policy import (
+    DEFAULT_SFTP_MAX_WORKERS,
+    AutoSyncPreferences,
+    auto_sync_policy_issues,
+    normalize_sftp_max_workers,
+)
 from .backup import (
     RemoteBackupEngine,
     delete_remote_backup,
@@ -17,6 +22,7 @@ from .deployment import (
 )
 from .health import normalize_health_check_path, perform_https_health_check
 from .integrity import project_config_sha256
+from .maintenance import enter_maintenance_mode, exit_maintenance_mode
 from .models import ChangeType, Project, SyncMapping
 from .planner import DEFAULT_PLAN_VALIDITY_MINUTES, validate_plan_validity
 from .presets import get_preset
@@ -283,6 +289,9 @@ def execute_auto_sync(
     max_changed_files: int = 1000,
     max_update_files: int = 500,
     max_upload_mib: int = 1024,
+    sftp_max_workers: int = DEFAULT_SFTP_MAX_WORKERS,
+    auto_maintenance_mode: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     if backup_mode not in {"always", "add_only", "skip"}:
         raise OperationError(
@@ -307,6 +316,7 @@ def execute_auto_sync(
             "リモートのみファイルを削除する場合は remote_only_policy='ask' を指定してください。"
         )
 
+    normalized_workers = normalize_sftp_max_workers(sftp_max_workers)
     preferences = AutoSyncPreferences(
         backup_mode=backup_mode,
         remote_only_policy=remote_only_policy,
@@ -315,6 +325,8 @@ def execute_auto_sync(
         max_changed_files=max_changed_files,
         max_update_files=max_update_files,
         max_upload_mib=max_upload_mib,
+        sftp_max_workers=normalized_workers,
+        auto_maintenance_mode=auto_maintenance_mode,
     )
 
     mapping = select_mapping(project, mapping_name)
@@ -344,6 +356,8 @@ def execute_auto_sync(
     )
     try:
         # Phase 1: Dry run & Staging
+        if progress_callback is not None:
+            progress_callback(0, 5, f"[{mapping.name}] ドライラン走査中…")
         service = DryRunService()
         dry_result = service.execute(
             site_type=project.site_type,
@@ -356,6 +370,11 @@ def execute_auto_sync(
             staging_parent=staging_dir,
             config_sha256=config_sha256,
             plan_validity=plan_validity,
+            progress_callback=(
+                (lambda p: progress_callback(p.completed, max(p.total, 1), p.detail))
+                if progress_callback is not None
+                else None
+            ),
         )
         if dry_result.has_blocking_issues:
             raise OperationError("Dry-run detected blocking issues. Auto-sync cannot proceed.")
@@ -423,6 +442,8 @@ def execute_auto_sync(
             raise OperationError("Could not retrieve staged plan from storage.")
 
         # Phase 2: Revalidate
+        if progress_callback is not None:
+            progress_callback(1, 5, f"[{mapping.name}] 同期計画を再検証中…")
         revalidator = PlanRevalidator()
         reval_result = revalidator.revalidate(
             stored=stored_plan,
@@ -435,6 +456,11 @@ def execute_auto_sync(
             reasons = "; ".join(reval_result.reasons)
             raise OperationError(f"Plan revalidation failed: {reasons}")
 
+        sftp_factory = (
+            client.open_sftp
+            if hasattr(sftp, "get_channel") and callable(getattr(client, "open_sftp", None))
+            else None
+        )
         # Phase 3: Backup
         backup_skipped = preferences.resolved_backup_skip(
             update_count, len(requested_delete_paths)
@@ -442,6 +468,8 @@ def execute_auto_sync(
         backup_id: str | None = None
         backup_files = 0
         if not backup_skipped:
+            if progress_callback is not None:
+                progress_callback(2, 5, f"[{mapping.name}] リモートバックアップ作成中…")
             backup_engine = RemoteBackupEngine()
             backup_result = backup_engine.create_backup(
                 sftp=sftp,
@@ -450,6 +478,13 @@ def execute_auto_sync(
                 remote_root=mapping.remote_root,
                 backup_root=backup_root,
                 delete_paths=requested_delete_paths,
+                progress_callback=(
+                    (lambda done, total, rel: progress_callback(done, max(total, 1), f"バックアップ中 ({done}/{total}): {rel}"))
+                    if progress_callback is not None
+                    else None
+                ),
+                sftp_factory=sftp_factory,
+                max_workers=normalized_workers,
             )
             backup_record = BackupRecord(
                 backup_id=backup_result.backup_id,
@@ -466,28 +501,53 @@ def execute_auto_sync(
             backup_id = backup_record.backup_id
             backup_files = backup_record.file_count
 
-        # Phase 4: Deploy
-        auth = DeploymentAuthorization(
-            plan_id=plan.plan_id,
-            backup_plan_id=backup_id,
-            remote_root=mapping.remote_root,
-            approved=True,
-            backup_skipped=backup_skipped,
-            delete_paths=requested_delete_paths,
-        )
-        deploy_engine = RemoteDeploymentEngine()
-        deploy_result = deploy_engine.deploy(
-            sftp=sftp,
-            plan=plan,
-            staging_root=dry_result.staging.root,
-            remote_root=mapping.remote_root,
-            authorization=auth,
-            file_mode=mapping.file_mode,
-            directory_mode=mapping.directory_mode,
-        )
-        store.set_plan_status(plan.plan_id, "used")
+        # Phase 4: Deploy (with optional WordPress/Laravel maintenance mode)
+        maintenance_message: str | None = None
+        maintenance_error: str | None = None
+        maintenance_entered = False
+        if auto_maintenance_mode:
+            maintenance_message = enter_maintenance_mode(client, sftp, project, mapping)
+            maintenance_entered = maintenance_message is not None
+
+        try:
+            if progress_callback is not None:
+                progress_callback(3, 5, f"[{mapping.name}] ファイル転送中…")
+            auth = DeploymentAuthorization(
+                plan_id=plan.plan_id,
+                backup_plan_id=backup_id,
+                remote_root=mapping.remote_root,
+                approved=True,
+                backup_skipped=backup_skipped,
+                delete_paths=requested_delete_paths,
+            )
+            deploy_engine = RemoteDeploymentEngine()
+            deploy_result = deploy_engine.deploy(
+                sftp=sftp,
+                plan=plan,
+                staging_root=dry_result.staging.root,
+                remote_root=mapping.remote_root,
+                authorization=auth,
+                file_mode=mapping.file_mode,
+                directory_mode=mapping.directory_mode,
+                progress_callback=(
+                    (lambda done, total, rel: progress_callback(done, max(total, 1), f"転送中 ({done}/{total}): {rel}"))
+                    if progress_callback is not None
+                    else None
+                ),
+                sftp_factory=sftp_factory,
+                max_workers=normalized_workers,
+            )
+            store.set_plan_status(plan.plan_id, "used")
+        finally:
+            if maintenance_entered:
+                try:
+                    exit_maintenance_mode(client, sftp, project, mapping)
+                except Exception as exc:
+                    maintenance_error = str(exc)
 
         # Phase 5: HTTPS Health Check
+        if progress_callback is not None:
+            progress_callback(4, 5, f"[{mapping.name}] HTTPS ヘルスチェック中…")
         if health_check_enabled:
             health = perform_https_health_check(
                 domain=project.domain, path=normalized_health_path
@@ -557,6 +617,9 @@ def execute_auto_sync(
             "backup_files": backup_files,
             "backup_skipped": backup_skipped,
             "health_check": health_payload,
+            "maintenance_mode": maintenance_entered,
+            "maintenance_message": maintenance_message,
+            "maintenance_error": maintenance_error,
             "summary": (
                 f"{len(deploy_result.files)}件のファイルを同期しました"
                 + (
@@ -573,6 +636,112 @@ def execute_auto_sync(
     finally:
         sftp.close()
         client.close()
+
+
+def execute_dry_run_all(
+    store: ProjectStore,
+    project: Project,
+    staging_parent: Path | None = None,
+    passphrase: str | None = None,
+    plan_validity_minutes: int = DEFAULT_PLAN_VALIDITY_MINUTES,
+    progress_callback: Callable[[DryRunProgress], None] | None = None,
+) -> dict[str, Any]:
+    if not project.mappings:
+        raise OperationError(f"Project '{project.name}' has no sync mappings configured.")
+    results: list[dict[str, Any]] = []
+    has_blocking = False
+    for mapping in project.mappings:
+        res = execute_dry_run(
+            store,
+            project,
+            mapping_name=mapping.mapping_id,
+            staging_parent=staging_parent,
+            passphrase=passphrase,
+            plan_validity_minutes=plan_validity_minutes,
+            progress_callback=progress_callback,
+        )
+        if res.get("has_blocking_issues"):
+            has_blocking = True
+        results.append(res)
+    return {
+        "status": "warning" if has_blocking else "success",
+        "project": project.name,
+        "all_mappings": True,
+        "mappings_count": len(results),
+        "has_blocking_issues": has_blocking,
+        "results": results,
+    }
+
+
+def execute_auto_sync_all(
+    store: ProjectStore,
+    project: Project,
+    staging_parent: Path | None = None,
+    passphrase: str | None = None,
+    *,
+    backup_mode: str = "always",
+    remote_only_policy: str = "keep",
+    health_check_enabled: bool = True,
+    health_check_path: str = "/",
+    plan_validity_minutes: int = DEFAULT_PLAN_VALIDITY_MINUTES,
+    max_changed_files: int = 1000,
+    max_update_files: int = 500,
+    max_upload_mib: int = 1024,
+    sftp_max_workers: int = DEFAULT_SFTP_MAX_WORKERS,
+    auto_maintenance_mode: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    if not project.mappings:
+        raise OperationError(f"Project '{project.name}' has no sync mappings configured.")
+    results: list[dict[str, Any]] = []
+    total_transferred = 0
+    total_bytes = 0
+    overall_status = "no_changes"
+    for index, mapping in enumerate(project.mappings, start=1):
+        if progress_callback is not None:
+            progress_callback(
+                index - 1,
+                len(project.mappings),
+                f"マッピング {index}/{len(project.mappings)}: {mapping.name}",
+            )
+        res = execute_auto_sync(
+            store,
+            project,
+            mapping_name=mapping.mapping_id,
+            staging_parent=staging_parent,
+            passphrase=passphrase,
+            backup_mode=backup_mode,
+            remote_only_policy=remote_only_policy,
+            health_check_enabled=health_check_enabled,
+            health_check_path=health_check_path,
+            plan_validity_minutes=plan_validity_minutes,
+            max_changed_files=max_changed_files,
+            max_update_files=max_update_files,
+            max_upload_mib=max_upload_mib,
+            sftp_max_workers=sftp_max_workers,
+            auto_maintenance_mode=auto_maintenance_mode,
+            progress_callback=progress_callback,
+        )
+        results.append(res)
+        total_transferred += int(res.get("transferred_files", 0))
+        total_bytes += int(res.get("total_bytes", 0))
+        if res.get("status") == "warning":
+            overall_status = "warning"
+        elif res.get("status") == "success" and overall_status != "warning":
+            overall_status = "success"
+    return {
+        "status": overall_status,
+        "project": project.name,
+        "all_mappings": True,
+        "mappings_count": len(results),
+        "transferred_files": total_transferred,
+        "total_bytes": total_bytes,
+        "results": results,
+        "summary": (
+            f"{len(results)}件のマッピングを処理しました"
+            f"（合計 {total_transferred}件同期 / {total_bytes:,} bytes）"
+        ),
+    }
 
 
 def execute_verify(

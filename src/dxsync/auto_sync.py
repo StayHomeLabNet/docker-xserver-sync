@@ -23,8 +23,12 @@ from PySide6.QtWidgets import (
 )
 
 from .auto_sync_policy import (
+    DEFAULT_SFTP_MAX_WORKERS,
+    MAX_SFTP_MAX_WORKERS,
+    MIN_SFTP_MAX_WORKERS,
     AutoSyncPreferences as AutoSyncPreferences,
     auto_sync_policy_issues as auto_sync_policy_issues,
+    normalize_sftp_max_workers,
 )
 from .health import normalize_health_check_path
 from .hooks import normalize_allowed_delete_folders, validate_webhook_url
@@ -75,6 +79,16 @@ def load_auto_sync_preferences(
         auto_delete_allowed_folders=normalize_allowed_delete_folders(
             str(settings.value(f"{prefix}/auto_delete_allowed_folders", ""))
         ),
+        sftp_max_workers=normalize_sftp_max_workers(
+            settings.value(
+                f"{prefix}/sftp_max_workers",
+                DEFAULT_SFTP_MAX_WORKERS,
+                type=int,
+            )
+        ),
+        auto_maintenance_mode=settings.value(
+            f"{prefix}/auto_maintenance_mode", False, type=bool
+        ),
     )
 
 
@@ -108,6 +122,8 @@ def save_auto_sync_preferences(
                 )
             ),
         ),
+        ("sftp_max_workers", normalize_sftp_max_workers(preferences.sftp_max_workers)),
+        ("auto_maintenance_mode", preferences.auto_maintenance_mode),
     ):
         settings.setValue(f"{prefix}/{key}", value)
     settings.sync()
@@ -248,6 +264,20 @@ class AutoSyncSettingsDialog(QDialog):
         self.auto_delete_folders_edit.setMaximumHeight(90)
         hooks_form.addRow("自動削除許可フォルダ", self.auto_delete_folders_edit)
 
+        self.sftp_workers_spin = QSpinBox()
+        self.sftp_workers_spin.setRange(MIN_SFTP_MAX_WORKERS, MAX_SFTP_MAX_WORKERS)
+        self.sftp_workers_spin.setValue(
+            normalize_sftp_max_workers(preferences.sftp_max_workers)
+        )
+        self.sftp_workers_spin.setSuffix(" 並列")
+        hooks_form.addRow("SFTP 並列転送数", self.sftp_workers_spin)
+
+        self.auto_maintenance_check = QCheckBox(
+            "WordPress / Laravel 同期中にメンテナンスモードを自動有効化・解除する"
+        )
+        self.auto_maintenance_check.setChecked(preferences.auto_maintenance_mode)
+        hooks_form.addRow("メンテナンス連携", self.auto_maintenance_check)
+
         hooks_note = QLabel(
             "• 同期前コマンドが失敗した場合、ドライランや同期は開始しません。\n"
             "• 自動削除許可フォルダは「確認画面をスキップ」かつバックアップ有効時のみ適用され、"
@@ -361,6 +391,8 @@ class AutoSyncSettingsDialog(QDialog):
             auto_delete_allowed_folders=normalize_allowed_delete_folders(
                 self.auto_delete_folders_edit.toPlainText()
             ),
+            sftp_max_workers=self.sftp_workers_spin.value(),
+            auto_maintenance_mode=self.auto_maintenance_check.isChecked(),
         )
 
 

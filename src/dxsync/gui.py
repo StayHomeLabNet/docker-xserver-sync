@@ -781,6 +781,15 @@ class MainWindow(QMainWindow):
         self.laravel_setup_action.triggered.connect(
             self._start_laravel_setup
         )
+        project_menu.addSeparator()
+        self.batch_dry_run_action = project_menu.addAction(
+            "全マッピング一括ドライラン"
+        )
+        self.batch_dry_run_action.triggered.connect(self._run_all_mappings_dry_run)
+        self.batch_auto_sync_action = project_menu.addAction(
+            "全マッピング一括安全同期…"
+        )
+        self.batch_auto_sync_action.triggered.connect(self._run_all_mappings_auto_sync)
 
         settings_menu = self.menuBar().addMenu("設定")
         mask_action = settings_menu.addAction("接続情報のマスク設定…")
@@ -809,6 +818,85 @@ class MainWindow(QMainWindow):
 
     def _plan_validity_minutes(self) -> int:
         return load_plan_validity_minutes(self.settings)
+
+    @Slot()
+    def _run_all_mappings_dry_run(self) -> None:
+        if self._current_project is None:
+            QMessageBox.information(
+                self,
+                "全マッピング一括ドライラン",
+                "保存済みプロジェクトを選択してから実行してください。",
+            )
+            return
+        from .operations import execute_dry_run_all
+
+        try:
+            result = execute_dry_run_all(
+                self.store,
+                self._current_project,
+                passphrase=self.passphrase_edit.text() or None,
+                plan_validity_minutes=self._plan_validity_minutes(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "全マッピング一括ドライラン", str(exc))
+            return
+        lines = [
+            f"• {item['mapping']}: {item['status']} (Plan: {item['plan_id'][:8]})"
+            for item in result["results"]
+        ]
+        QMessageBox.information(
+            self,
+            "全マッピング一括ドライラン完了",
+            f"プロジェクト「{self._current_project.name}」の {result['mappings_count']}件のマッピングを検査しました。\n\n"
+            + "\n".join(lines),
+        )
+
+    @Slot()
+    def _run_all_mappings_auto_sync(self) -> None:
+        if self._current_project is None:
+            QMessageBox.information(
+                self,
+                "全マッピング一括安全同期",
+                "保存済みプロジェクトを選択してから実行してください。",
+            )
+            return
+        prefs = self._auto_sync_preferences or load_auto_sync_preferences(
+            self.settings, self._current_project.project_id
+        )
+        answer = QMessageBox.question(
+            self,
+            "全マッピング一括安全同期の確認",
+            f"プロジェクト「{self._current_project.name}」の全 {len(self._current_project.mappings)}件のマッピングを\n"
+            "順番に安全同期（ドライラン→再検証→バックアップ→転送→HTTPS確認）しますか？",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        from .operations import execute_auto_sync_all
+
+        try:
+            result = execute_auto_sync_all(
+                self.store,
+                self._current_project,
+                passphrase=self.passphrase_edit.text() or None,
+                backup_mode=prefs.backup_mode,
+                remote_only_policy=prefs.remote_only_policy,
+                health_check_enabled=prefs.health_check_enabled,
+                health_check_path=prefs.health_check_path,
+                plan_validity_minutes=self._plan_validity_minutes(),
+                max_changed_files=prefs.max_changed_files,
+                max_update_files=prefs.max_update_files,
+                max_upload_mib=prefs.max_upload_mib,
+                sftp_max_workers=prefs.sftp_max_workers,
+                auto_maintenance_mode=prefs.auto_maintenance_mode,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "全マッピング一括安全同期エラー", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "全マッピング一括安全同期完了",
+            result["summary"],
+        )
 
     @Slot()
     def _show_mcp_integration(self) -> None:
@@ -958,15 +1046,28 @@ class MainWindow(QMainWindow):
             )
             return
         notes_block = f"\n\n概要:\n{result.notes_excerpt}" if result.notes_excerpt else ""
+        if result.recommended_asset_url:
+            prompt = (
+                f"新しいバージョン {result.latest_version} が公開されています"
+                f"（現在のバージョン: {result.current_version}）。\n\n"
+                f"推奨パッケージ: {result.recommended_asset_name}{notes_block}\n\n"
+                "推奨パッケージをブラウザでダウンロードしますか？"
+            )
+            target_url = result.recommended_asset_url
+        else:
+            prompt = (
+                f"新しいバージョン {result.latest_version} が公開されています"
+                f"（現在のバージョン: {result.current_version}）。"
+                f"{notes_block}\n\nGitHub Releases ページをブラウザで開きますか？"
+            )
+            target_url = result.release_url
         answer = QMessageBox.question(
             self,
             "新しいバージョンがあります",
-            f"新しいバージョン {result.latest_version} が公開されています"
-            f"（現在のバージョン: {result.current_version}）。"
-            f"{notes_block}\n\nGitHub Releases ページをブラウザで開きますか？",
+            prompt,
         )
         if answer == QMessageBox.Yes:
-            QDesktopServices.openUrl(QUrl(result.release_url))
+            QDesktopServices.openUrl(QUrl(target_url))
 
     @Slot(str)
     def _update_check_failed(self, message: str) -> None:

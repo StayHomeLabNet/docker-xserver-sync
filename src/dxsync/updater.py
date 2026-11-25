@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -34,6 +35,39 @@ class UpdateCheckResult:
     release_name: str = ""
     published_at: str = ""
     notes_excerpt: str = ""
+    recommended_asset_name: str = ""
+    recommended_asset_url: str = ""
+
+
+def select_recommended_asset(
+    assets: object,
+    *,
+    platform: str | None = None,
+) -> tuple[str, str]:
+    if not isinstance(assets, list):
+        return "", ""
+    target_platform = platform or sys.platform
+    valid_assets: list[tuple[str, str]] = []
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        url = str(item.get("browser_download_url") or "").strip()
+        if name and url.startswith("https://"):
+            valid_assets.append((name, url))
+
+    if target_platform == "win32":
+        patterns = ("setup", ".exe", "windows")
+    elif target_platform == "darwin":
+        patterns = ("macos", ".zip", ".dmg")
+    else:
+        patterns = ("linux", ".tar.gz")
+
+    for pattern in patterns:
+        for name, url in valid_assets:
+            if pattern in name.lower():
+                return name, url
+    return "", ""
 
 
 def parse_semver(version: str) -> tuple[tuple[int, ...], int, str]:
@@ -109,6 +143,7 @@ def check_for_updates(
     published_at = str(payload.get("published_at") or "").strip()
     body = str(payload.get("body") or "").strip()
     notes_excerpt = body[:280].rstrip() + ("…" if len(body) > 280 else "")
+    asset_name, asset_url = select_recommended_asset(payload.get("assets"))
 
     return UpdateCheckResult(
         current_version=current_version.lstrip("vV"),
@@ -118,4 +153,6 @@ def check_for_updates(
         release_name=release_name,
         published_at=published_at,
         notes_excerpt=notes_excerpt,
+        recommended_asset_name=asset_name,
+        recommended_asset_url=asset_url,
     )
